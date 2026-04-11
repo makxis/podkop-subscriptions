@@ -142,6 +142,7 @@ def update_uci_config(config_path, jobs):
     out_lines = []
     current_sec = None
     found_sections = set()
+    skip_multiline = False  # Флаг для отслеживания многострочных параметров
 
     def flush_section(sec_name):
         sec_name_lower = sec_name.lower()
@@ -163,10 +164,19 @@ def update_uci_config(config_path, jobs):
                 found_sections.add(current_sec.lower())
                 
             out_lines.append(line)
+            skip_multiline = False
             continue
         
         if current_sec and current_sec.lower() in jobs and jobs[current_sec.lower()]['links']:
             sline = line.strip()
+            
+            # Если мы находимся в режиме пропуска многострочного параметра
+            if skip_multiline:
+                # Ищем закрывающую кавычку на текущей строке
+                if "'" in sline:
+                    skip_multiline = False
+                continue
+
             if any(sline.startswith(prefix) for prefix in (
                 'list urltest_proxy_links',
                 'list selector_proxy_links',
@@ -174,6 +184,10 @@ def update_uci_config(config_path, jobs):
                 'option proxy_config_type',
                 'option proxy_string'
             )):
+                # Если в удаляемой строке нечетное количество одинарных кавычек,
+                # значит значение переносится на следующие строки. Включаем режим пропуска.
+                if line.count("'") % 2 != 0:
+                    skip_multiline = True
                 continue 
         
         out_lines.append(line)
