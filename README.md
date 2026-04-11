@@ -39,7 +39,7 @@ FOREIGN2 :: http://example.org/ :: latvia|germany|sweden :: urltest :: all
 
 ```bash
 # 1. Скачать скрипт
-wget -O /usr/bin/podkop-sub-updater.py https://raw.githubusercontent.com/procudin/podkop-subsriptions/main/podkop-sub-updater.py
+wget -O /usr/bin/podkop-sub-updater.py https://raw.githubusercontent.com/procudin/podkop-subscriptions/main/podkop-sub-updater.py
 chmod +x /usr/bin/podkop-sub-updater.py
 
 # 2. Создать и заполнить файл с конфигурацией
