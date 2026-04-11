@@ -27,12 +27,13 @@ opkg install python3-light
 # 1: Название секции в /etc/config/podkop (нечувствительно к регистру).
 # 2: Ссылка на подписку.
 # 3: Фильтр в виде регулярного выражения. Позволяет отфильтровать только нужные ссылки-подключения. Если нужны все — оставить пустым.
-# 4: Тип подключения в podkop (urltest или selector).
-# 5: Поведение, если после фильтрации ссылок не найдено (all - добавить все без фильтра, skip - пропустить секцию).
+# 4: Режим фильтрации (ifmatch - оставить все совпавшие с регуляркой ссылки, ifnotmatch - все несовпавшие).
+# 5: Тип подключения в podkop (urltest или selector).
+# 6: Поведение, если после фильтрации ссылок не найдено (all - добавить все без фильтра, skip - пропустить секцию).
 
-RUSSIA   :: http://example.org/ :: russia                :: urltest :: all
-FOREIGN1 :: http://example.org/ :: germany               :: urltest :: all
-FOREIGN2 :: http://example.org/ :: latvia|germany|sweden :: urltest :: all
+RUSSIA   :: http://example.org/ :: russia                :: ifmatch    :: urltest :: all
+FOREIGN1 :: http://example.org/ :: russia                :: ifnotmatch :: urltest :: all
+FOREIGN2 :: http://example.org/ :: latvia|germany|sweden :: ifmatch    :: urltest :: all
 ```
 
 ## Установка и использование
