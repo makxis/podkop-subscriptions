@@ -15,6 +15,7 @@ USER_AGENT = "Podkop-Subscription-Updater/1.0"
 VALID_PROTOCOLS = ('vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://', 'hy2://', 'hysteria2://')
 VALID_PTYPES = {'urltest', 'selector'}
 VALID_ON_EMPTY = {'all', 'skip'}
+VALID_MATCH_MODES = {'ifmatch', 'ifnotmatch'}
 
 def setup_syslog():
     syslog.openlog("podkop-updater", syslog.LOG_PID, syslog.LOG_USER)
@@ -39,21 +40,26 @@ def load_jobs(subs_path):
     with open(subs_path, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
-            if not line or line.startswith('#'): 
+            if not line or line.startswith('#'):
                 continue
             
             parts = [p.strip() for p in line.split('::')]
-            if len(parts) != 5:
-                log("WARN", f"Строка {line_num}: неверный формат. Ожидается ровно 5 колонок через '::'. Пропуск.")
+            if len(parts) != 6:
+                log("WARN", f"Строка {line_num}: неверный формат. Ожидается ровно 6 колонок через '::'. Пропуск.")
                 continue
 
-            sec_name, url, regex_pattern, ptype, on_empty = parts
+            sec_name, url, regex_pattern, match_mode, ptype, on_empty = parts
             sec_name = sec_name.lower()
+            match_mode = match_mode.lower()
             ptype = ptype.lower()
             on_empty = on_empty.lower()
 
             if not sec_name or not url:
                 log("WARN", f"Строка {line_num}: отсутствует имя секции или URL. Пропуск.")
+                continue
+
+            if match_mode not in VALID_MATCH_MODES:
+                log("WARN", f"Строка {line_num}: недопустимый режим '{match_mode}'. Разрешены: {', '.join(VALID_MATCH_MODES)}. Пропуск.")
                 continue
 
             if ptype not in VALID_PTYPES:
@@ -67,6 +73,7 @@ def load_jobs(subs_path):
             jobs[sec_name] = {
                 'url': url,
                 'regex': regex_pattern,
+                'match_mode': match_mode,
                 'ptype': ptype,
                 'on_empty': on_empty,
                 'links': []
@@ -78,7 +85,6 @@ def fetch_links(jobs):
     for sec, job in jobs.items():
         log("DEBUG", f"--- Обработка секции: [{sec}] ---")
         try:
-            # Используем wget, так как это надежный стандарт для OpenWrt
             cmd = ['wget', '-qO-', f'--user-agent={USER_AGENT}', job['url']]
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
             
@@ -87,7 +93,6 @@ def fetch_links(jobs):
                 continue
             
             payload = result.stdout.strip()
-            # Добавляем padding, если сервер отдал кривой Base64
             payload += '=' * (-len(payload) % 4)
             
             try:
@@ -107,7 +112,9 @@ def fetch_links(jobs):
                 if job['regex']:
                     tag = ln.split('#', 1)[1] if '#' in ln else ln
                     try:
-                        if re.search(job['regex'], tag, re.IGNORECASE):
+                        is_match = bool(re.search(job['regex'], tag, re.IGNORECASE))
+                        if (job['match_mode'] == 'ifmatch' and is_match) or \
+                           (job['match_mode'] == 'ifnotmatch' and not is_match):
                             filtered_links.append(ln)
                     except re.error:
                         log("ERROR", f"[{sec}]: Некорректное регулярное выражение '{job['regex']}'")
@@ -142,7 +149,7 @@ def update_uci_config(config_path, jobs):
     out_lines = []
     current_sec = None
     found_sections = set()
-    skip_multiline = False  # Флаг для отслеживания многострочных параметров
+    skip_multiline = False
 
     def flush_section(sec_name):
         sec_name_lower = sec_name.lower()
@@ -170,9 +177,7 @@ def update_uci_config(config_path, jobs):
         if current_sec and current_sec.lower() in jobs and jobs[current_sec.lower()]['links']:
             sline = line.strip()
             
-            # Если мы находимся в режиме пропуска многострочного параметра
             if skip_multiline:
-                # Ищем закрывающую кавычку на текущей строке
                 if "'" in sline:
                     skip_multiline = False
                 continue
@@ -184,8 +189,6 @@ def update_uci_config(config_path, jobs):
                 'option proxy_config_type',
                 'option proxy_string'
             )):
-                # Если в удаляемой строке нечетное количество одинарных кавычек,
-                # значит значение переносится на следующие строки. Включаем режим пропуска.
                 if line.count("'") % 2 != 0:
                     skip_multiline = True
                 continue 
