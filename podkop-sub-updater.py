@@ -6,6 +6,8 @@ import base64
 import re
 import syslog
 import argparse
+import hashlib
+import platform
 
 # ==========================================
 # Podkop Subscription Updater
@@ -30,6 +32,36 @@ def parse_args():
     parser.add_argument('--config', default='/etc/config/podkop', help='Путь к UCI конфигу podkop')
     parser.add_argument('--subs', default='/etc/config/podkop-subs', help='Путь к файлу подписок')
     return parser.parse_args()
+
+def get_mac_address():
+    interfaces = ['br-lan', 'eth0', 'eth1', 'lan']
+    for iface in interfaces:
+        path = f"/sys/class/net/{iface}/address"
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    mac = f.read().strip()
+                    if mac and mac != '00:00:00:00:00:00':
+                        return mac.replace(':', '').lower()
+            except Exception:
+                continue
+    return "000000000000"
+
+def get_device_model():
+    paths = ['/tmp/sysinfo/model', '/proc/device-tree/model']
+    for path in paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    model = f.read().replace('\x00', '').strip()
+                    if model:
+                        return model
+            except Exception:
+                continue
+    return "Generic OpenWrt Device"
+
+def get_kernel_version():
+    return platform.release()
 
 def load_jobs(subs_path):
     if not os.path.exists(subs_path):
@@ -81,11 +113,19 @@ def load_jobs(subs_path):
     
     return jobs
 
-def fetch_links(jobs):
+def fetch_links(jobs, hwid, device_model, kernel_ver):
     for sec, job in jobs.items():
         log("DEBUG", f"--- Обработка секции: [{sec}] ---")
         try:
-            cmd = ['wget', '-qO-', f'--user-agent={USER_AGENT}', job['url']]
+            cmd = ['wget', '-qO-', f'--user-agent={USER_AGENT}']
+
+            cmd.extend(['--header', f'X-HWID: {hwid}'])
+            cmd.extend(['--header', 'X-Device-OS: OpenWrt Linux'])
+            cmd.extend(['--header', f'X-Device-Model: {device_model}'])
+            cmd.extend(['--header', f'X-Ver-OS: {kernel_ver}'])
+
+            cmd.append(job['url'])
+
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
             
             if result.returncode != 0 or not result.stdout:
@@ -212,13 +252,21 @@ def main():
     args = parse_args()
     
     log("INFO", "=== ЗАПУСК ОБНОВЛЕНИЯ ПОДПИСОК ===")
+
+    mac = get_mac_address()
+    device_model = get_device_model()
+    kernel_ver = get_kernel_version()    
+    raw_hwid_str = f"{mac}{device_model}"
+    hwid = hashlib.md5(raw_hwid_str.encode('utf-8')).hexdigest()[:16]
+    log("INFO", f"Устройство: {device_model} (Ядро: {kernel_ver})")
+    log("INFO", f"Сгенерирован X-HWID: {hwid}")
     
     jobs = load_jobs(args.subs)
     if not jobs:
         log("ERROR", "Не найдено ни одной валидной подписки. Выход.")
         sys.exit(1)
 
-    fetch_links(jobs)
+    fetch_links(jobs, hwid, device_model, kernel_ver)
     
     old_content, new_content = update_uci_config(args.config, jobs)
 
