@@ -31,6 +31,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Обновление подписок для Podkop")
     parser.add_argument('--config', default='/etc/config/podkop', help='Путь к UCI конфигу podkop')
     parser.add_argument('--subs', default='/etc/config/podkop-subs', help='Путь к файлу подписок')
+    parser.add_argument('--force', action='store_true', help='Принудительно перезаписать конфиг podkop и перезапустить сервис')
     return parser.parse_args()
 
 def get_mac_address():
@@ -247,6 +248,10 @@ def update_uci_config(config_path, jobs):
 
     return old_content, new_content
 
+def normalize_config(text):
+    text = re.sub(r'sid=[a-zA-Z0-9]+', '', text)
+    return text.replace('\n', '').replace('\r', '')
+
 def main():
     setup_syslog()
     args = parse_args()
@@ -267,17 +272,19 @@ def main():
         sys.exit(1)
 
     fetch_links(jobs, hwid, device_model, kernel_ver)
-    
+
     old_content, new_content = update_uci_config(args.config, jobs)
+    is_content_changed = normalize_config(old_content) != normalize_config(new_content)
 
-    def normalize(text):
-        text = re.sub(r'sid=[a-zA-Z0-9]+', '', text)
-        return text.replace('\n', '').replace('\r', '')
-
-    if normalize(old_content) == normalize(new_content):
+    # Проверяем изменения, но учитываем флаг --force
+    if not args.force and not is_content_changed:
         log("INFO", "Изменений в ссылках нет. Перезапуск не требуется.")
     else:
-        log("INFO", "Применение обновлений и перезапуск Podkop...")
+        if args.force and not is_content_changed:
+            log("INFO", "Изменений нет, но указан флаг --force. Принудительная перезапись и перезапуск...")
+        else:
+            log("INFO", "Применение обновлений и перезапуск Podkop...")
+
         try:
             with open(args.config, 'w', encoding='utf-8') as f:
                 f.write(new_content)
