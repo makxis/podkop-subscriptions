@@ -34,6 +34,27 @@ def parse_args():
     parser.add_argument('--force', action='store_true', help='Принудительно перезаписать конфиг podkop и перезапустить сервис')
     return parser.parse_args()
 
+def unquote(s):
+    """URL-декодер (аналог urllib.unquote)"""
+    if '%' not in s:
+        return s
+
+    res = bytearray()
+    i = 0
+    while i < len(s):
+        if s[i] == '%' and i + 2 < len(s):
+            try:
+                res.append(int(s[i+1:i+3], 16))
+                i += 3
+                continue
+            except ValueError:
+                pass
+
+        res.extend(s[i].encode('utf-8'))
+        i += 1
+
+    return res.decode('utf-8', errors='replace')
+
 def get_mac_address():
     interfaces = ['br-lan', 'eth0', 'eth1', 'lan']
     for iface in interfaces:
@@ -151,7 +172,9 @@ def fetch_links(jobs, hwid, device_model, kernel_ver):
             filtered_links = []
             for ln in links_raw:
                 if job['regex']:
-                    tag = ln.split('#', 1)[1] if '#' in ln else ln
+                    raw_tag = ln.split('#', 1)[1] if '#' in ln else ln
+                    tag = unquote(raw_tag)
+
                     try:
                         is_match = bool(re.search(job['regex'], tag, re.IGNORECASE))
                         if (job['match_mode'] == 'ifmatch' and is_match) or \
