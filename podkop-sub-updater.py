@@ -136,38 +136,47 @@ def load_jobs(subs_path):
     return jobs
 
 def fetch_links(jobs, hwid, device_model, kernel_ver):
+    links_cache = {}
+
     for sec, job in jobs.items():
         log("DEBUG", f"--- Обработка секции: [{sec}] ---")
+        url = job['url']
+        
         try:
-            cmd = ['wget', '-qO-', f'--user-agent={USER_AGENT}']
+            if url in links_cache:
+                links_raw = links_cache[url]
+            else:
+                cmd = ['wget', '-qO-', f'--user-agent={USER_AGENT}']
 
-            cmd.extend(['--header', f'X-HWID: {hwid}'])
-            cmd.extend(['--header', 'X-Device-OS: OpenWrt Linux'])
-            cmd.extend(['--header', f'X-Device-Model: {device_model}'])
-            cmd.extend(['--header', f'X-Ver-OS: {kernel_ver}'])
+                cmd.extend(['--header', f'X-HWID: {hwid}'])
+                cmd.extend(['--header', 'X-Device-OS: OpenWrt Linux'])
+                cmd.extend(['--header', f'X-Device-Model: {device_model}'])
+                cmd.extend(['--header', f'X-Ver-OS: {kernel_ver}'])
 
-            cmd.append(job['url'])
+                cmd.append(url)
 
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
-            
-            if result.returncode != 0 or not result.stdout:
-                log("ERROR", f"[{sec}]: Ошибка скачивания -> {result.stderr.strip() or 'Пустой ответ'}")
-                continue
-            
-            payload = result.stdout.strip()
-            payload += '=' * (-len(payload) % 4)
-            
-            try:
-                decoded_text = base64.b64decode(payload).decode('utf-8')
-            except Exception:
-                log("ERROR", f"[{sec}]: Ответ не является валидным Base64")
-                continue
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+                
+                if result.returncode != 0 or not result.stdout:
+                    log("ERROR", f"[{sec}]: Ошибка скачивания -> {result.stderr.strip() or 'Пустой ответ'}")
+                    continue
+                
+                payload = result.stdout.strip()
+                payload += '=' * (-len(payload) % 4)
+                
+                try:
+                    decoded_text = base64.b64decode(payload).decode('utf-8')
+                except Exception:
+                    log("ERROR", f"[{sec}]: Ответ не является валидным Base64")
+                    continue
 
-            links_raw = [ln.strip() for ln in decoded_text.splitlines() if ln.strip().startswith(VALID_PROTOCOLS)]
-            
-            if not links_raw:
-                log("WARN", f"[{sec}]: Не найдено ссылок с поддерживаемыми протоколами.")
-                continue
+                links_raw = [ln.strip() for ln in decoded_text.splitlines() if ln.strip().startswith(VALID_PROTOCOLS)]
+                
+                if not links_raw:
+                    log("WARN", f"[{sec}]: Не найдено ссылок с поддерживаемыми протоколами.")
+                    continue
+                
+                links_cache[url] = links_raw
 
             filtered_links = []
             for ln in links_raw:
