@@ -281,7 +281,8 @@ def update_uci_config(config_path, jobs):
     return old_content, new_content
 
 def normalize_config(text):
-    text = re.sub(r'sid=[a-zA-Z0-9]+', '', text)
+    text = re.sub(r'sid=[a-zA-Z0-9]+', '', text) # ignore dynamic sid
+    text = re.sub(r'#[^\'\n\r]*', '', text)      # ignore link comments
     return text.replace('\n', '').replace('\r', '')
 
 def main():
