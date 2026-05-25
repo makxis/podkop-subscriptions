@@ -66,3 +66,4 @@ cp -f /etc/config/podkop-backup /etc/config/podkop
 # Обновление каждые 15 минут
 */15 * * * * /usr/bin/podkop-sub-updater.py > /dev/null 2>&1
 ```
+123
