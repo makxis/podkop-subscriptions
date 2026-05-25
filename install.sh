@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${REPO:-aisiq/podkop-subscriptions}"
+REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
 PANEL_MODE="ask"
