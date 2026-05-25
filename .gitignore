@@ -5,7 +5,7 @@
 __pycache__/
 *.pyc
 # Do not commit real OpenWrt backups with private proxy links
-podkop
-root
-podkop-local-links
+/podkop
+/root
+/podkop-local-links
 /etc/config/podkop*
