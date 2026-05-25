@@ -1,75 +1,98 @@
-# Podkop Subscriptions + optional LuCI panel
+# Podkop Subscriptions
 
-This repository is a cleaned overlay for `procudin/podkop-subscriptions` with an optional LuCI tab for managing subscription groups and schedules inside the existing Podkop LuCI page.
+Дополнение для Podkop, которое добавляет автоматическое обновление proxy-ссылок из подписок и опциональную LuCI-вебморду для управления подписками.
 
-## What it does
+Проект ставится отдельно от Podkop. Сам Podkop должен быть установлен заранее.
 
-- Installs `podkop-sub-updater.py` to `/usr/bin/podkop-sub-updater.py`.
-- Installs `podkop-sub-cron-sync` to `/usr/bin/podkop-sub-cron-sync`.
-- Does **not** install Podkop itself. Install Podkop and its LuCI app separately first.
-- Uses `/etc/config/podkop` as the default UCI source for subscription groups.
-- Optionally overlays the existing Podkop LuCI app with a new `Подписки` tab.
-- Keeps private proxy links out of GitHub. Put local/manual proxy links on the router in `/etc/config/podkop-local-links`.
+## Что делает
 
-## One-line install
+- загружает proxy-ссылки из HTTP/HTTPS-подписок или локальных файлов;
+- поддерживает vless://, ss://, trojan://, socks4://, socks4a://, socks5://, hy2://, hysteria2://;
+- умеет читать plain-text и base64-подписки;
+- фильтрует ссылки через regex;
+- записывает найденные proxy в выбранные секции Podkop;
+- поддерживает режимы urltest и selector;
+- синхронизирует расписание обновлений с cron;
+- добавляет вкладку «Подписки» в LuCI-интерфейс Podkop;
+- позволяет хранить локальные proxy-ссылки в /etc/config/podkop-local-links.
 
-After uploading this repository to GitHub, replace `aisiq/podkop-subscriptions` with your actual fork if needed:
+## Установка
 
-```sh
-wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
-```
+Podkop должен быть установлен до запуска этого инсталлятора.
 
-Non-interactive variants:
+Интерактивная установка:
 
-```sh
-# Core updater only, no LuCI panel
-wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --no-panel
+    wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
 
-# Core updater + LuCI panel, no question
-wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --with-panel
-```
+Только updater и cron-sync, без LuCI-панели:
 
-If the repository name or branch is different:
+    wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --no-panel
 
-```sh
-REPO=your-login/your-repo BRANCH=main sh -c "$(wget -qO- https://raw.githubusercontent.com/your-login/your-repo/main/install.sh)"
-```
+Updater, cron-sync и LuCI-панель сразу:
 
-## Manual test
+    wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --with-panel
 
-```sh
-/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop --force
-logread -e podkop-updater
-```
+## Установка из локальной папки
 
-## LuCI usage
+Если архив уже распакован на роутере:
 
-Open LuCI → Podkop → `Подписки`.
+    cd /tmp/podkop-subscriptions-clean
+    sh install.sh --local --with-panel
 
-The tab adds:
+или только updater:
 
-- subscription groups;
-- source list per group;
-- regex filter and match mode;
-- `urltest` or `selector` target type;
-- cron schedules with jitter;
-- local proxy links editor for `/etc/config/podkop-local-links`;
-- manual updater run button.
+    sh install.sh --local --no-panel
 
-Press **Save & Apply** before using the manual run button. After saving, `podkop-sub-cron-sync` regenerates only updater-managed cron lines.
+## Файлы, которые устанавливаются
 
-## Important security note
+Обязательная часть:
 
-Do not commit real `/etc/config/podkop`, `/etc/crontabs/root`, or `/etc/config/podkop-local-links` from your router. These files may contain proxy URLs, UUIDs, public keys, SNI values, comments, and other sensitive operational details.
+    /usr/bin/podkop-sub-updater.py
+    /usr/bin/podkop-sub-cron-sync
+    /etc/config/podkop-local-links
 
-## Uninstall
+Опциональная LuCI-панель:
 
-```sh
-wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
-```
+    /www/luci-static/resources/view/podkop/podkop.js
+    /www/luci-static/resources/view/podkop/main.js
+    /www/luci-static/resources/view/podkop/subscriptions.js
+    /usr/share/rpcd/acl.d/luci-app-podkop.json
 
-To also remove `/etc/config/podkop-local-links`:
+## Настройка
 
-```sh
-sh /tmp/podkop-sub-uninstall.sh --purge-config
-```
+После установки LuCI-панели открой:
+
+    LuCI -> Services -> Podkop -> Подписки
+
+Во вкладке можно настроить группы подписок, целевые секции Podkop, источники, regex-фильтры, расписание обновлений и локальные proxy-ссылки.
+
+После изменения настроек нужно нажать Save & Apply.
+
+## Ручной запуск updater
+
+    /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop --force
+
+## Синхронизация cron
+
+    /usr/bin/podkop-sub-cron-sync
+
+## Удаление
+
+    wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
+
+или из локальной папки:
+
+    sh uninstall.sh
+
+## Безопасность
+
+Нельзя выкладывать в публичный репозиторий:
+
+    /etc/config/podkop
+    /etc/config/podkop-local-links с реальными ссылками
+    /etc/crontabs/root
+    резервные копии OpenWrt
+    архивы с роутера
+    реальные vless/ss/trojan/hy2/socks ссылки
+
+В репозитории должны быть только скрипты, LuCI-файлы и обезличенные примеры.
