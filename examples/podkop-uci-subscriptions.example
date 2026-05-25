@@ -1,0 +1,19 @@
+# Add these sections to /etc/config/podkop through LuCI tab "Подписки"
+# or manually with uci/config editing.
+
+config subscription_group
+	option enabled '1'
+	option target_section 'main'
+	list source 'https://example.org/subscription'
+	list source 'file:///etc/config/podkop-local-links'
+	option regex 'russia|ru|москва'
+	option match_mode 'ifnotmatch'
+	option proxy_type 'urltest'
+	option on_empty 'skip'
+
+config subscription_schedule
+	option enabled '1'
+	option hour '3'
+	option minute '0'
+	option jitter '1800'
+	option force '0'
