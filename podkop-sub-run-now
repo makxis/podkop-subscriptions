@@ -1,0 +1,36 @@
+#!/bin/sh
+
+VERSION_FILE="/usr/share/podkop-subscriptions/VERSION"
+VERSION="unknown"
+[ -f "$VERSION_FILE" ] && VERSION="$(cat "$VERSION_FILE" 2>/dev/null | head -n 1)"
+
+case "$1" in
+  --version)
+    echo "podkop-subscriptions $VERSION"
+    exit 0
+    ;;
+esac
+
+LOCK="/tmp/podkop-sub-updater.lock"
+LOG="/tmp/podkop-sub-updater.log"
+
+if mkdir "$LOCK" 2>/dev/null; then
+  (
+    trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Manual updater started, podkop-subscriptions $VERSION"
+    /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop --force
+    rc="$?"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Manual updater finished, exit=$rc"
+    exit "$rc"
+  ) >"$LOG" 2>&1 &
+
+  echo "Updater запущен в фоне. Версия: $VERSION"
+  echo "Лог последнего ручного запуска: $LOG"
+  echo "Проверить: tail -n 80 $LOG"
+  exit 0
+fi
+
+echo "Updater уже выполняется. Повторный запуск пропущен."
+echo "Lock: $LOCK"
+echo "Лог: $LOG"
+exit 0
