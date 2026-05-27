@@ -1,6 +1,6 @@
 # Podkop Subscriptions + optional LuCI panel
 
-[Русская документация](README_RU.md)
+[README_RU](README_RU.md)
 
 This repository contains an add-on for Podkop that adds subscription-based proxy link updates and an optional LuCI tab inside the existing Podkop LuCI page.
 
