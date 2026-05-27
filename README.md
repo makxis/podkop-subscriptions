@@ -1,185 +1,151 @@
-# Podkop Subscriptions
+# Podkop Subscriptions + optional LuCI panel
 
-Дополнение для Podkop, которое добавляет автоматическое обновление proxy-ссылок из подписок и опциональную LuCI-вебморду для управления подписками.
+This repository is a cleaned overlay for `procudin/podkop-subscriptions` with an optional LuCI tab for managing subscription groups and schedules inside the existing Podkop LuCI page.
 
-Проект ставится отдельно от Podkop. Сам Podkop должен быть установлен заранее.
+## What it does
 
-## Что делает
+- Installs `podkop-sub-updater.py` to `/usr/bin/podkop-sub-updater.py`.
+- Installs `podkop-sub-cron-sync` to `/usr/bin/podkop-sub-cron-sync`.
+- Does **not** install Podkop itself. Install Podkop and its LuCI app separately first.
+- Uses `/etc/config/podkop` as the default UCI source for subscription groups.
+- Optionally overlays the existing Podkop LuCI app with a new `Подписки` tab.
+- Keeps private proxy links out of GitHub. Put local/manual proxy links on the router in `/etc/config/podkop-local-links`.
 
-- загружает proxy-ссылки из HTTP/HTTPS-подписок или локальных файлов;
-- поддерживает `vless://`, `ss://`, `trojan://`, `socks4://`, `socks4a://`, `socks5://`, `hy2://`, `hysteria2://`;
-- умеет читать plain-text и base64-подписки;
-- фильтрует ссылки через regex;
-- записывает найденные proxy в выбранные секции Podkop;
-- поддерживает режимы `urltest` и `selector`;
-- синхронизирует расписание обновлений с cron;
-- добавляет вкладку «Подписки» в LuCI-интерфейс Podkop;
-- позволяет хранить локальные proxy-ссылки в `/etc/config/podkop-local-links`.
+## One-line install
 
-## Проверенная конфигурация
+After uploading this repository to GitHub, replace `aisiq/podkop-subscriptions` with your actual fork if needed:
 
-Текущая версия скрипта и LuCI-панели проверялась на следующей конфигурации:
+```sh
+wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
+```
 
-- OpenWrt: `24.10.4`,`24.10.5`
-- Podkop: `v0.7.17`
-- LuCI App Podkop: `v0.7.17`
-- Sing-box: `1.12.22`
+Non-interactive variants:
 
-На других версиях OpenWrt, Podkop, LuCI App Podkop или Sing-box работоспособность не гарантируется.  
-Если используется другая версия, рекомендуется сначала проверить установку на тестовом роутере или сделать резервную копию конфигурации.
+```sh
+# Core updater only, no LuCI panel
+wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --no-panel
 
-## Установка
+# Core updater + LuCI panel, no question
+wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --with-panel
+```
 
-Podkop должен быть установлен до запуска этого инсталлятора.
+If the repository name or branch is different:
 
-Интерактивная установка:
+```sh
+REPO=your-login/your-repo BRANCH=main sh -c "$(wget -qO- https://raw.githubusercontent.com/your-login/your-repo/main/install.sh)"
+```
 
-    wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
+## Manual test
 
-Только updater и cron-sync, без LuCI-панели:
+```sh
+/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop --force
+logread -e podkop-updater
+```
 
-    wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --no-panel
+## LuCI usage
 
-Updater, cron-sync и LuCI-панель сразу:
+Open LuCI → Podkop → `Подписки`.
 
-    wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --with-panel
+The tab adds:
 
-## Что делать после установки
+- subscription groups;
+- source list per group;
+- regex filter and match mode;
+- `urltest` or `selector` target type;
+- cron schedules with jitter;
+- local proxy links editor for `/etc/config/podkop-local-links`;
+- manual updater run button.
 
-После установки скрипта и LuCI-панели нужно выполнить начальную настройку Podkop.
+Press **Save & Apply** before using the manual run button. After saving, `podkop-sub-cron-sync` regenerates only updater-managed cron lines.
 
-Важно: updater записывает ссылки только в уже существующие секции Podkop. Поэтому сначала нужно создать хотя бы одну секцию Podkop.
+## Important security note
 
-Порядок настройки:
+Do not commit real `/etc/config/podkop`, `/etc/crontabs/root`, or `/etc/config/podkop-local-links` from your router. These files may contain proxy URLs, UUIDs, public keys, SNI values, comments, and other sensitive operational details.
 
-1. Открой LuCI:
+## Uninstall
 
-       Services -> Podkop
+```sh
+wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/aisiq/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
+```
 
-2. Перейди во вкладку «Секции».
+To also remove `/etc/config/podkop-local-links`:
 
-3. Добавь хотя бы одну секцию Podkop.
+```sh
+sh /tmp/podkop-sub-uninstall.sh --purge-config
+```
 
-4. В эту секцию добавь хотя бы один proxy-ключ. Это может быть любой временный валидный ключ. Он нужен, чтобы секция была создана и появилась в списке для подписок.
+## Local archive install
 
-5. Нажми `Save & Apply`.
+If the repository is not pushed to GitHub yet and the archive is already unpacked on OpenWrt:
 
-6. Подожди, пока Podkop применит настройки и перезапустится.
+```sh
+cd /tmp/podkop-subscriptions-clean
+sh install.sh --local --no-panel
+sh install.sh --local --with-panel
+```
 
-7. Перейди во вкладку «Подписки».
+When run from an unpacked archive, `install.sh` uses local files by default. Use `--remote` to force downloading from GitHub.
 
-8. Создай группу подписок.
+## Новая логика обновления и автоочистки
 
-9. Укажи:
-   - целевую секцию Podkop;
-   - ссылку на подписку или локальный источник;
-   - regex-фильтр, если нужен;
-   - режим фильтрации `ifmatch` или `ifnotmatch`;
-   - тип proxy-группы `urltest` или `selector`;
-   - поведение при пустом результате фильтра;
-   - расписание обновлений, если нужно.
+Начиная с stateful-версии, подписка больше не используется как полный источник истины для перезаписи секции Podkop.
 
-10. Нажми `Save & Apply`.
+Алгоритм стал таким:
 
-11. Подожди, пока Podkop применит настройки.
+- подписка только добавляет новые proxy-ключи;
+- уже существующие ключи не удаляются только потому, что исчезли из подписки;
+- если подписка не загрузилась или вернула 0 валидных ключей, текущая секция Podkop не меняется;
+- каждый час запускается пассивный режим `--observe-only`, который читает текущее состояние URLTest из Podkop и обновляет `fail_count` в `/etc/podkop-subscriptions/state.json`;
+- если ключ рабочий, `fail_count` сбрасывается в `0`;
+- если ключ отображается в Podkop как `N/A` или без delay/history, `fail_count` увеличивается на `1`;
+- ключ удаляется только во время ночного запуска updater'а, если `fail_count >= 72`;
+- ключи из `/etc/config/podkop-local-links` считаются локальными пользовательскими ключами и защищены от автоматического удаления, даже если `fail_count >= 72`;
+- днём `--observe-only` не меняет `/etc/config/podkop` и не перезапускает Podkop;
+- Podkop перезапускается только если ночью реально были добавлены новые ключи, удалены умершие ключи или очищены дубликаты.
 
-12. Нажми кнопку запуска updater во вкладке «Подписки» или запусти updater вручную:
+Это сделано, чтобы временные проблемы связи, DNS, мобильного покрытия или белых списков не приводили к немедленному удалению ключей.
+Если роутер был выключен несколько дней, счётчик `fail_count` не растёт. После включения подсчёт продолжается с прежнего значения.
 
-       /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop --force
+Файл состояния:
 
-После успешного запуска updater заменит proxy-ссылки в выбранной секции Podkop на ссылки из подписки с учётом выбранных фильтров.
+    /etc/podkop-subscriptions/state.json
 
-Если после запуска updater в секции ничего не изменилось, проверь:
-- доступность ссылки подписки;
-- regex-фильтр;
-- режим фильтрации;
-- наличие выбранной целевой секции Podkop;
-- логи updater через `logread | grep -i podkop`.
+Ручная пассивная проверка:
 
-## Установка из локальной папки
+    /usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop
 
-Если архив уже распакован на роутере:
-
-    cd /tmp/podkop-subscriptions-clean
-    sh install.sh --local --with-panel
-
-или только updater:
-
-    sh install.sh --local --no-panel
-
-## Файлы, которые устанавливаются
-
-Обязательная часть:
-
-    /usr/bin/podkop-sub-updater.py
-    /usr/bin/podkop-sub-cron-sync
-    /etc/config/podkop-local-links
-
-Опциональная LuCI-панель:
-
-    /www/luci-static/resources/view/podkop/podkop.js
-    /www/luci-static/resources/view/podkop/main.js
-    /www/luci-static/resources/view/podkop/subscriptions.js
-    /usr/share/rpcd/acl.d/luci-app-podkop.json
-
-## Настройка через LuCI
-
-После установки LuCI-панели открой:
-
-    LuCI -> Services -> Podkop -> Подписки
-
-Во вкладке можно настроить:
-
-- группы подписок;
-- целевые секции Podkop;
-- источники подписок;
-- regex-фильтр;
-- режим фильтрации `ifmatch` или `ifnotmatch`;
-- тип proxy-группы `urltest` или `selector`;
-- поведение при пустом результате фильтра;
-- расписание обновлений;
-- локальные proxy-ссылки.
-
-После изменения настроек нужно нажать `Save & Apply`.
-
-## Ручной запуск updater
+Ручное ночное обслуживание:
 
     /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop --force
 
-## Синхронизация cron
+`podkop-sub-cron-sync` автоматически добавляет hourly observer в cron:
 
-    /usr/bin/podkop-sub-cron-sync
+    0 * * * * /usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop 2>&1 | logger -t podkop-sub-health
 
-## Локальные ссылки
+А ночные обновления берутся из расписаний, созданных во вкладке «Подписки».
 
-Локальные proxy-ссылки можно хранить в файле:
+## Поведение при медленной или недоступной подписке
 
-    /etc/config/podkop-local-links
+HTTP/HTTPS-источник подписки загружается с фиксированными повторными попытками: 3 попытки, каждая с таймаутом 45 секунд. Эти параметры специально не вынесены наружу, чтобы поведение updater было одинаковым при ручном запуске и при запуске из cron.
 
-Пример:
+Если источник не ответил после всех трёх попыток, updater считает этот источник недоступным, пишет ошибку в лог и не меняет текущие рабочие ключи по этой причине.
 
-    vless://UUID@example.org:443?security=reality&type=tcp&pbk=PUBLIC_KEY&sni=example.org#Example
-    ss://method:password@example.org:8388#Example
 
-Не публикуйте реальные proxy-ссылки, UUID, ключи, токены подписок и содержимое `/etc/config/podkop`.
 
-## Удаление
+## Примечание к OpenWrt python3-light
 
-    wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
+Скрипт не требует `python3-urllib`: percent-decoding реализован внутри, чтобы работать на минимальном `python3-light`.
 
-или из локальной папки:
+## Ручной запуск из LuCI без XHR timeout
 
-    sh uninstall.sh
+Кнопка `Запустить updater` во вкладке «Подписки» запускает обновление в фоне через `/usr/bin/podkop-sub-run-now` и сразу возвращает ответ в LuCI. Это нужно потому, что источник подписки может опрашиваться до трёх раз по 45 секунд, и обычный синхронный XHR-запрос LuCI не должен ждать завершения всего updater.
 
-## Безопасность
+Лог последнего ручного запуска:
 
-Нельзя выкладывать в публичный репозиторий:
+    /tmp/podkop-sub-updater.log
 
-    /etc/config/podkop
-    /etc/config/podkop-local-links с реальными ссылками
-    /etc/crontabs/root
-    резервные копии OpenWrt
-    архивы с роутера
-    реальные vless/ss/trojan/hy2/socks ссылки
+Посмотреть из SSH:
 
-В репозитории должны быть только скрипты, LuCI-файлы и обезличенные примеры.
+    tail -n 80 /tmp/podkop-sub-updater.log
+
+Если updater уже выполняется, повторный запуск через кнопку будет пропущен по lock-файлу `/tmp/podkop-sub-updater.lock`.

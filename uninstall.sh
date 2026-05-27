@@ -34,8 +34,10 @@ if [ -f "$CRON_FILE" ]; then
   /etc/init.d/cron restart >/dev/null 2>&1 || true
 fi
 
-rm -f /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync
+rm -f /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now
+rm -rf /usr/share/podkop-subscriptions
 rm -f /www/luci-static/resources/view/podkop/subscriptions.js
+rm -f /tmp/podkop-sub-updater.lock /tmp/podkop-sub-updater.log
 restore_latest_backup /www/luci-static/resources/view/podkop/podkop.js
 restore_latest_backup /www/luci-static/resources/view/podkop/main.js
 restore_latest_backup /usr/share/rpcd/acl.d/luci-app-podkop.json

@@ -5,6 +5,7 @@
 "require baseclass";
 
 const LOCAL_LINKS = "/etc/config/podkop-local-links";
+const PODKOP_SUBSCRIPTIONS_VERSION = "2.6";
 
 function notifyOutput(title, res) {
   let out = "";
@@ -236,20 +237,26 @@ return baseclass.extend({
       form.Button,
       "_run_now",
       _("Запустить обновление сейчас"),
-      _("Сначала нажмите Save & Apply, затем используйте эту кнопку для проверки.")
+      _("Сначала нажмите Save & Apply. Кнопка запускает updater в фоне, результат смотрите в /tmp/podkop-sub-updater.log или через logread.")
     );
     o.inputtitle = _("Запустить updater");
     o.inputstyle = "reload";
     o.onclick = function() {
-      return fs.exec("/usr/bin/podkop-sub-updater.py", [
-        "--subs", "/etc/config/podkop",
-        "--config", "/etc/config/podkop",
-        "--force"
-      ]).then(function(res) {
-        notifyOutput("Updater finished", res);
+      return fs.exec("/usr/bin/podkop-sub-run-now", []).then(function(res) {
+        notifyOutput("Updater started", res);
       }).catch(function(err) {
         ui.addNotification(null, E("pre", { style: "white-space: pre-wrap" }, String(err)), "danger");
       });
+    };
+
+    o = section.option(
+      form.DummyValue,
+      "_podkop_subscriptions_version",
+      ""
+    );
+    o.rawhtml = true;
+    o.cfgvalue = function() {
+      return '<div style="margin-top:8px;color:#888;font-size:11px;line-height:1.3">Podkop Subscriptions v' + PODKOP_SUBSCRIPTIONS_VERSION + '</div>';
     };
   }
 });
