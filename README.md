@@ -10,7 +10,7 @@ The add-on is installed separately from Podkop. It does **not** install Podkop i
 
 This version was tested on:
 
-- OpenWrt: `24.10.5`
+- OpenWrt: `24.10.3`-`24.10.5`
 - Podkop: `v0.7.17`
 - LuCI App Podkop: `v0.7.17`
 - Sing-box: `1.12.22`
