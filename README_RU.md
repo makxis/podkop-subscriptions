@@ -153,17 +153,3 @@ wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/po
 ```sh
 sh /tmp/podkop-sub-uninstall.sh --purge-config
 ```
-
-## Безопасность
-
-Нельзя выкладывать в публичный репозиторий:
-
-- `/etc/config/podkop`;
-- `/etc/config/podkop-local-links` с реальными ссылками;
-- `/etc/crontabs/root`;
-- резервные копии OpenWrt;
-- архивы с роутера;
-- реальные `vless://`, `ss://`, `trojan://`, `hy2://`, `hysteria2://`, `socks://` ссылки;
-- UUID, ключи, SNI, `pbk`, `sid`, токены подписок и другие приватные параметры.
-
-В репозитории должны быть только скрипты, LuCI-файлы и обезличенные примеры.
