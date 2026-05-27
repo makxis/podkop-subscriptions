@@ -153,17 +153,3 @@ Remove local links file too:
 ```sh
 sh /tmp/podkop-sub-uninstall.sh --purge-config
 ```
-
-## Security
-
-Do not commit real router configs or backups to GitHub:
-
-- `/etc/config/podkop`;
-- `/etc/config/podkop-local-links` with real links;
-- `/etc/crontabs/root`;
-- OpenWrt backups;
-- router archives;
-- real `vless://`, `ss://`, `trojan://`, `hy2://`, `hysteria2://`, or `socks://` links;
-- UUIDs, keys, SNI values, `pbk`, `sid`, subscription tokens, or other private parameters.
-
-The repository should contain only scripts, LuCI overlay files, and sanitized examples.
