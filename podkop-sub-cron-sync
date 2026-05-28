@@ -3,6 +3,7 @@
 . /lib/functions.sh
 
 CRON_FILE="/etc/crontabs/root"
+SUB_CFG="/etc/config/podkop_subscriptions"
 UPDATER_TAG="# podkop-sub-updater"
 HEALTH_TAG="# podkop-sub-health"
 
@@ -11,6 +12,13 @@ touch "$CRON_FILE"
 # Удаляем только наши управляемые строки. Штатный podkop list_update не трогаем.
 grep -v "$UPDATER_TAG" "$CRON_FILE" | grep -v "$HEALTH_TAG" > "$CRON_FILE.tmp"
 mv "$CRON_FILE.tmp" "$CRON_FILE"
+
+if [ ! -f "$SUB_CFG" ]; then
+  /etc/init.d/cron enable >/dev/null 2>&1
+  /etc/init.d/cron restart >/dev/null 2>&1
+  echo "Subscriptions config not found: $SUB_CFG"
+  exit 0
+fi
 
 GROUPS_COUNT=0
 SCHEDULES_COUNT=0
@@ -47,9 +55,9 @@ add_schedule() {
   [ "$force" = "1" ] && force_arg="--force"
 
   if [ "$jitter" -gt 0 ] 2>/dev/null; then
-    cmd="sleep \$(awk 'BEGIN{srand(); print int(rand()*$jitter)}') && /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop $force_arg 2>&1 | logger -t podkop-updater-cron"
+    cmd="sleep \$(awk 'BEGIN{srand(); print int(rand()*$jitter)}') && /usr/bin/podkop-sub-updater.py --subs $SUB_CFG --config /etc/config/podkop $force_arg 2>&1 | logger -t podkop-updater-cron"
   else
-    cmd="/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop $force_arg 2>&1 | logger -t podkop-updater-cron"
+    cmd="/usr/bin/podkop-sub-updater.py --subs $SUB_CFG --config /etc/config/podkop $force_arg 2>&1 | logger -t podkop-updater-cron"
   fi
 
   echo "$minute $hour * * * $cmd $UPDATER_TAG:$section" >> "$CRON_FILE"
@@ -57,11 +65,10 @@ add_schedule() {
 }
 
 add_hourly_observer() {
-  # Пассивная проверка каждый час. Конфиг Podkop не меняет и сервис не рестартит.
   echo "0 * * * * /usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop 2>&1 | logger -t podkop-sub-health $HEALTH_TAG:auto" >> "$CRON_FILE"
 }
 
-config_load podkop
+config_load podkop_subscriptions
 config_foreach count_group subscription_group
 
 if [ "$GROUPS_COUNT" -eq 0 ]; then

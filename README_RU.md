@@ -2,32 +2,18 @@
 
 [English documentation](README.md)
 
-Дополнение для Podkop, которое добавляет обновление proxy-ключей из подписок и опциональную вкладку `Подписки` в существующий LuCI-интерфейс Podkop.
+Дополнение для Podkop, которое обновляет proxy-ключи из подписок и может добавить вкладку `Подписки` в LuCI.
 
 Проект устанавливается отдельно от Podkop. Сам Podkop должен быть установлен заранее.
 
 ## Проверенная конфигурация
-
-Текущая версия проверялась на следующей конфигурации:
 
 - OpenWrt: `24.10.3`-`24.10.5`
 - Podkop: `v0.7.17`
 - LuCI App Podkop: `v0.7.17`
 - Sing-box: `1.12.22`
 
-На более старых или более новых версиях OpenWrt, Podkop, LuCI App Podkop или Sing-box работа не гарантируется. LuCI-часть устанавливается поверх существующих файлов Podkop, поэтому при изменении структуры Podkop в других версиях интерфейс может работать некорректно.
-
-## Что устанавливается
-
-- `/usr/bin/podkop-sub-updater.py` — основной updater подписок и обслуживания ключей.
-- `/usr/bin/podkop-sub-cron-sync` — синхронизация расписания с cron.
-- `/usr/bin/podkop-sub-run-now` — фоновый ручной запуск updater.
-- `/usr/share/podkop-subscriptions/VERSION` — версия установленного дополнения.
-- `/etc/podkop-subscriptions/state.json` — внутреннее состояние ключей и счётчики `fail_count`.
-- `/etc/config/podkop-local-links` — локальные пользовательские ключи, защищённые от автоудаления.
-- Опционально: LuCI-вкладка `Подписки` внутри существующей страницы Podkop.
-
-## Установка
+## Быстрая установка
 
 Интерактивная установка:
 
@@ -35,112 +21,139 @@
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
 ```
 
-Только core-часть, без LuCI-панели:
+Только core-часть без LuCI:
 
 ```sh
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --no-panel
 ```
 
-Core-часть и LuCI-панель сразу:
+Core-часть и LuCI-панель:
 
 ```sh
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --with-panel
 ```
 
-## Первичная настройка
+## Файлы
 
-Перед настройкой подписок нужно открыть существующий Podkop в LuCI и создать хотя бы одну секцию Podkop с хотя бы одним валидным proxy-ключом.
+Основной конфиг дополнения:
 
-После этого нужно нажать **Save & Apply** и дождаться применения конфигурации Podkop.
-
-Затем открыть вкладку `Подписки` и настроить:
-
-- целевую секцию Podkop;
-- источник подписки или локальный источник;
-- regex-фильтр, если нужен;
-- режим фильтрации;
-- тип proxy-группы: `urltest` или `selector`;
-- расписание обновления.
-
-После настройки снова нажать **Save & Apply**, дождаться применения настроек и запустить updater из LuCI или SSH.
-
-## Проверка версии
-
-```sh
-/usr/bin/podkop-sub-updater.py --version
-/usr/bin/podkop-sub-run-now --version
-cat /usr/share/podkop-subscriptions/VERSION
+```text
+/etc/config/podkop_subscriptions
 ```
 
-Во вкладке `Подписки` внизу также отображается версия установленного дополнения.
+Родной конфиг Podkop, куда updater записывает итоговые ключи:
 
-## Ручные команды
-
-Пассивная проверка состояния ключей без изменения конфига Podkop:
-
-```sh
-/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop
+```text
+/etc/config/podkop
 ```
 
-Ручной maintenance-запуск:
+Локальные ручные ключи:
 
-```sh
-/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop --force
+```text
+/etc/config/podkop-local-links
 ```
 
-Фоновый ручной запуск:
+Служебное состояние updater:
 
-```sh
-/usr/bin/podkop-sub-run-now
-tail -n 80 /tmp/podkop-sub-updater.log
+```text
+/etc/podkop-subscriptions/state.json
 ```
 
-Синхронизация cron:
+Лог ручного запуска:
+
+```text
+/tmp/podkop-sub-updater.log
+```
+
+## Настройка без вебморды
+
+Откройте один основной файл:
+
+```sh
+vi /etc/config/podkop_subscriptions
+```
+
+Пример рабочей группы:
+
+```text
+config subscription_group 'main'
+    option enabled '1'
+    option target_section 'main'
+
+    list source 'https://example.com/subscription-1'
+    list source 'https://example.com/subscription-2'
+
+    option use_local_links '1'
+
+    option regex ''
+    option match_mode 'ifnotmatch'
+    option on_empty 'skip'
+    option proxy_type 'urltest'
+
+    option max_links '50'
+    option max_latency_ms '500'
+    option force_cleanup '0'
+    option dedupe_sni_rotation '1'
+
+config subscription_schedule 'main_0300'
+    option enabled '1'
+    option hour '3'
+    option minute '0'
+    option jitter '1800'
+    option force '0'
+```
+
+`option use_local_links '1'` подключает файл `/etc/config/podkop-local-links`. Ручное добавление `file:///etc/config/podkop-local-links` в список источников больше не требуется.
+
+После изменения конфига:
+
+```sh
+/usr/bin/podkop-sub-cron-sync
+/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
+```
+
+## Cron без вебморды
+
+Рекомендуемый способ — через встроенный синхронизатор:
 
 ```sh
 /usr/bin/podkop-sub-cron-sync
 cat /etc/crontabs/root
+/etc/init.d/cron restart
+```
+
+Ручной вариант:
+
+```text
+0 * * * * /usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop 2>&1 | logger -t podkop-sub-health
+0 3 * * * /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop 2>&1 | logger -t podkop-updater-cron
 ```
 
 ## Логика обновления
 
-Подписка используется только как источник новых proxy-ключей. Она не перезаписывает секцию Podkop полностью.
+- Подписка добавляет новые ключи, но не удаляет существующие только потому, что они исчезли из подписки.
+- Если источники вернули 0 валидных ключей, конфиг Podkop не меняется.
+- `--observe-only` раз в час читает состояние Podkop URLTest и обновляет `fail_count`.
+- Обычно ключ удаляется при `fail_count >= 72`.
+- При `max_links` включается отсеиватель, если добавление новых ключей превысит лимит.
+- При `max_latency_ms` отсеиватель может удалять ключи с ping выше лимита.
+- `force_cleanup` — жёсткий режим: может удалять ключи с `fail_count >= 2` и ping выше лимита.
+- `dedupe_sni_rotation` заменяет старые SNI-варианты свежими из подписки.
+- Ключи из `/etc/config/podkop-local-links` защищены от автоудаления.
 
-Поведение:
+## Логи
 
-- новые ключи из подписок добавляются к существующим;
-- существующие ключи не удаляются только потому, что исчезли из подписки;
-- если подписка не загрузилась или вернула 0 валидных ключей, текущая секция Podkop не очищается;
-- каждый час `--observe-only` читает состояние URLTest из Podkop и обновляет `fail_count` в `/etc/podkop-subscriptions/state.json`;
-- если ключ рабочий, `fail_count` сбрасывается в `0`;
-- если ключ отображается как `N/A` или без delay/history, `fail_count` увеличивается на `1`;
-- ключ удаляется только во время планового maintenance-запуска, если `fail_count >= 72`;
-- ключи из `/etc/config/podkop-local-links` защищены от автоматического удаления;
-- `--observe-only` не меняет `/etc/config/podkop` и не перезапускает Podkop;
-- Podkop перезапускается только если были добавлены новые ключи, удалены умершие ключи или очищены дубликаты.
+Логи обезличены: URL подписок, proxy-ссылки, UUID, `sni`, `pbk`, `sid` и токены не должны выводиться в stdout/syslog/LuCI. Источники отображаются как `источник 1`, `источник 2`, `локальный список`.
 
-Если роутер был выключен несколько дней, `fail_count` не растёт. После включения подсчёт продолжается с прежнего значения.
-
-## Повторные попытки загрузки подписки
-
-HTTP/HTTPS-источник подписки загружается с фиксированными повторными попытками:
-
-- 3 попытки;
-- каждая попытка ждёт до 45 секунд.
-
-Если источник не ответил после всех трёх попыток, updater считает его недоступным, пишет ошибку в лог и сохраняет текущие ключи.
-
-## Установка из локального архива
-
-Если архив уже распакован на OpenWrt:
+## Ручные команды
 
 ```sh
-cd /tmp/podkop-subscriptions-clean-v2.6
-sh install.sh --local --no-panel
-sh install.sh --local --with-panel
+/usr/bin/podkop-sub-updater.py --version
+/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop
+/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
+/usr/bin/podkop-sub-run-now
+/usr/bin/podkop-sub-run-now --status
 ```
-
-При запуске из распакованного архива `install.sh` использует локальные файлы. Для принудительной загрузки из GitHub можно использовать `--remote`.
 
 ## Удаление
 
@@ -148,7 +161,7 @@ sh install.sh --local --with-panel
 wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
 ```
 
-Удаление вместе с `/etc/config/podkop-local-links`:
+Удаление вместе с конфигами дополнения:
 
 ```sh
 sh /tmp/podkop-sub-uninstall.sh --purge-config

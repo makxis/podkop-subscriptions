@@ -4,29 +4,76 @@ VERSION_FILE="/usr/share/podkop-subscriptions/VERSION"
 VERSION="unknown"
 [ -f "$VERSION_FILE" ] && VERSION="$(cat "$VERSION_FILE" 2>/dev/null | head -n 1)"
 
+LOCK="/tmp/podkop-sub-updater.lock"
+LOG="/tmp/podkop-sub-updater.log"
+STATUS="/tmp/podkop-sub-updater.status"
+
 case "$1" in
   --version)
     echo "podkop-subscriptions $VERSION"
     exit 0
     ;;
+  --status)
+    if [ -d "$LOCK" ]; then
+      echo "STATE=running"
+      [ -f "$STATUS" ] && grep -v '^STATE=' "$STATUS" 2>/dev/null || true
+      echo ""
+      echo "Updater ещё выполняется."
+      echo "Текущий лог:"
+      tail -n 80 "$LOG" 2>/dev/null || echo "Лог пока пуст: $LOG"
+      exit 0
+    fi
+
+    if [ -f "$LOG" ]; then
+      echo "STATE=finished"
+      [ -f "$STATUS" ] && grep -v '^STATE=' "$STATUS" 2>/dev/null || true
+      echo ""
+      echo "Результат последнего запуска:"
+      tail -n 220 "$LOG" 2>/dev/null
+      exit 0
+    fi
+
+    echo "STATE=idle"
+    echo "Ручной updater ещё не запускался."
+    echo "Лог: $LOG"
+    exit 0
+    ;;
 esac
 
-LOCK="/tmp/podkop-sub-updater.lock"
-LOG="/tmp/podkop-sub-updater.log"
-
 if mkdir "$LOCK" 2>/dev/null; then
+  start_ts="$(date '+%Y-%m-%d %H:%M:%S')"
+
+  {
+    echo "STATE=running"
+    echo "Started: $start_ts"
+    echo "Version: $VERSION"
+    echo "Log: $LOG"
+  } > "$STATUS"
+
   (
+    rc="0"
     trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Manual updater started, podkop-subscriptions $VERSION"
-    /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop --force
+    /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
     rc="$?"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Manual updater finished, exit=$rc"
+
+    {
+      echo "STATE=finished"
+      echo "Started: $start_ts"
+      echo "Finished: $(date '+%Y-%m-%d %H:%M:%S')"
+      echo "Version: $VERSION"
+      echo "Exit: $rc"
+      echo "Log: $LOG"
+    } > "$STATUS"
+
     exit "$rc"
   ) >"$LOG" 2>&1 &
 
   echo "Updater запущен в фоне. Версия: $VERSION"
-  echo "Лог последнего ручного запуска: $LOG"
-  echo "Проверить: tail -n 80 $LOG"
+  echo "После завершения LuCI покажет результат."
+  echo "Лог: $LOG"
   exit 0
 fi
 

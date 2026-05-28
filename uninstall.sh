@@ -37,13 +37,14 @@ fi
 rm -f /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now
 rm -rf /usr/share/podkop-subscriptions
 rm -f /www/luci-static/resources/view/podkop/subscriptions.js
-rm -f /tmp/podkop-sub-updater.lock /tmp/podkop-sub-updater.log
+rm -f /tmp/podkop-sub-updater.lock /tmp/podkop-sub-updater.log /tmp/podkop-sub-updater.status
 restore_latest_backup /www/luci-static/resources/view/podkop/podkop.js
 restore_latest_backup /www/luci-static/resources/view/podkop/main.js
 restore_latest_backup /usr/share/rpcd/acl.d/luci-app-podkop.json
 
 if [ "$PURGE_CONFIG" = "1" ]; then
-  rm -f /etc/config/podkop-local-links
+  rm -f /etc/config/podkop-local-links /etc/config/podkop_subscriptions
+  rm -rf /etc/podkop-subscriptions
 fi
 
 rm -f /tmp/luci-indexcache 2>/dev/null || true

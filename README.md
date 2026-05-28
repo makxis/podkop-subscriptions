@@ -1,33 +1,19 @@
 # Podkop Subscriptions
 
-[README_RU](README_RU.md)
+[Русская документация](README_RU.md)
 
-Add-on for Podkop that updates proxy links from subscriptions and optionally adds a `Подписки` tab to the existing Podkop LuCI interface.
+Add-on for Podkop that updates proxy links from subscriptions and can add a `Подписки` tab to the existing Podkop LuCI interface.
 
-This project is installed separately from Podkop. Podkop itself must be installed first.
+Podkop itself must be installed first.
 
 ## Tested configuration
-
-This version was tested on:
 
 - OpenWrt: `24.10.3`-`24.10.5`
 - Podkop: `v0.7.17`
 - LuCI App Podkop: `v0.7.17`
 - Sing-box: `1.12.22`
 
-Older or newer versions may work, but are not guaranteed. The LuCI overlay depends on the existing Podkop LuCI file structure and RPC/ACL behavior.
-
-## What it installs
-
-- `/usr/bin/podkop-sub-updater.py` — subscription updater and key maintenance script.
-- `/usr/bin/podkop-sub-cron-sync` — cron schedule synchronizer.
-- `/usr/bin/podkop-sub-run-now` — background manual updater launcher.
-- `/usr/share/podkop-subscriptions/VERSION` — installed add-on version.
-- `/etc/podkop-subscriptions/state.json` — internal state file with key status counters.
-- `/etc/config/podkop-local-links` — local user-managed proxy links protected from automatic cleanup.
-- Optional LuCI overlay with the `Подписки` tab.
-
-## Installation
+## Install
 
 Interactive install:
 
@@ -35,121 +21,124 @@ Interactive install:
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
 ```
 
-Core updater only, without LuCI panel:
+Core only:
 
 ```sh
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --no-panel
 ```
 
-Core updater and LuCI panel:
+Core and LuCI panel:
 
 ```sh
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --with-panel
 ```
 
-## Initial setup
+## Files
 
-Before configuring subscriptions, open the existing Podkop page in LuCI and create at least one Podkop section with at least one valid proxy key.
+Main add-on config:
 
-Then press **Save & Apply** and wait until Podkop applies the configuration.
-
-After that, open the `Подписки` tab and configure:
-
-- target Podkop section;
-- subscription source URL or local source;
-- regex filter, if needed;
-- filter mode;
-- proxy group type: `urltest` or `selector`;
-- update schedule.
-
-Press **Save & Apply** again, wait until Podkop applies the settings, then run the updater from LuCI or SSH.
-
-## Version check
-
-```sh
-/usr/bin/podkop-sub-updater.py --version
-/usr/bin/podkop-sub-run-now --version
-cat /usr/share/podkop-subscriptions/VERSION
+```text
+/etc/config/podkop_subscriptions
 ```
 
-The LuCI `Подписки` tab also shows the add-on version at the bottom.
+Native Podkop config updated by the updater:
 
-## Manual commands
-
-Passive key status observation, without changing Podkop config:
-
-```sh
-/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop
+```text
+/etc/config/podkop
 ```
 
-Manual maintenance run:
+Local manual proxy links:
 
-```sh
-/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop --config /etc/config/podkop --force
+```text
+/etc/config/podkop-local-links
 ```
 
-Manual background run:
+Runtime state:
 
-```sh
-/usr/bin/podkop-sub-run-now
-tail -n 80 /tmp/podkop-sub-updater.log
+```text
+/etc/podkop-subscriptions/state.json
 ```
 
-Cron synchronization:
+Manual run log:
+
+```text
+/tmp/podkop-sub-updater.log
+```
+
+## Core-only configuration
+
+Edit:
+
+```sh
+vi /etc/config/podkop_subscriptions
+```
+
+Example:
+
+```text
+config subscription_group 'main'
+    option enabled '1'
+    option target_section 'main'
+
+    list source 'https://example.com/subscription-1'
+    list source 'https://example.com/subscription-2'
+
+    option use_local_links '1'
+
+    option regex ''
+    option match_mode 'ifnotmatch'
+    option on_empty 'skip'
+    option proxy_type 'urltest'
+
+    option max_links '50'
+    option max_latency_ms '500'
+    option force_cleanup '0'
+    option dedupe_sni_rotation '1'
+
+config subscription_schedule 'main_0300'
+    option enabled '1'
+    option hour '3'
+    option minute '0'
+    option jitter '1800'
+    option force '0'
+```
+
+`option use_local_links '1'` enables `/etc/config/podkop-local-links`. Adding `file:///etc/config/podkop-local-links` manually is no longer needed.
+
+After editing:
+
+```sh
+/usr/bin/podkop-sub-cron-sync
+/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
+```
+
+## Cron without LuCI
+
+Recommended:
 
 ```sh
 /usr/bin/podkop-sub-cron-sync
 cat /etc/crontabs/root
+/etc/init.d/cron restart
 ```
 
-## Update logic
+Manual example:
 
-Subscriptions are used only as a source of new proxy links. They do not fully replace the Podkop section.
-
-Behavior:
-
-- new links from subscriptions are added to the existing section;
-- existing links are not removed just because they disappeared from a subscription;
-- if a subscription cannot be loaded or returns zero valid links, the current Podkop section is kept unchanged;
-- every hour, `--observe-only` reads Podkop URLTest state and updates `fail_count` in `/etc/podkop-subscriptions/state.json`;
-- working links reset `fail_count` to `0`;
-- links shown as `N/A` or without delay/history increment `fail_count` by `1`;
-- links are removed only during scheduled maintenance runs and only when `fail_count >= 72`;
-- links from `/etc/config/podkop-local-links` are protected from automatic deletion;
-- `--observe-only` does not change `/etc/config/podkop` and does not restart Podkop;
-- Podkop is restarted only when keys were added, removed, or duplicates were cleaned.
-
-If the router is powered off, counters do not grow. After the router is powered on again, counting continues from the previous state.
-
-## Subscription source retries
-
-HTTP/HTTPS subscription sources are loaded with fixed retries:
-
-- 3 attempts;
-- 45 seconds timeout per attempt.
-
-If all attempts fail, the source is considered unavailable, the error is logged, and current keys are kept.
-
-## Local archive install
-
-If the archive is already unpacked on OpenWrt:
-
-```sh
-cd /tmp/podkop-subscriptions-clean-v2.6
-sh install.sh --local --no-panel
-sh install.sh --local --with-panel
+```text
+0 * * * * /usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop 2>&1 | logger -t podkop-sub-health
+0 3 * * * /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop 2>&1 | logger -t podkop-updater-cron
 ```
 
-When run from an unpacked archive, `install.sh` uses local files by default. Use `--remote` to force downloading from GitHub.
+## Logs
 
-## Uninstall
+Logs are sanitized. Subscription URLs, proxy links, UUIDs, `sni`, `pbk`, `sid`, and tokens are not printed to stdout/syslog/LuCI logs. Sources are shown as `source 1`, `source 2`, or `local list`.
 
-```sh
-wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
-```
-
-Remove local links file too:
+## Manual commands
 
 ```sh
-sh /tmp/podkop-sub-uninstall.sh --purge-config
+/usr/bin/podkop-sub-updater.py --version
+/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop
+/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
+/usr/bin/podkop-sub-run-now
+/usr/bin/podkop-sub-run-now --status
 ```

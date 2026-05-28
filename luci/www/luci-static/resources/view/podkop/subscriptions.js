@@ -5,9 +5,30 @@
 "require baseclass";
 
 const LOCAL_LINKS = "/etc/config/podkop-local-links";
-const PODKOP_SUBSCRIPTIONS_VERSION = "2.6";
+const PODKOP_SUBSCRIPTIONS_VERSION = "3.1";
 
-function notifyOutput(title, res) {
+function hideDuplicatedSubscriptionsTitle() {
+  if (document.getElementById("podkop-subscriptions-title-hide-style"))
+    return;
+
+  const style = document.createElement("style");
+  style.id = "podkop-subscriptions-title-hide-style";
+  style.textContent = `
+    /* Hide duplicated in-page title of the subscriptions tab.
+       The tab label itself remains visible in the Podkop tab bar. */
+    [data-tab="subscriptions_ui"] h2:first-child,
+    [data-tab="subscriptions_ui"] h3:first-child,
+    [data-tab="subscriptions_ui"] .cbi-section > h2:first-child,
+    [data-tab="subscriptions_ui"] .cbi-section > h3:first-child,
+    [data-tab="subscriptions_ui"] .cbi-section-title:first-child {
+      display: none !important;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+
+function execOutputText(res) {
   let out = "";
 
   if (res && res.stdout)
@@ -16,11 +37,42 @@ function notifyOutput(title, res) {
   if (res && res.stderr)
     out += "\n" + res.stderr;
 
-  ui.addNotification(null, E("pre", { style: "white-space: pre-wrap" }, out || title));
+  return out;
+}
+
+function notifyOutput(title, res) {
+  const out = execOutputText(res);
+  ui.addNotification(null, E("pre", {
+    style: "white-space: pre-wrap; max-height: 520px; overflow: auto"
+  }, out || title));
+}
+
+function delayMs(ms) {
+  return new Promise(function(resolve) {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function pollUpdaterResult(attempt) {
+  return fs.exec("/usr/bin/podkop-sub-run-now", ["--status"]).then(function(res) {
+    const out = execOutputText(res);
+
+    if (out.indexOf("STATE=running") !== -1 && attempt < 240)
+      return delayMs(3000).then(function() {
+        return pollUpdaterResult(attempt + 1);
+      });
+
+    ui.addNotification(null, E("pre", {
+      style: "white-space: pre-wrap; max-height: 620px; overflow: auto"
+    }, out || _("Нет вывода updater")));
+  }).catch(function(err) {
+    ui.addNotification(null, E("pre", { style: "white-space: pre-wrap" }, String(err)), "danger");
+  });
 }
 
 return baseclass.extend({
   createSubscriptionsContent: function(section, podkopSections) {
+    section.uciconfig = "podkop_subscriptions";
     section.anonymous = true;
     section.addremove = false;
     section.cfgsections = function() {
@@ -34,11 +86,14 @@ return baseclass.extend({
       "_subscription_groups",
       form.TypedSection,
       "subscription_group",
-      _("Группы подписок"),
+      "",
       _("Добавьте одну или несколько групп подписок. Секция Podkop выбирается из списка существующих секций.")
     );
 
+    o.uciconfig = "podkop_subscriptions";
+
     ss = o.subsection;
+    ss.uciconfig = "podkop_subscriptions";
     ss.anonymous = true;
     ss.addremove = true;
     ss.sortable = true;
@@ -68,9 +123,18 @@ return baseclass.extend({
       form.DynamicList,
       "source",
       _("Источники"),
-      _("Ссылки подписок или локальные пути. Можно добавить несколько источников через плюс. Поддерживаются http://, https://, /etc/... и file:///etc/...")
+      _("Ссылки HTTP/HTTPS-подписок. Локальный список включается отдельной галкой ниже.")
     );
     o.placeholder = "https://example.org/sub?target=V2Ray";
+    o.rmempty = true;
+
+    o = ss.option(
+      form.Flag,
+      "use_local_links",
+      _("Использовать локальный список ключей"),
+      _("Добавляет ключи из /etc/config/podkop-local-links. Эти ключи защищены от автоудаления.")
+    );
+    o.default = "0";
     o.rmempty = false;
 
     o = ss.option(
@@ -115,6 +179,44 @@ return baseclass.extend({
     o.default = "skip";
     o.rmempty = false;
 
+    o = ss.option(
+      form.Value,
+      "max_links",
+      _("Максимум ключей в секции"),
+      _("Необязательный лимит количества ключей в целевой секции. 0 или пусто — без ограничения. Если при добавлении новых ключей лимит будет превышен, updater удалит худшие незащищённые ключи и добавит новые только в освободившиеся места.")
+    );
+    o.datatype = "uinteger";
+    o.placeholder = "50";
+    o.rmempty = true;
+
+    o = ss.option(
+      form.Value,
+      "max_latency_ms",
+      _("Максимальный ping, мс"),
+      _("Необязательный предел задержки по текущему URLTest Podkop. 0 или пусто — без фильтра по ping. Ключи с задержкой выше этого значения могут быть удалены отсеивателем.")
+    );
+    o.datatype = "uinteger";
+    o.placeholder = "500";
+    o.rmempty = true;
+
+    o = ss.option(
+      form.Flag,
+      "force_cleanup",
+      _("Принудительная чистка"),
+      _("Экстремальный режим. Если подписки успешно загрузились, updater может удалять ключи с fail_count >= 2 и ключи с ping выше лимита даже без превышения максимального количества. Используйте осторожно.")
+    );
+    o.default = "0";
+    o.rmempty = false;
+
+    o = ss.option(
+      form.Flag,
+      "dedupe_sni_rotation",
+      _("Схлопывать SNI-дубликаты"),
+      _("Если новый ключ из подписки отличается от существующего только параметром sni, старый вариант будет заменён новым. Название ключа не используется для сравнения. Локальные ключи из /etc/config/podkop-local-links не заменяются.")
+    );
+    o.default = "0";
+    o.rmempty = false;
+
     o = section.option(
       form.SectionValue,
       "_subscription_schedules",
@@ -124,7 +226,10 @@ return baseclass.extend({
       _("Добавьте одно или несколько расписаний обновления. Например, отдельные записи для 03:00, 04:00 и 05:00.")
     );
 
+    o.uciconfig = "podkop_subscriptions";
+
     ss = o.subsection;
+    ss.uciconfig = "podkop_subscriptions";
     ss.anonymous = true;
     ss.addremove = true;
     ss.sortable = true;
@@ -237,13 +342,16 @@ return baseclass.extend({
       form.Button,
       "_run_now",
       _("Запустить обновление сейчас"),
-      _("Сначала нажмите Save & Apply. Кнопка запускает updater в фоне, результат смотрите в /tmp/podkop-sub-updater.log или через logread.")
+      _("Сначала нажмите Save & Apply. Кнопка запускает updater в фоне, затем LuCI покажет результат последнего запуска.")
     );
     o.inputtitle = _("Запустить updater");
     o.inputstyle = "reload";
     o.onclick = function() {
       return fs.exec("/usr/bin/podkop-sub-run-now", []).then(function(res) {
         notifyOutput("Updater started", res);
+        return delayMs(2000).then(function() {
+          return pollUpdaterResult(0);
+        });
       }).catch(function(err) {
         ui.addNotification(null, E("pre", { style: "white-space: pre-wrap" }, String(err)), "danger");
       });

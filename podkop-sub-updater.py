@@ -12,13 +12,14 @@ import json
 import time
 
 
-APP_VERSION = "2.6"
+APP_VERSION = "3.1"
 USER_AGENT = f"Podkop-Subscription-Updater/{APP_VERSION}"
 VALID_PROTOCOLS = ('vless://', 'ss://', 'trojan://', 'socks4://', 'socks4a://', 'socks5://', 'hy2://', 'hysteria2://')
 VALID_PTYPES = {'urltest', 'selector'}
 VALID_ON_EMPTY = {'all', 'skip'}
 VALID_MATCH_MODES = {'ifmatch', 'ifnotmatch'}
 STATE_PATH_DEFAULT = '/etc/podkop-subscriptions/state.json'
+SUBSCRIPTIONS_CONFIG_DEFAULT = '/etc/config/podkop_subscriptions'
 LOCAL_LINKS_PATH_DEFAULT = '/etc/config/podkop-local-links'
 DELETE_AFTER_FAIL_COUNT_DEFAULT = 72
 MIN_KEEP_PER_SECTION_DEFAULT = 1
@@ -30,11 +31,22 @@ def setup_syslog():
     syslog.openlog("podkop-updater", syslog.LOG_PID, syslog.LOG_USER)
 
 
+def sanitize_log_message(msg):
+    msg = str(msg)
+    # Hide subscription URLs and proxy links before writing to stdout/syslog/LuCI logs.
+    msg = re.sub(r'(?i)\b(vless|trojan|ss|socks4a?|socks5|hy2|hysteria2)://\S+', '<proxy-link>', msg)
+    msg = re.sub(r'(?i)https?://\S+', '<remote-url>', msg)
+    msg = re.sub(r'(?i)(pbk|sid|sni|password|token|uuid)=([^\s&]+)', r'\1=<hidden>', msg)
+    msg = re.sub(r'(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<uuid>', msg)
+    return msg
+
+
 def log(level, msg):
-    print(f"[{level}] {msg}")
+    safe_msg = sanitize_log_message(msg)
+    print(f"[{level}] {safe_msg}")
     syslog_level = syslog.LOG_WARNING if level in ["ERROR", "WARN"] else syslog.LOG_INFO
     try:
-        syslog.syslog(syslog_level, f"[{level}] {msg}")
+        syslog.syslog(syslog_level, f"[{level}] {safe_msg}")
     except Exception:
         pass
 
@@ -43,13 +55,34 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Обновление подписок для Podkop")
     parser.add_argument('--version', action='store_true', help='Показать версию podkop-subscriptions и выйти')
     parser.add_argument('--config', default='/etc/config/podkop', help='Путь к UCI конфигу podkop')
-    parser.add_argument('--subs', default='/etc/config/podkop', help='Путь к UCI конфигу подписок')
+    parser.add_argument('--subs', default=SUBSCRIPTIONS_CONFIG_DEFAULT, help='Путь к UCI конфигу подписок')
     parser.add_argument('--force', action='store_true', help='Принудительно перезаписать конфиг podkop и перезапустить сервис')
     parser.add_argument('--observe-only', action='store_true', help='Только обновить fail_count по текущему состоянию Podkop URLTest; конфиг не менять')
     parser.add_argument('--state', default=STATE_PATH_DEFAULT, help='Путь к state.json')
     parser.add_argument('--delete-after-fails', type=int, default=DELETE_AFTER_FAIL_COUNT_DEFAULT, help='Удалять ключ после N подряд неудачных наблюдений')
     parser.add_argument('--min-keep', type=int, default=MIN_KEEP_PER_SECTION_DEFAULT, help='Минимум ключей, которые надо оставить в секции')
     return parser.parse_args()
+
+
+def is_enabled_value(value):
+    return str(value or '0').strip().lower() in ('1', 'true', 'yes', 'on', 'enabled')
+
+
+def parse_positive_int(value, default=0):
+    try:
+        v = int(str(value or '').strip())
+        return v if v > 0 else default
+    except Exception:
+        return default
+
+
+def merge_min_positive(current, value):
+    value = parse_positive_int(value, 0)
+    if value <= 0:
+        return current
+    if not current or current <= 0:
+        return value
+    return min(current, value)
 
 
 def unquote_percent(s):
@@ -141,6 +174,84 @@ def stable_id(link):
     return hashlib.sha256(base.encode('utf-8', 'ignore')).hexdigest()[:24]
 
 
+def _url_without_fragment(link):
+    return (link or '').split('#', 1)[0].strip()
+
+
+def _split_query_param(part):
+    key = part.split('=', 1)[0].strip().lower()
+    return key
+
+
+def has_query_param(link, name):
+    base = _url_without_fragment(link)
+    if '?' not in base:
+        return False
+    query = base.split('?', 1)[1]
+    name = str(name or '').strip().lower()
+    for part in query.split('&'):
+        if _split_query_param(part) == name:
+            return True
+    return False
+
+
+def canonical_url_without_query_params(link, ignored_names):
+    """Canonicalize URL for soft duplicate detection.
+
+    Used only for optional SNI-rotation dedupe. The normal stable_id remains
+    strict and includes every technical parameter except the human name after #.
+    """
+    base = _url_without_fragment(link)
+    if '?' not in base:
+        return base
+
+    prefix, query = base.split('?', 1)
+    ignored = {str(x).strip().lower() for x in (ignored_names or [])}
+    kept = []
+    for part in query.split('&'):
+        if not part:
+            continue
+        key = _split_query_param(part)
+        if key in ignored:
+            continue
+        kept.append(part)
+
+    # Sorting makes detection stable if a subscription changes query parameter order.
+    kept.sort(key=lambda p: (_split_query_param(p), p))
+    return prefix + ('?' + '&'.join(kept) if kept else '')
+
+
+def has_sni_param(link):
+    return has_query_param(link, 'sni')
+
+
+def sni_rotation_id(link):
+    base = canonical_url_without_query_params(link, {'sni'})
+    return hashlib.sha256(base.encode('utf-8', 'ignore')).hexdigest()[:24]
+
+
+def dedupe_sni_rotation_links_keep_last(links):
+    """Collapse incoming subscription SNI rotations, keeping the last occurrence.
+
+    Only links that actually contain the sni= query parameter participate.
+    Links without sni= are not collapsed by this soft dedupe rule.
+    """
+    out_rev = []
+    seen_rotation = set()
+    collapsed = 0
+
+    for link in reversed(list(links or [])):
+        if has_sni_param(link):
+            rid = sni_rotation_id(link)
+            if rid in seen_rotation:
+                collapsed += 1
+                continue
+            seen_rotation.add(rid)
+        out_rev.append(link)
+
+    return list(reversed(out_rev)), collapsed
+
+
 def link_name(link):
     if '#' not in link:
         return ''
@@ -206,11 +317,17 @@ def load_jobs_from_uci_podkop(config_path):
         if opt.get('enabled', '1') == '0':
             continue
         sec_name = opt.get('target_section', g['name']).strip().lower()
-        sources = lists.get('source', [])
+        sources = list(lists.get('source', []))
+        if is_enabled_value(opt.get('use_local_links', '0')) and LOCAL_LINKS_PATH_DEFAULT not in sources and ('file://' + LOCAL_LINKS_PATH_DEFAULT) not in sources:
+            sources.append('file://' + LOCAL_LINKS_PATH_DEFAULT)
         regex_pattern = opt.get('regex', '').strip()
         match_mode = opt.get('match_mode', 'ifnotmatch').strip().lower()
         ptype = opt.get('proxy_type', 'urltest').strip().lower()
         on_empty = opt.get('on_empty', 'skip').strip().lower()
+        max_links = parse_positive_int(opt.get('max_links', '0'), 0)
+        max_latency_ms = parse_positive_int(opt.get('max_latency_ms', '0'), 0)
+        force_cleanup = is_enabled_value(opt.get('force_cleanup', '0'))
+        dedupe_sni_rotation = is_enabled_value(opt.get('dedupe_sni_rotation', '0'))
         if not sec_name:
             log("WARN", f"subscription_group '{g['name']}': не задана целевая секция Podkop. Пропуск.")
             continue
@@ -227,10 +344,24 @@ def load_jobs_from_uci_podkop(config_path):
             log("WARN", f"subscription_group '{g['name']}': недопустимый on_empty '{on_empty}'. Пропуск.")
             continue
         if sec_name not in jobs:
-            jobs[sec_name] = {'ptype': ptype, 'entries': [], 'links': [], 'source_errors': 0, 'source_success': 0}
+            jobs[sec_name] = {
+                'ptype': ptype,
+                'entries': [],
+                'links': [],
+                'source_errors': 0,
+                'source_success': 0,
+                'max_links': 0,
+                'max_latency_ms': 0,
+                'force_cleanup': False,
+                'dedupe_sni_rotation': False
+            }
         if jobs[sec_name]['ptype'] != ptype:
             log("WARN", f"subscription_group '{g['name']}': target_section '{sec_name}' уже использует '{jobs[sec_name]['ptype']}', нельзя смешивать с '{ptype}'. Пропуск.")
             continue
+        jobs[sec_name]['max_links'] = merge_min_positive(jobs[sec_name].get('max_links', 0), max_links)
+        jobs[sec_name]['max_latency_ms'] = merge_min_positive(jobs[sec_name].get('max_latency_ms', 0), max_latency_ms)
+        jobs[sec_name]['force_cleanup'] = bool(jobs[sec_name].get('force_cleanup')) or force_cleanup
+        jobs[sec_name]['dedupe_sni_rotation'] = bool(jobs[sec_name].get('dedupe_sni_rotation')) or dedupe_sni_rotation
         for source in sources:
             source = source.strip()
             if not source:
@@ -274,7 +405,7 @@ def load_jobs_from_flat_file(subs_path):
                 log("WARN", f"Строка {line_num}: недопустимое действие '{on_empty}'. Пропуск.")
                 continue
             if sec_name not in jobs:
-                jobs[sec_name] = {'ptype': ptype, 'entries': [], 'links': [], 'source_errors': 0, 'source_success': 0}
+                jobs[sec_name] = {'ptype': ptype, 'entries': [], 'links': [], 'source_errors': 0, 'source_success': 0, 'max_links': 0, 'max_latency_ms': 0, 'force_cleanup': False, 'dedupe_sni_rotation': False}
             if jobs[sec_name]['ptype'] != ptype:
                 log("WARN", f"Строка {line_num}: секция '{sec_name}' уже объявлена как '{jobs[sec_name]['ptype']}', нельзя смешивать с '{ptype}'. Пропуск.")
                 continue
@@ -289,37 +420,29 @@ def load_jobs_from_flat_file(subs_path):
 
 
 def load_jobs(subs_path):
-    subs_abs = os.path.abspath(subs_path)
     if not os.path.exists(subs_path):
-        if subs_abs == '/etc/config/podkop_subscriptions':
-            log("INFO", "Конфиг подписок не найден. Подписки не настроены.")
-            return {}
-        log("ERROR", f"Файл подписок {subs_path} не найден")
+        log("ERROR", f"Файл настроек подписок не найден: {subs_path}")
+        log("INFO", "Создайте /etc/config/podkop_subscriptions или запустите install.sh в интерактивном режиме.")
         sys.exit(1)
-    # Если читаем основной /etc/config/podkop, flat-file fallback не нужен.
-    if os.path.abspath(subs_path) == '/etc/config/podkop':
-        uci_jobs = load_jobs_from_uci_podkop(subs_path)
-        if uci_jobs is not None:
-            return uci_jobs
-        log("INFO", "subscription_group не найдены. Подписки не настроены.")
-        return {}
-    if subs_abs == '/etc/config/podkop_subscriptions':
-        uci_jobs = load_jobs_from_uci_podkop(subs_path)
-        if uci_jobs is not None:
-            return uci_jobs
-        log("INFO", "subscription_group не найдены. Подписки не настроены.")
-        return {}
     uci_jobs = load_jobs_from_uci_podkop(subs_path)
     if uci_jobs is not None:
         return uci_jobs
+    # Legacy flat-file remains only for custom --subs files. Recommended config is UCI /etc/config/podkop_subscriptions.
     return load_jobs_from_flat_file(subs_path)
-
 
 def is_url_source(source):
     return bool(re.match(r'^https?://', source, re.IGNORECASE))
 
 
-def read_source_payload(source, hwid, device_model, kernel_ver, cache):
+def source_display_label(source, label=None):
+    if label:
+        return label
+    if source == LOCAL_LINKS_PATH_DEFAULT or source == 'file://' + LOCAL_LINKS_PATH_DEFAULT:
+        return 'локальный список'
+    return 'источник'
+
+
+def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=None):
     if source in cache:
         return cache[source]
 
@@ -338,7 +461,7 @@ def read_source_payload(source, hwid, device_model, kernel_ver, cache):
 
         for attempt in range(1, retries + 1):
             try:
-                log('INFO', f"Источник {source}: попытка {attempt}/{retries}, timeout={timeout}s")
+                log('INFO', f"{source_display_label(source, label)}: попытка {attempt}/{retries}, timeout={timeout}s")
                 result = subprocess.run(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -349,20 +472,20 @@ def read_source_payload(source, hwid, device_model, kernel_ver, cache):
 
                 if result.returncode == 0 and result.stdout and result.stdout.strip():
                     if attempt > 1:
-                        log('INFO', f"Источник {source}: успешно загружен с попытки {attempt}/{retries}")
+                        log('INFO', f"{source_display_label(source, label)}: успешно загружен с попытки {attempt}/{retries}")
                     cache[source] = result.stdout
                     return result.stdout
 
                 last_error = result.stderr.strip() or 'Пустой ответ'
-                log('WARN', f"Источник {source}: попытка {attempt}/{retries} неуспешна -> {last_error}")
+                log('WARN', f"{source_display_label(source, label)}: попытка {attempt}/{retries} неуспешна -> {last_error}")
 
             except subprocess.TimeoutExpired:
                 last_error = f"timeout {timeout}s"
-                log('WARN', f"Источник {source}: попытка {attempt}/{retries} превысила timeout {timeout}s")
+                log('WARN', f"{source_display_label(source, label)}: попытка {attempt}/{retries} превысила timeout {timeout}s")
 
             except Exception as e:
                 last_error = str(e)
-                log('WARN', f"Источник {source}: попытка {attempt}/{retries} завершилась ошибкой -> {last_error}")
+                log('WARN', f"{source_display_label(source, label)}: попытка {attempt}/{retries} завершилась ошибкой -> {last_error}")
 
             if attempt < retries:
                 time.sleep(1)
@@ -423,12 +546,12 @@ def load_local_protected_ids(path=LOCAL_LINKS_PATH_DEFAULT):
         for link in links:
             protected.add(stable_id(link))
         if protected:
-            log("INFO", f"Локальные пользовательские ключи защищены от автоудаления: {len(protected)} ({path}, {fmt})")
+            log("INFO", f"Локальные пользовательские ключи защищены от автоудаления: {len(protected)} (локальный список, {fmt})")
     except Exception as e:
-        log("WARN", f"Не удалось прочитать локальные ключи для защиты от удаления: {path}: {e}")
+        log("WARN", f"Не удалось прочитать локальные ключи для защиты от удаления: локальный список: {e}")
     return protected
 
-def filter_links(links_raw, regex_pattern, match_mode, on_empty, sec, source):
+def filter_links(links_raw, regex_pattern, match_mode, on_empty, sec, source_label):
     if not regex_pattern:
         return links_raw
     filtered_links = []
@@ -437,15 +560,15 @@ def filter_links(links_raw, regex_pattern, match_mode, on_empty, sec, source):
         try:
             is_match = bool(re.search(regex_pattern, target, re.IGNORECASE))
         except re.error:
-            log("ERROR", f"[{sec}]: Некорректное регулярное выражение '{regex_pattern}' для источника {source}")
+            log("ERROR", f"[{sec}]: Некорректное регулярное выражение '{regex_pattern}' для {source_label}")
             return []
         if (match_mode == 'ifmatch' and is_match) or (match_mode == 'ifnotmatch' and not is_match):
             filtered_links.append(ln)
     if not filtered_links:
         if on_empty == 'all':
-            log("INFO", f"[{sec}]: По фильтру пусто, используются все ссылки из источника {source} (on_empty=all).")
+            log("INFO", f"[{sec}]: По фильтру пусто, используются все ссылки из {source_label} (on_empty=all).")
             return links_raw
-        log("INFO", f"[{sec}]: По фильтру пусто, источник пропущен: {source} (on_empty=skip).")
+        log("INFO", f"[{sec}]: По фильтру пусто, {source_label} пропущен (on_empty=skip).")
         return []
     return filtered_links
 
@@ -457,34 +580,35 @@ def fetch_links(jobs, hwid, device_model, kernel_ver):
         section_links = []
         job['source_errors'] = 0
         job['source_success'] = 0
-        for entry in job['entries']:
+        for src_idx, entry in enumerate(job['entries'], 1):
             source = entry['source']
+            label = 'локальный список' if source in (LOCAL_LINKS_PATH_DEFAULT, 'file://' + LOCAL_LINKS_PATH_DEFAULT) else f'источник {src_idx}'
             try:
-                payload = read_source_payload(source, hwid, device_model, kernel_ver, payload_cache)
+                payload = read_source_payload(source, hwid, device_model, kernel_ver, payload_cache, label)
             except subprocess.TimeoutExpired:
-                log("ERROR", f"[{sec}]: Превышено время ожидания ответа сервера: {source}")
+                log("ERROR", f"[{sec}]: Превышено время ожидания ответа сервера: {label}")
                 job['source_errors'] += 1
                 continue
             except Exception as e:
-                log("ERROR", f"[{sec}]: Ошибка чтения источника {source} -> {e}")
+                log("ERROR", f"[{sec}]: Ошибка чтения источника {label} -> {e}")
                 job['source_errors'] += 1
                 continue
             links_raw, payload_type = extract_links_from_payload(payload)
             if payload_type == 'invalid':
-                log("ERROR", f"[{sec}]: Источник не plain-text URI и не валидный Base64: {source}")
+                log("ERROR", f"[{sec}]: {label} не plain-text URI и не валидный Base64")
                 job['source_errors'] += 1
                 continue
             if not links_raw:
-                log("WARN", f"[{sec}]: В источнике нет ссылок поддерживаемого типа: {source}")
+                log("WARN", f"[{sec}]: в {label} нет ссылок поддерживаемого типа")
                 job['source_success'] += 1
                 continue
-            filtered_links = filter_links(links_raw, entry['regex'], entry['match_mode'], entry['on_empty'], sec, source)
+            filtered_links = filter_links(links_raw, entry['regex'], entry['match_mode'], entry['on_empty'], sec, label)
             if not filtered_links:
                 job['source_success'] += 1
                 continue
             section_links.extend(filtered_links)
             job['source_success'] += 1
-            log("INFO", f"[{sec}]: источник {source} ({payload_type}) -> ссылок после фильтра: {len(filtered_links)}")
+            log("INFO", f"[{sec}]: {label} ({payload_type}) -> ссылок после фильтра: {len(filtered_links)}")
         job['links'], dup_count = dedupe_links_keep_order(section_links)
         if dup_count:
             log("INFO", f"[{sec}]: Дубликатов в новых ссылках подписки отброшено: {dup_count}")
@@ -521,7 +645,7 @@ def load_current_podkop_sections(config_path):
 
 
 def default_state():
-    return {'version': 2, 'sections': {}, 'health': {}}
+    return {'version': 3, 'sections': {}, 'health': {}, 'recently_removed': {}}
 
 
 def load_state(path):
@@ -532,9 +656,10 @@ def load_state(path):
             st = json.load(f)
         if not isinstance(st, dict):
             return default_state()
-        st.setdefault('version', 2)
+        st.setdefault('version', 3)
         st.setdefault('sections', {})
         st.setdefault('health', {})
+        st.setdefault('recently_removed', {})
         return st
     except Exception as e:
         log("WARN", f"Не удалось прочитать state.json: {e}. Будет создан новый state.")
@@ -711,15 +836,137 @@ def observe_only(config_path, state_path):
     log("INFO", f"Проверка завершена: total={total}, ok={ok}, bad={bad}, missing={missing}. Конфиг Podkop не изменялся.")
 
 
-def build_final_links_for_section(sec, job, current_sections, state, delete_after_fails, min_keep, protected_ids=None):
+
+def add_recently_removed(state, sid, sec, item, reason):
+    rr = state.setdefault('recently_removed', {})
+    rr[sid] = {
+        'removed_at': int(time.time()),
+        'section': sec,
+        'reason': reason,
+        'name': (item or {}).get('name', '')
+    }
+
+
+def proxy_snapshot_for_links(sec, links, proxies):
+    snap = {}
+    if not proxies:
+        return snap
+    for idx, link in enumerate(links, 1):
+        sid = stable_id(link)
+        tag = f"{sec}-{idx}-out"
+        status, delay = proxy_status(proxies.get(tag))
+        snap[sid] = {'tag': tag, 'status': status, 'delay': delay}
+    return snap
+
+
+def removal_candidates(sec, links, st_sec, protected_ids, proxy_snap, delete_after_fails, max_latency_ms, limit_active, force_cleanup):
+    candidates = []
+    for idx, link in enumerate(links, 1):
+        sid = stable_id(link)
+        item = st_sec['links'].get(sid, {})
+        if sid in protected_ids or item.get('protected_local'):
+            continue
+        try:
+            fc = int(item.get('fail_count', 0) or 0)
+        except Exception:
+            fc = 0
+        ps = proxy_snap.get(sid, {}) if proxy_snap else {}
+        status = ps.get('status') or item.get('last_status') or 'unknown'
+        delay = ps.get('delay')
+        if not isinstance(delay, int):
+            ld = item.get('last_delay')
+            delay = ld if isinstance(ld, int) else None
+
+        reason = None
+        priority = None
+        # Обычная мягкая автоочистка: 72 подряд плохих наблюдения.
+        if fc >= delete_after_fails:
+            reason = 'fail_count_threshold'
+            priority = 0
+        # Экстремальная чистка: два плохих наблюдения подряд уже достаточно.
+        elif force_cleanup and fc >= 2:
+            reason = 'force_fail_count'
+            priority = 1
+        # При переполнении секции ускоренно убираем всё, что уже попадало в плохие наблюдения.
+        elif limit_active and fc > 0:
+            reason = 'limit_fail_count'
+            priority = 2
+        # Ping-фильтр.
+        elif max_latency_ms and delay is not None and delay > max_latency_ms:
+            reason = 'latency'
+            priority = 3
+        # При переполнении секции N/A тоже кандидат на освобождение места.
+        elif limit_active and status in ('bad', 'missing'):
+            reason = 'limit_na'
+            priority = 4
+
+        if reason:
+            # Сортировка: сначала самые плохие по priority, затем больший fail_count, затем больший delay.
+            candidates.append({
+                'sid': sid,
+                'idx': idx,
+                'link': link,
+                'item': item,
+                'reason': reason,
+                'priority': priority,
+                'fail_count': fc,
+                'delay': delay if isinstance(delay, int) else -1,
+                'status': status
+            })
+    candidates.sort(key=lambda x: (x['priority'], -x['fail_count'], -x['delay'], x['idx']))
+    return candidates
+
+
+def slowest_unprotected_candidates(sec, links, st_sec, protected_ids, proxy_snap, already_remove):
+    result = []
+    for idx, link in enumerate(links, 1):
+        sid = stable_id(link)
+        if sid in already_remove or sid in protected_ids:
+            continue
+        item = st_sec['links'].get(sid, {})
+        if item.get('protected_local'):
+            continue
+        ps = proxy_snap.get(sid, {}) if proxy_snap else {}
+        delay = ps.get('delay')
+        if not isinstance(delay, int):
+            ld = item.get('last_delay')
+            delay = ld if isinstance(ld, int) else 0
+        try:
+            fc = int(item.get('fail_count', 0) or 0)
+        except Exception:
+            fc = 0
+        result.append({
+            'sid': sid,
+            'idx': idx,
+            'link': link,
+            'item': item,
+            'reason': 'limit_slowest',
+            'priority': 9,
+            'fail_count': fc,
+            'delay': delay,
+            'status': ps.get('status') or item.get('last_status') or 'unknown'
+        })
+    # Самые медленные и/или с большим fail_count уходят первыми.
+    result.sort(key=lambda x: (-x['fail_count'], -x['delay'], x['idx']))
+    return result
+
+
+def build_final_links_for_section(sec, job, current_sections, state, delete_after_fails, min_keep, protected_ids=None, proxies=None, recent_skip_ids=None):
     now = int(time.time())
     protected_ids = protected_ids or set()
+    recent_skip_ids = recent_skip_ids or set()
     current = current_sections.get(sec, {'ptype': job.get('ptype', 'urltest'), 'links': []})
     current_links = list(current.get('links', []))
     current_unique, current_dups = dedupe_links_keep_order(current_links)
-    current_ids = {stable_id(x) for x in current_unique}
     st_sec = ensure_state_section(state, sec, job.get('ptype') or current.get('ptype'))
     st_sec['proxy_type'] = job.get('ptype') or current.get('ptype', st_sec.get('proxy_type', 'urltest'))
+
+    max_links = parse_positive_int(job.get('max_links', 0), 0)
+    max_latency_ms = parse_positive_int(job.get('max_latency_ms', 0), 0)
+    force_cleanup = bool(job.get('force_cleanup'))
+    dedupe_sni_rotation = bool(job.get('dedupe_sni_rotation'))
+    state.setdefault('recently_removed', {})
+
     # Синхронизируем state с текущим конфигом.
     for link in current_unique:
         sid = stable_id(link)
@@ -729,65 +976,210 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         item['last_seen_in_config'] = now
         if sid in protected_ids:
             item['protected_local'] = True
-    # Подписка только добавляет. Если источник упал или 0 валидных — секцию не меняем вообще.
-    if job.get('source_errors', 0) > 0:
-        log("WARN", f"[{sec}]: есть ошибки источников подписки; секция не изменяется, чтобы не потерять текущие ключи")
-        return None, {'skip': True, 'reason': 'source_errors'}
+
+    # Если источники не дали ни одной валидной ссылки — ничего не чистим и не меняем.
     if job.get('source_success', 0) == 0 or not job.get('links'):
-        log("WARN", f"[{sec}]: подписка не дала валидных ссылок; секция не изменяется")
+        log("WARN", f"[{sec}]: источники подписок не дали валидных ссылок; секция не изменяется")
         return None, {'skip': True, 'reason': 'no_subscription_links'}
-    mark_subscription_seen(state, sec, job['links'])
-    final_links = list(current_unique)
-    added = 0
-    for link in job.get('links', []):
+    if job.get('source_errors', 0) > 0:
+        log("WARN", f"[{sec}]: часть источников подписки недоступна, но валидные ссылки получены; обслуживание продолжается")
+
+    subscription_links = list(job.get('links', []))
+    incoming_sni_collapsed = 0
+    skipped_sni_local = 0
+
+    if dedupe_sni_rotation:
+        subscription_links, incoming_sni_collapsed = dedupe_sni_rotation_links_keep_last(subscription_links)
+        if incoming_sni_collapsed:
+            log("INFO", f"[{sec}]: SNI-ротации внутри подписки схлопнуты: {incoming_sni_collapsed}")
+
+    mark_subscription_seen(state, sec, subscription_links)
+
+    current_ids = {stable_id(x) for x in current_unique}
+    protected_rotation_ids = set()
+    if dedupe_sni_rotation:
+        for link in current_unique:
+            sid = stable_id(link)
+            item = st_sec['links'].get(sid, {})
+            if has_sni_param(link) and (sid in protected_ids or item.get('protected_local')):
+                protected_rotation_ids.add(sni_rotation_id(link))
+
+    incoming_rotation = {}
+    if dedupe_sni_rotation:
+        for link in subscription_links:
+            if has_sni_param(link):
+                incoming_rotation[sni_rotation_id(link)] = link
+
+    initial_new_candidates = []
+    skipped_recent = 0
+    for link in subscription_links:
         sid = stable_id(link)
         item = st_sec['links'].get(sid)
         if item:
             item['last_seen_in_subscription'] = now
-        if sid not in current_ids:
-            final_links.append(link)
-            current_ids.add(sid)
-            st_sec['links'][sid] = {
-                'url': link,
-                'name': link_name(link),
-                'fail_count': 0,
-                'first_seen': now,
-                'last_seen_in_subscription': now,
-                'last_seen_in_config': now,
-                'last_status': 'new',
-                'last_delay': None,
-                'last_checked': None,
-                'protected_local': sid in protected_ids
-            }
-            added += 1
-    # Удаляем только ночью/в maintenance, только если fail_count >= threshold.
-    remove_ids = []
-    for sid, item in list(st_sec['links'].items()):
-        if sid not in current_ids:
+        if sid in current_ids:
             continue
-        try:
-            fc = int(item.get('fail_count', 0))
-        except Exception:
-            fc = 0
-        if fc >= delete_after_fails:
-            if sid in protected_ids or item.get('protected_local'):
-                item['protected_local'] = True
-                log("INFO", f"[{sec}]: ключ защищён как локальный пользовательский, автоудаление пропущено: {item.get('name','')[:80]}")
-                continue
-            remove_ids.append(sid)
-    # Не оставляем секцию пустой.
-    max_remove = max(0, len(final_links) - max(0, min_keep))
-    if len(remove_ids) > max_remove:
-        log("WARN", f"[{sec}]: кандидатов на удаление {len(remove_ids)}, но min_keep={min_keep}; часть ключей оставлена")
-        remove_ids = remove_ids[:max_remove]
-    if remove_ids:
-        remove_set = set(remove_ids)
-        final_links = [x for x in final_links if stable_id(x) not in remove_set]
-        for sid in remove_ids:
-            st_sec['links'].pop(sid, None)
-    changed = added > 0 or len(remove_ids) > 0 or current_dups > 0 or final_links != current_links
-    return final_links, {'skip': False, 'added': added, 'removed': len(remove_ids), 'duplicates': current_dups, 'changed': changed}
+        if sid in recent_skip_ids:
+            skipped_recent += 1
+            continue
+        if dedupe_sni_rotation and has_sni_param(link) and sni_rotation_id(link) in protected_rotation_ids:
+            skipped_sni_local += 1
+            continue
+        initial_new_candidates.append(link)
 
+    potential_count = len(current_unique) + len(initial_new_candidates)
+    limit_active = bool(max_links and potential_count > max_links)
+    if max_links:
+        log("INFO", f"[{sec}]: limit max_links={max_links}, current={len(current_unique)}, new_candidates={len(initial_new_candidates)}, potential={potential_count}")
+    if max_latency_ms:
+        log("INFO", f"[{sec}]: max_latency_ms={max_latency_ms}")
+    if force_cleanup:
+        log("WARN", f"[{sec}]: включена принудительная чистка: fail_count>=2 и ping выше лимита могут быть удалены")
+    if dedupe_sni_rotation:
+        log("INFO", f"[{sec}]: включено схлопывание SNI-ротаций")
+    if skipped_recent:
+        log("INFO", f"[{sec}]: ключей из одноразового списка недавно удалённых пропущено при добавлении: {skipped_recent}")
+    if skipped_sni_local:
+        log("INFO", f"[{sec}]: SNI-дубликатов защищённых локальных ключей пропущено: {skipped_sni_local}")
+
+    proxy_snap = proxy_snapshot_for_links(sec, current_unique, proxies)
+    remove = []
+    remove_ids = set()
+
+    if dedupe_sni_rotation and incoming_rotation:
+        for idx, link in enumerate(current_unique, 1):
+            if not has_sni_param(link):
+                continue
+            sid = stable_id(link)
+            item = st_sec['links'].get(sid, {})
+            if sid in protected_ids or item.get('protected_local'):
+                continue
+            rid = sni_rotation_id(link)
+            new_link = incoming_rotation.get(rid)
+            if not new_link:
+                continue
+            new_sid = stable_id(new_link)
+            if new_sid == sid:
+                continue
+            remove.append({
+                'sid': sid,
+                'idx': idx,
+                'link': link,
+                'item': item,
+                'reason': 'sni_rotation',
+                'priority': -1,
+                'fail_count': 0,
+                'delay': -1,
+                'status': 'sni_rotation'
+            })
+            remove_ids.add(sid)
+
+    # Базовые кандидаты: fail_count, ping, N/A при переполнении, force_cleanup.
+    candidates = removal_candidates(sec, current_unique, st_sec, protected_ids, proxy_snap, delete_after_fails, max_latency_ms, limit_active, force_cleanup)
+
+    # Без лимита и без force_cleanup оставляем только мягкое удаление fail_count>=72.
+    if not limit_active and not force_cleanup:
+        candidates = [c for c in candidates if c['reason'] == 'fail_count_threshold']
+
+    # При force_cleanup удаляем все его кандидаты. При limit_active тоже удаляем плохих/медленных кандидатов.
+    for c in candidates:
+        if c['sid'] not in remove_ids:
+            remove.append(c)
+            remove_ids.add(c['sid'])
+
+    # Если текущая секция сама выше max_links — добиваем самыми медленными до лимита.
+    if max_links and len(current_unique) - len(remove_ids) > max_links:
+        need_extra = len(current_unique) - len(remove_ids) - max_links
+        for c in slowest_unprotected_candidates(sec, current_unique, st_sec, protected_ids, proxy_snap, remove_ids):
+            if need_extra <= 0:
+                break
+            remove.append(c)
+            remove_ids.add(c['sid'])
+            need_extra -= 1
+
+    # Не оставляем секцию ниже min_keep, если можно избежать.
+    max_remove = max(0, len(current_unique) - max(0, min_keep))
+    if len(remove) > max_remove:
+        log("WARN", f"[{sec}]: кандидатов на удаление {len(remove)}, но min_keep={min_keep}; часть ключей оставлена")
+        remove = remove[:max_remove]
+        remove_ids = {c['sid'] for c in remove}
+
+    remaining_links = [x for x in current_unique if stable_id(x) not in remove_ids]
+    removed_by_reason = {}
+    for c in remove:
+        sid = c['sid']
+        item = st_sec['links'].pop(sid, c.get('item') or {})
+        add_recently_removed(state, sid, sec, item, c['reason'])
+        removed_by_reason[c['reason']] = removed_by_reason.get(c['reason'], 0) + 1
+
+    # Добавляем новые только в свободные места, если задан max_links. Иначе добавляем все новые.
+    remaining_ids = {stable_id(x) for x in remaining_links}
+    removed_this_run = set(remove_ids)
+    final_links = list(remaining_links)
+    added = 0
+    skipped_by_limit = 0
+    skipped_removed_this_run = 0
+
+    add_candidates = []
+    for link in initial_new_candidates:
+        sid = stable_id(link)
+        if sid in removed_this_run:
+            skipped_removed_this_run += 1
+            continue
+        if sid in remaining_ids:
+            continue
+        add_candidates.append(link)
+
+    if max_links:
+        free_slots = max(0, max_links - len(final_links))
+        allowed = add_candidates[:free_slots]
+        skipped_by_limit = max(0, len(add_candidates) - len(allowed))
+    else:
+        allowed = add_candidates
+
+    for link in allowed:
+        sid = stable_id(link)
+        if sid in remaining_ids:
+            continue
+        final_links.append(link)
+        remaining_ids.add(sid)
+        st_sec['links'][sid] = {
+            'url': link,
+            'name': link_name(link),
+            'fail_count': 0,
+            'first_seen': now,
+            'last_seen_in_subscription': now,
+            'last_seen_in_config': now,
+            'last_status': 'new',
+            'last_delay': None,
+            'last_checked': None,
+            'protected_local': sid in protected_ids
+        }
+        added += 1
+
+    protected_count = sum(1 for x in final_links if stable_id(x) in protected_ids)
+    if max_links and protected_count > max_links:
+        log("WARN", f"[{sec}]: защищённых локальных ключей {protected_count}, это больше max_links={max_links}; локальные ключи не удаляются")
+
+    changed = added > 0 or len(remove_ids) > 0 or current_dups > 0 or final_links != current_links
+    info = {
+        'skip': False,
+        'added': added,
+        'removed': len(remove_ids),
+        'duplicates': current_dups,
+        'changed': changed,
+        'max_links': max_links,
+        'max_latency_ms': max_latency_ms,
+        'force_cleanup': force_cleanup,
+        'dedupe_sni_rotation': dedupe_sni_rotation,
+        'incoming_sni_collapsed': incoming_sni_collapsed,
+        'skipped_sni_local': skipped_sni_local,
+        'skipped_by_limit': skipped_by_limit,
+        'skipped_recent': skipped_recent,
+        'skipped_removed_this_run': skipped_removed_this_run,
+        'removed_by_reason': removed_by_reason
+    }
+    return final_links, info
 
 def update_uci_config_with_final_links(config_path, updates):
     if not os.path.exists(config_path):
@@ -887,6 +1279,15 @@ def normalize_config(text):
     return text.replace('\n', '').replace('\r', '')
 
 
+def validate_file_argument(path, arg_name):
+    if os.path.isdir(path):
+        log("ERROR", f"{arg_name} должен указывать на файл, а не на директорию: {path}")
+        sys.exit(2)
+    if not os.path.exists(path):
+        log("ERROR", f"{arg_name} не найден: {path}")
+        sys.exit(2)
+
+
 def main():
     setup_syslog()
     args = parse_args()
@@ -894,38 +1295,93 @@ def main():
         print(f"podkop-subscriptions {APP_VERSION}")
         return
     if args.observe_only:
+        validate_file_argument(args.config, '--config')
         observe_only(args.config, args.state)
         return
-    log("INFO", "=== ЗАПУСК НОЧНОГО ОБНОВЛЕНИЯ ПОДПИСОК ===")
+    validate_file_argument(args.config, '--config')
+    validate_file_argument(args.subs, '--subs')
+    log("INFO", "=== ЗАПУСК ОБНОВЛЕНИЯ ПОДПИСОК ===")
     mac = get_mac_address()
     device_model = get_device_model()
     kernel_ver = get_kernel_version()
     raw_hwid_str = f"{mac}{device_model}"
     hwid = hashlib.md5(raw_hwid_str.encode('utf-8')).hexdigest()[:16]
     log("INFO", f"Устройство: {device_model} (Ядро: {kernel_ver})")
-    log("INFO", f"Сгенерирован X-HWID: {hwid}")
+    log("INFO", "X-HWID сгенерирован для запроса подписок")
     jobs = load_jobs(args.subs)
     if not jobs:
         log("INFO", "Нет настроенных подписок. Выход без изменений.")
         return
     current_sections = load_current_podkop_sections(args.config)
     state = load_state(args.state)
+
+    saved_recently_removed = state.get('recently_removed', {})
+    if not isinstance(saved_recently_removed, dict):
+        saved_recently_removed = {}
+    recent_skip_ids = set(saved_recently_removed.keys())
+
+    # recently_removed работает как одноразовый список:
+    # ключи, удалённые в прошлом запуске, пропускаются один раз при добавлении,
+    # затем старый список очищается. Новые удаления текущего запуска попадут сюда
+    # и будут использованы только на следующем запуске.
+    state['recently_removed'] = {}
+    if recent_skip_ids:
+        log("INFO", f"Одноразовый список недавно удалённых ключей загружен: {len(recent_skip_ids)}")
+
     imported, updated = import_current_links_to_state(state, current_sections)
     if imported or updated:
         log("INFO", f"State синхронизирован с текущим Podkop config: новых={imported}, обновлено={updated}")
     fetch_links(jobs, hwid, device_model, kernel_ver)
     protected_local_ids = load_local_protected_ids()
+
+    need_proxies = any(
+        parse_positive_int(job.get('max_links', 0), 0)
+        or parse_positive_int(job.get('max_latency_ms', 0), 0)
+        or bool(job.get('force_cleanup'))
+        for job in jobs.values()
+    )
+    proxies = None
+    if need_proxies:
+        try:
+            proxies = load_podkop_proxies()
+            log("INFO", "Текущее состояние Podkop URLTest получено для отсеивателя.")
+        except Exception as e:
+            log("WARN", f"Не удалось получить текущее состояние Podkop URLTest для отсеивателя: {e}. Будет использован только state.json.")
+
     updates = {}
     summary_changed = False
+    processed_sections = 0
     for sec, job in jobs.items():
-        final_links, info = build_final_links_for_section(sec, job, current_sections, state, args.delete_after_fails, args.min_keep, protected_local_ids)
+        final_links, info = build_final_links_for_section(sec, job, current_sections, state, args.delete_after_fails, args.min_keep, protected_local_ids, proxies, recent_skip_ids)
         if info.get('skip'):
             log("INFO", f"[{sec}]: пропуск изменения секции ({info.get('reason')})")
             continue
-        log("INFO", f"[{sec}]: added={info.get('added',0)}, removed={info.get('removed',0)}, duplicates={info.get('duplicates',0)}, final_links={len(final_links)}")
+        processed_sections += 1
+        extra = []
+        if info.get('removed_by_reason'):
+            extra.append('removed_by_reason=' + ','.join(f"{k}:{v}" for k, v in sorted(info['removed_by_reason'].items())))
+        if info.get('incoming_sni_collapsed'):
+            extra.append(f"incoming_sni_collapsed={info.get('incoming_sni_collapsed')}")
+        if info.get('skipped_sni_local'):
+            extra.append(f"skipped_sni_local={info.get('skipped_sni_local')}")
+        if info.get('skipped_by_limit'):
+            extra.append(f"skipped_by_limit={info.get('skipped_by_limit')}")
+        if info.get('skipped_recent'):
+            extra.append(f"skipped_recent_once={info.get('skipped_recent')}")
+        if info.get('skipped_removed_this_run'):
+            extra.append(f"skipped_removed_this_run={info.get('skipped_removed_this_run')}")
+        tail = (', ' + ', '.join(extra)) if extra else ''
+        log("INFO", f"[{sec}]: added={info.get('added',0)}, removed={info.get('removed',0)}, duplicates={info.get('duplicates',0)}, final_links={len(final_links)}{tail}")
         if info.get('changed'):
             updates[sec] = {'ptype': job.get('ptype', 'urltest'), 'links': final_links}
             summary_changed = True
+    if processed_sections == 0 and recent_skip_ids:
+        # Подписки не дали валидных ключей / все секции пропущены.
+        # Одноразовый список не считаем использованным и возвращаем как был.
+        state['recently_removed'] = saved_recently_removed
+    elif recent_skip_ids:
+        log("INFO", f"Одноразовый список недавно удалённых ключей использован и очищен: {len(recent_skip_ids)}; новых записей для следующего запуска: {len(state.get('recently_removed', {}))}")
+
     save_state(args.state, state)
     if not updates:
         if args.force:
