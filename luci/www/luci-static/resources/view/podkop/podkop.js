@@ -67,6 +67,8 @@ const EntryPoint = {
     );
 
     podkopMap.tabbed = true;
+    if (podkopMap.chain)
+      podkopMap.chain("podkop_subscriptions");
 
     podkopMap.on_after_commit = function() {
       return fs.exec("/usr/bin/podkop-sub-cron-sync", []).catch(function() {});

@@ -18,6 +18,9 @@
         "/etc/config/podkop": [
           "read"
         ],
+        "/etc/config/podkop_subscriptions": [
+          "read"
+        ],
         "/etc/config/podkop-local-links": [
           "read"
         ],
@@ -31,17 +34,22 @@
         ]
       },
       "uci": [
-        "podkop"
+        "podkop",
+        "podkop_subscriptions"
       ]
     },
     "write": {
       "file": {
         "/etc/config/podkop-local-links": [
           "write"
+        ],
+        "/etc/config/podkop_subscriptions": [
+          "write"
         ]
       },
       "uci": [
-        "podkop"
+        "podkop",
+        "podkop_subscriptions"
       ]
     }
   }
