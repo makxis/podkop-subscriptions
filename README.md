@@ -168,7 +168,7 @@ A subscription group contains:
 - SNI deduplication;
 - update schedule.
 
-After changing settings, press **Save & Apply**.
+After changing settings, press **Save & Apply**. This saves the configuration to `/etc/config/podkop_subscriptions`, but it does not load subscriptions automatically. To load subscriptions and write keys into the selected Podkop section, click **Run updater** in the `Подписки` tab or run the manual SSH command. After the updater finishes successfully, refresh the Podkop page to see the updated key list.
 
 ## Group options
 
@@ -206,9 +206,20 @@ Filter by key name or key string.
 
 Empty value means no filtering.
 
+The filter uses regular expression syntax. Use `|` as a separator for multiple alternatives. It means “or”.
+
+Examples:
+
 ```text
 option regex 'Netherlands|Нидерланды|NL'
+option regex 'Finland|Финляндия|FI'
+option regex 'Torrents Free|Messengers'
 ```
+
+Comma `,` is not an alternative separator. If you write `Netherlands,Finland`, it is treated as one text pattern.
+
+If you need to match regular expression special characters as plain text, escape them. For example, a literal dot is `\.`, parentheses are `\(` and `\)`.
+
 
 ### `match_mode`
 
