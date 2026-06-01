@@ -39,17 +39,6 @@ Install with LuCI:
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --with-panel
 ```
 
-## Upgrade from v3.0/v3.1
-
-Version `3.5` can migrate from the old layout.
-
-During installation it creates a backup, migrates legacy `subscription_group` and `subscription_schedule` from `/etc/config/podkop` if needed, removes old service sections, preserves local links and state, recreates cron, removes the old embedded UI, and installs the standalone LuCI page.
-
-Upgrade command:
-
-```sh
-sh install.sh --local --with-panel --no-config
-```
 
 ## Main files
 

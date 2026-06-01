@@ -63,6 +63,7 @@ def parse_args():
     parser.add_argument('--catch-up', action='store_true', help='После загрузки: обновить подписки, если последнее успешное обновление старше 24 часов')
     parser.add_argument('--catch-up-retry', action='store_true', help='Повторять catch-up только если предыдущий catch-up завершился ошибкой')
     parser.add_argument('--status-summary', action='store_true', help='Показать краткое состояние для LuCI')
+    parser.add_argument('--fail-count', action='store_true', help='Показать текущие fail_count по state.json без вывода proxy-ссылок')
     parser.add_argument('--state', default=STATE_PATH_DEFAULT, help='Путь к state.json')
     parser.add_argument('--delete-after-fails', type=int, default=DELETE_AFTER_FAIL_COUNT_DEFAULT, help='Удалять ключ после N подряд неудачных наблюдений')
     parser.add_argument('--min-keep', type=int, default=MIN_KEEP_PER_SECTION_DEFAULT, help='Минимум ключей, которые надо оставить в секции')
@@ -868,6 +869,74 @@ def state_status_summary(state):
     return '\n'.join(lines)
 
 
+
+def print_fail_count_summary(state_path):
+    state = load_state(state_path)
+    sections = state.get('sections', {}) if isinstance(state, dict) else {}
+    if not isinstance(sections, dict) or not sections:
+        print('fail_count: данных пока нет')
+        return
+
+    print('fail_count: текущее состояние')
+    print('state: ' + state_path)
+    printed_any = False
+
+    for sec in sorted(sections.keys()):
+        sec_data = sections.get(sec) or {}
+        links = sec_data.get('links', {})
+        if not isinstance(links, dict):
+            links = {}
+
+        total = len(links)
+        fc0 = 0
+        fc_gt0 = 0
+        fc_ge2 = 0
+        fc_ge_threshold = 0
+        local = 0
+        rows = []
+
+        for sid, item in links.items():
+            if not isinstance(item, dict):
+                item = {}
+            try:
+                fc = int(item.get('fail_count', 0) or 0)
+            except Exception:
+                fc = 0
+            if fc == 0:
+                fc0 += 1
+            if fc > 0:
+                fc_gt0 += 1
+            if fc >= 2:
+                fc_ge2 += 1
+            if fc >= DELETE_AFTER_FAIL_COUNT_DEFAULT:
+                fc_ge_threshold += 1
+            if item.get('protected_local'):
+                local += 1
+            if fc > 0:
+                name = item.get('name') or '(без названия)'
+                rows.append((fc, str(sid), str(name), bool(item.get('protected_local'))))
+
+        print('')
+        print('Секция: ' + str(sec))
+        print('  всего ключей в state: %d' % total)
+        print('  fail_count=0: %d' % fc0)
+        print('  fail_count>0: %d' % fc_gt0)
+        print('  fail_count>=2: %d' % fc_ge2)
+        print('  fail_count>=%d: %d' % (DELETE_AFTER_FAIL_COUNT_DEFAULT, fc_ge_threshold))
+        print('  локальных: %d' % local)
+
+        if rows:
+            printed_any = True
+            print('  Топ проблемных:')
+            rows.sort(key=lambda x: (-x[0], x[2]))
+            for fc, sid, name, is_local in rows[:30]:
+                mark = 'LOCAL' if is_local else 'SUB'
+                print('    fail_count=%d [%s] key=%s name="%s"' % (fc, mark, sid[:12], name[:120]))
+
+    if not printed_any:
+        print('')
+        print('Проблемных ключей с fail_count>0 нет.')
+
 def print_status_summary(state_path):
     state = load_state(state_path)
     print(state_status_summary(state))
@@ -1651,6 +1720,9 @@ def main():
         return
     if args.status_summary:
         print_status_summary(args.state)
+        return
+    if args.fail_count:
+        print_fail_count_summary(args.state)
         return
     if args.catch_up:
         catch_up(args, retry_only=False)
