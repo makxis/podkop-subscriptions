@@ -13,10 +13,10 @@ Podkop остаётся отдельным сервисом. Podkop Subscription
 ## Проверенная конфигурация
 
 ```text
-OpenWrt: 24.10.3–24.10.6
-Podkop: v0.7.17–v0.7.18
-LuCI App Podkop: v0.7.17–v0.7.18
-Sing-box: 1.12.22
+OpenWrt: 24.10.3–24.10.6; 25.12.4
+Podkop: v0.7.17–v0.7.19
+LuCI App Podkop: v0.7.17–v0.7.19
+Sing-box: 1.12.17; 1.12.22
 ```
 
 ## Что умеет
