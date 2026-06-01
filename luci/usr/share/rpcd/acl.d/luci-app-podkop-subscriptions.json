@@ -1,20 +1,8 @@
 {
-  "luci-app-podkop": {
-    "description": "Grant UCI, file and RPC access to LuCI app podkop",
+  "luci-app-podkop-subscriptions": {
+    "description": "Grant access to Podkop Subscriptions LuCI app",
     "read": {
       "file": {
-        "/etc/init.d/podkop": [
-          "exec"
-        ],
-        "/usr/bin/podkop": [
-          "exec"
-        ],
-        "/usr/bin/podkop-sub-updater.py": [
-          "exec"
-        ],
-        "/usr/bin/podkop-sub-cron-sync": [
-          "exec"
-        ],
         "/etc/config/podkop": [
           "read"
         ],
@@ -24,31 +12,36 @@
         "/etc/config/podkop-local-links": [
           "read"
         ],
+        "/usr/bin/podkop-sub-updater.py": [
+          "exec"
+        ],
+        "/usr/bin/podkop-sub-cron-sync": [
+          "exec"
+        ],
         "/usr/bin/podkop-sub-run-now": [
           "exec"
-        ]
-      },
-      "ubus": {
-        "service": [
-          "list"
         ]
       },
       "uci": [
         "podkop",
         "podkop_subscriptions"
-      ]
+      ],
+      "ubus": {
+        "service": [
+          "list"
+        ]
+      }
     },
     "write": {
       "file": {
-        "/etc/config/podkop-local-links": [
+        "/etc/config/podkop_subscriptions": [
           "write"
         ],
-        "/etc/config/podkop_subscriptions": [
+        "/etc/config/podkop-local-links": [
           "write"
         ]
       },
       "uci": [
-        "podkop",
         "podkop_subscriptions"
       ]
     }

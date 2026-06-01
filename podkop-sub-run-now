@@ -20,7 +20,7 @@ case "$1" in
       echo ""
       echo "Updater ещё выполняется."
       echo "Текущий лог:"
-      tail -n 80 "$LOG" 2>/dev/null || echo "Лог пока пуст: $LOG"
+      tail -n 140 "$LOG" 2>/dev/null || echo "Лог пока пуст: $LOG"
       exit 0
     fi
 
@@ -29,7 +29,7 @@ case "$1" in
       [ -f "$STATUS" ] && grep -v '^STATE=' "$STATUS" 2>/dev/null || true
       echo ""
       echo "Результат последнего запуска:"
-      tail -n 220 "$LOG" 2>/dev/null
+      tail -n 260 "$LOG" 2>/dev/null
       exit 0
     fi
 
