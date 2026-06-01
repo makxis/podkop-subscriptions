@@ -5,7 +5,8 @@
 "require baseclass";
 
 const LOCAL_LINKS = "/etc/config/podkop-local-links";
-const PODKOP_SUBSCRIPTIONS_VERSION = "3.1";
+const PODKOP_SUBSCRIPTIONS_VERSION = "3.5";
+const STATUS_STYLE_PLAIN_CARD_V35 = true;
 
 function hideDuplicatedSubscriptionsTitle() {
   if (document.getElementById("podkop-subscriptions-title-hide-style"))
@@ -40,11 +41,25 @@ function execOutputText(res) {
   return out;
 }
 
+function makeLogBox(text) {
+  const box = E("pre", {
+    style: "white-space: pre-wrap; max-height: 620px; overflow: auto"
+  }, text || "");
+  ui.addNotification(null, box);
+  return box;
+}
+
+function setLogBox(box, text) {
+  if (!box)
+    return;
+
+  box.textContent = text || _("Нет вывода updater");
+  box.scrollTop = box.scrollHeight;
+}
+
 function notifyOutput(title, res) {
   const out = execOutputText(res);
-  ui.addNotification(null, E("pre", {
-    style: "white-space: pre-wrap; max-height: 520px; overflow: auto"
-  }, out || title));
+  return makeLogBox(out || title);
 }
 
 function delayMs(ms) {
@@ -53,20 +68,23 @@ function delayMs(ms) {
   });
 }
 
-function pollUpdaterResult(attempt) {
+function pollUpdaterResult(attempt, box) {
   return fs.exec("/usr/bin/podkop-sub-run-now", ["--status"]).then(function(res) {
     const out = execOutputText(res);
+    setLogBox(box, out);
 
     if (out.indexOf("STATE=running") !== -1 && attempt < 240)
       return delayMs(3000).then(function() {
-        return pollUpdaterResult(attempt + 1);
+        return pollUpdaterResult(attempt + 1, box);
       });
 
-    ui.addNotification(null, E("pre", {
-      style: "white-space: pre-wrap; max-height: 620px; overflow: auto"
-    }, out || _("Нет вывода updater")));
+    return out;
   }).catch(function(err) {
-    ui.addNotification(null, E("pre", { style: "white-space: pre-wrap" }, String(err)), "danger");
+    const msg = String(err);
+    if (box)
+      setLogBox(box, msg);
+    else
+      ui.addNotification(null, E("pre", { style: "white-space: pre-wrap" }, msg), "danger");
   });
 }
 
@@ -80,6 +98,31 @@ return baseclass.extend({
     };
 
     let o, ss;
+
+    o = section.option(
+      form.DummyValue,
+      "_status_summary",
+      _("Состояние")
+    );
+    o.rawhtml = true;
+    o.cfgvalue = function() {
+      return fs.exec("/usr/bin/podkop-sub-updater.py", ["--status-summary"]).then(function(res) {
+        const text = execOutputText(res) || "Состояние: нет данных.";
+        const isBad = text.indexOf("авария") !== -1 || text.indexOf("ошибка") !== -1;
+        const isFirst = text.indexOf("первичная настройка") !== -1;
+        const label = isBad ? "АВАРИЯ" : (isFirst ? "ПЕРВИЧНАЯ НАСТРОЙКА" : "OK");
+        const labelBg = isBad ? "#b00020" : (isFirst ? "#2059b3" : "#0b6b0b");
+        const safeText = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return '<div style="white-space:pre-wrap;padding:11px 13px;border:1px solid #222;background:#ffffff;color:#000000;font-weight:600;line-height:1.45;border-radius:4px;box-shadow:none">' +
+          '<span style="display:inline-block;margin-bottom:6px;padding:2px 7px;border-radius:3px;background:' + labelBg + ';color:#ffffff;font-weight:700;font-size:11px;letter-spacing:.02em">' + label + '</span>\n' +
+          safeText +
+          '</div>';
+      }).catch(function(err) {
+        return '<div style="white-space:pre-wrap;padding:10px;border-left:4px solid #999;background:#f7f7f7">Состояние: нет данных. ' +
+          String(err).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") +
+          '</div>';
+      });
+    };
 
     o = section.option(
       form.SectionValue,
@@ -348,9 +391,9 @@ return baseclass.extend({
     o.inputstyle = "reload";
     o.onclick = function() {
       return fs.exec("/usr/bin/podkop-sub-run-now", []).then(function(res) {
-        notifyOutput("Updater started", res);
-        return delayMs(2000).then(function() {
-          return pollUpdaterResult(0);
+        const box = notifyOutput("Updater started", res);
+        return delayMs(1000).then(function() {
+          return pollUpdaterResult(0, box);
         });
       }).catch(function(err) {
         ui.addNotification(null, E("pre", { style: "white-space: pre-wrap" }, String(err)), "danger");

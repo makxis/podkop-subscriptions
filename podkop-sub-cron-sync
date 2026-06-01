@@ -6,11 +6,12 @@ CRON_FILE="/etc/crontabs/root"
 SUB_CFG="/etc/config/podkop_subscriptions"
 UPDATER_TAG="# podkop-sub-updater"
 HEALTH_TAG="# podkop-sub-health"
+CATCHUP_TAG="# podkop-sub-catchup"
 
 touch "$CRON_FILE"
 
 # Удаляем только наши управляемые строки. Штатный podkop list_update не трогаем.
-grep -v "$UPDATER_TAG" "$CRON_FILE" | grep -v "$HEALTH_TAG" > "$CRON_FILE.tmp"
+grep -v "$UPDATER_TAG" "$CRON_FILE" | grep -v "$HEALTH_TAG" | grep -v "$CATCHUP_TAG" > "$CRON_FILE.tmp"
 mv "$CRON_FILE.tmp" "$CRON_FILE"
 
 if [ ! -f "$SUB_CFG" ]; then
@@ -68,6 +69,11 @@ add_hourly_observer() {
   echo "0 * * * * /usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop 2>&1 | logger -t podkop-sub-health $HEALTH_TAG:auto" >> "$CRON_FILE"
 }
 
+add_catchup_jobs() {
+  echo "@reboot sleep 300 && /usr/bin/podkop-sub-updater.py --catch-up --subs $SUB_CFG --config /etc/config/podkop 2>&1 | logger -t podkop-sub-catchup $CATCHUP_TAG:boot" >> "$CRON_FILE"
+  echo "*/30 * * * * /usr/bin/podkop-sub-updater.py --catch-up-retry --subs $SUB_CFG --config /etc/config/podkop 2>&1 | logger -t podkop-sub-catchup $CATCHUP_TAG:retry" >> "$CRON_FILE"
+}
+
 config_load podkop_subscriptions
 config_foreach count_group subscription_group
 
@@ -79,6 +85,7 @@ if [ "$GROUPS_COUNT" -eq 0 ]; then
 fi
 
 add_hourly_observer
+add_catchup_jobs
 config_foreach add_schedule subscription_schedule
 
 /etc/init.d/cron enable >/dev/null 2>&1
@@ -86,8 +93,8 @@ config_foreach add_schedule subscription_schedule
 
 if [ "$SCHEDULES_COUNT" -eq 0 ]; then
   echo "No enabled subscription schedules. Only hourly health observer was enabled:"
-  grep "$HEALTH_TAG" "$CRON_FILE"
+  grep "$HEALTH_TAG\|$CATCHUP_TAG" "$CRON_FILE"
 else
   echo "Cron updated:"
-  grep "$HEALTH_TAG\|$UPDATER_TAG" "$CRON_FILE"
+  grep "$HEALTH_TAG\|$UPDATER_TAG\|$CATCHUP_TAG" "$CRON_FILE"
 fi

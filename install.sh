@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.1"
+APP_VERSION="3.5"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
@@ -160,6 +160,139 @@ choose_target_section() {
   fi
   ask_value "Введите имя целевой секции Podkop" "main"
 }
+
+
+create_upgrade_backup() {
+  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+  backup="/root/podkop-subscriptions-upgrade-backup-${ts}.tar.gz"
+
+  tar -czf "$backup" \
+    /etc/config/podkop \
+    /etc/config/podkop_subscriptions \
+    /etc/config/podkop-local-links \
+    /etc/podkop-subscriptions \
+    /etc/crontabs/root \
+    /usr/bin/podkop-sub-updater.py \
+    /usr/bin/podkop-sub-cron-sync \
+    /usr/bin/podkop-sub-run-now \
+    /usr/share/podkop-subscriptions \
+    /www/luci-static/resources/view/podkop/subscriptions.js \
+    /www/luci-static/resources/view/podkop_subscriptions \
+    /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json \
+    /usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json \
+    2>/tmp/podkop-sub-upgrade-backup-errors.log || true
+
+  if [ -s "$backup" ]; then
+    say "Backup created: $backup"
+  else
+    warn "backup file was not created or is empty: $backup"
+  fi
+}
+
+migrate_legacy_config_from_podkop() {
+  # v3.0 stored subscription_group/subscription_schedule directly in /etc/config/podkop.
+  # v3.1+ uses /etc/config/podkop_subscriptions.
+  [ -f "$SUB_CFG" ] && return 0
+  [ -f "$PODKOP_CFG" ] || return 0
+
+  tmp="${SUB_CFG}.tmp.$$"
+
+  awk '
+    function is_legacy_type(t) {
+      return t == "subscription_group" || t == "subscription_schedule"
+    }
+
+    /^[ \t]*config[ \t]+/ {
+      if (copy) print ""
+      copy = 0
+
+      t = $2
+      if (is_legacy_type(t)) {
+        copy = 1
+        found = 1
+        print
+      }
+      next
+    }
+
+    {
+      if (copy) print
+    }
+
+    END {
+      if (!found) exit 2
+    }
+  ' "$PODKOP_CFG" > "$tmp" || {
+    rm -f "$tmp"
+    return 0
+  }
+
+  if [ -s "$tmp" ]; then
+    mkdir -p "$(dirname "$SUB_CFG")"
+    {
+      echo "# Podkop Subscriptions config"
+      echo "# Migrated automatically from /etc/config/podkop legacy sections."
+      echo "# Main settings file for Podkop Subscriptions v${APP_VERSION}."
+      echo ""
+      cat "$tmp"
+    } > "$SUB_CFG"
+    rm -f "$tmp"
+    say "Migrated legacy subscription settings to: $SUB_CFG"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+remove_legacy_sections_from_podkop() {
+  [ -f "$PODKOP_CFG" ] || return 0
+  command -v uci >/dev/null 2>&1 || return 0
+
+  changed=0
+  for typ in subscription_group subscription_schedule subscriptions_ui local_links; do
+    for s in $(uci show podkop 2>/dev/null | sed -n "s/^podkop\.\([^=]*\)=${typ}$/\1/p"); do
+      say "Removing legacy Podkop section: $typ $s"
+      uci delete "podkop.$s" 2>/dev/null || true
+      changed=1
+    done
+  done
+
+  [ "$changed" = "1" ] && uci commit podkop 2>/dev/null || true
+}
+
+cleanup_old_luci_leftovers() {
+  rm -f /www/luci-static/resources/view/podkop/subscriptions.js 2>/dev/null || true
+  rm -rf /www/luci-static/resources/view/podkop_subscriptions 2>/dev/null || true
+  rm -f /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json 2>/dev/null || true
+  rm -f /usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json 2>/dev/null || true
+}
+
+cleanup_old_cron_lines() {
+  cron_file="/etc/crontabs/root"
+  [ -f "$cron_file" ] || return 0
+  tmp="${cron_file}.tmp.$$"
+
+  grep -v 'podkop-sub-updater' "$cron_file" \
+    | grep -v 'podkop-sub-health' \
+    | grep -v 'podkop-updater-cron' \
+    | grep -v 'podkop-sub-catchup' \
+    | grep -v 'podkop-sub-run-now' > "$tmp" || true
+
+  mv "$tmp" "$cron_file"
+}
+
+prepare_upgrade_from_legacy() {
+  create_upgrade_backup
+  migrate_legacy_config_from_podkop
+  remove_legacy_sections_from_podkop
+  cleanup_old_cron_lines
+  cleanup_old_luci_leftovers
+
+  # Preserve user local links and state:
+  #   /etc/config/podkop-local-links
+  #   /etc/podkop-subscriptions/state.json
+  mkdir -p /etc/podkop-subscriptions
+}
+
 
 write_default_config() {
   mkdir -p /etc/config
@@ -337,30 +470,87 @@ install_core() {
   chmod 0755 /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now
   touch "$LOCAL_LINKS"
   chmod 0600 "$LOCAL_LINKS" || true
+  prepare_upgrade_from_legacy
   write_default_config
   say "Core installed. Version: $APP_VERSION"
 }
 
+detach_old_embedded_panel() {
+  file="/www/luci-static/resources/view/podkop/podkop.js"
+  [ -f "$file" ] || return 0
+
+  # Remove old Podkop Subscriptions tab injected by v3.1/v3.2.
+  # This is a cleanup of our previous integration, not a new Podkop patch.
+  if grep -q 'view.podkop.subscriptions as subscriptions\|subscriptions.createSubscriptionsContent' "$file"; then
+    python3 - "$file" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8', errors='replace') as f:
+    text = f.read()
+
+text = re.sub(r'\n// Subscriptions content\n"require view\.podkop\.subscriptions as subscriptions";\n', '\n', text)
+text = re.sub(r'\n"require view\.podkop\.subscriptions as subscriptions";\n', '\n', text)
+
+text = re.sub(
+    r'\nfunction podkopSubParseUciValue\(raw\) \{.*?\n\}\n\nfunction podkopSubParsePodkopSections\(text\) \{.*?\n\}\n\n',
+    '\n',
+    text,
+    flags=re.S,
+)
+
+text = re.sub(
+    r'\n    const podkopText = await fs\.read\("/etc/config/podkop"\)\.catch\(function\(\) \{\n      return "";\n    \}\);\n\n    const podkopSections = podkopSubParsePodkopSections\(podkopText\);\n',
+    '\n',
+    text,
+)
+
+text = re.sub(
+    r'\n    if \(podkopMap\.chain\)\n      podkopMap\.chain\("podkop_subscriptions"\);\n\n    const podkopSubOriginalAfterCommit = podkopMap\.on_after_commit;\n    podkopMap\.on_after_commit = function\(\) \{\n      const previous = podkopSubOriginalAfterCommit \? podkopSubOriginalAfterCommit\.apply\(this, arguments\) : Promise\.resolve\(\);\n      return Promise\.resolve\(previous\)\.then\(function\(\) \{\n        return fs\.exec\("/usr/bin/podkop-sub-cron-sync", \[\]\)\.catch\(function\(\) \{\}\);\n      \}\);\n    \};\n',
+    '\n',
+    text,
+)
+
+text = re.sub(
+    r'\n    // Subscriptions tab\n    const subscriptionsSection = podkopMap\.section\(\n      form\.TypedSection,\n      "subscriptions_ui",\n      _\("Подписки"\),\n    \);\n    subscriptions\.createSubscriptionsContent\(subscriptionsSection, podkopSections\);\n',
+    '\n',
+    text,
+)
+
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(text)
+PY
+  fi
+
+  rm -f /www/luci-static/resources/view/podkop/subscriptions.js 2>/dev/null || true
+}
+
 install_panel() {
-  if [ ! -f /www/luci-static/resources/view/podkop/podkop.js ]; then
-    warn "base LuCI app podkop was not found at /www/luci-static/resources/view/podkop/podkop.js"
-    warn "install podkop/luci-app-podkop separately first, then rerun with --with-panel"
+  if [ ! -d /www/luci-static/resources/view ]; then
+    warn "LuCI static view directory was not found. Install LuCI first, then rerun with --with-panel."
     return 0
   fi
-  say "Installing optional LuCI subscriptions panel..."
-  backup_file /www/luci-static/resources/view/podkop/podkop.js
-  backup_file /www/luci-static/resources/view/podkop/main.js
+
+  say "Installing standalone LuCI app: Services -> Подписки Podkop"
+  say "Podkop native LuCI files are not patched or replaced."
+
   backup_file /www/luci-static/resources/view/podkop/subscriptions.js
-  backup_file /usr/share/rpcd/acl.d/luci-app-podkop.json
-  install_file "luci/www/luci-static/resources/view/podkop/podkop.js" /www/luci-static/resources/view/podkop/podkop.js
-  install_file "luci/www/luci-static/resources/view/podkop/main.js" /www/luci-static/resources/view/podkop/main.js
-  install_file "luci/www/luci-static/resources/view/podkop/subscriptions.js" /www/luci-static/resources/view/podkop/subscriptions.js
-  install_file "luci/usr/share/rpcd/acl.d/luci-app-podkop.json" /usr/share/rpcd/acl.d/luci-app-podkop.json
+  backup_file /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json
+  backup_file /usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json
+
+  detach_old_embedded_panel
+
+  install_file "luci/www/luci-static/resources/view/podkop_subscriptions/content.js" /www/luci-static/resources/view/podkop_subscriptions/content.js
+  install_file "luci/www/luci-static/resources/view/podkop_subscriptions/subscriptions.js" /www/luci-static/resources/view/podkop_subscriptions/subscriptions.js
+  install_file "luci/usr/share/luci/menu.d/luci-app-podkop-subscriptions.json" /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json
+  install_file "luci/usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json" /usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json
+
   rm -f /tmp/luci-indexcache 2>/dev/null || true
   rm -rf /tmp/luci-modulecache 2>/dev/null || true
   /etc/init.d/rpcd restart >/dev/null 2>&1 || true
   /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
-  say "LuCI panel installed. Reopen the Podkop page in LuCI."
+  say "LuCI app installed. Open LuCI: Services -> Подписки Podkop."
 }
 
 ask_panel() {
@@ -389,7 +579,7 @@ fi
 
 say ""
 say "Done."
-say "Основной конфиг: $SUB_CFG"
+say "Настройки: $SUB_CFG"
 say "Локальные ключи: $LOCAL_LINKS"
 say "Состояние: /etc/podkop-subscriptions/state.json"
 say ""

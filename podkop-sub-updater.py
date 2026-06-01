@@ -12,7 +12,7 @@ import json
 import time
 
 
-APP_VERSION = "3.1"
+APP_VERSION = "3.5"
 USER_AGENT = f"Podkop-Subscription-Updater/{APP_VERSION}"
 VALID_PROTOCOLS = ('vless://', 'ss://', 'trojan://', 'socks4://', 'socks4a://', 'socks5://', 'hy2://', 'hysteria2://')
 VALID_PTYPES = {'urltest', 'selector'}
@@ -25,6 +25,8 @@ DELETE_AFTER_FAIL_COUNT_DEFAULT = 72
 MIN_KEEP_PER_SECTION_DEFAULT = 1
 SOURCE_TIMEOUT_DEFAULT = 45
 SOURCE_RETRIES_DEFAULT = 3
+CATCHUP_AFTER_HOURS_DEFAULT = 24
+VALID_TIME_MIN_TS = 1700000000
 
 
 def setup_syslog():
@@ -58,6 +60,9 @@ def parse_args():
     parser.add_argument('--subs', default=SUBSCRIPTIONS_CONFIG_DEFAULT, help='Путь к UCI конфигу подписок')
     parser.add_argument('--force', action='store_true', help='Принудительно перезаписать конфиг podkop и перезапустить сервис')
     parser.add_argument('--observe-only', action='store_true', help='Только обновить fail_count по текущему состоянию Podkop URLTest; конфиг не менять')
+    parser.add_argument('--catch-up', action='store_true', help='После загрузки: обновить подписки, если последнее успешное обновление старше 24 часов')
+    parser.add_argument('--catch-up-retry', action='store_true', help='Повторять catch-up только если предыдущий catch-up завершился ошибкой')
+    parser.add_argument('--status-summary', action='store_true', help='Показать краткое состояние для LuCI')
     parser.add_argument('--state', default=STATE_PATH_DEFAULT, help='Путь к state.json')
     parser.add_argument('--delete-after-fails', type=int, default=DELETE_AFTER_FAIL_COUNT_DEFAULT, help='Удалять ключ после N подряд неудачных наблюдений')
     parser.add_argument('--min-keep', type=int, default=MIN_KEEP_PER_SECTION_DEFAULT, help='Минимум ключей, которые надо оставить в секции')
@@ -580,34 +585,55 @@ def fetch_links(jobs, hwid, device_model, kernel_ver):
         section_links = []
         job['source_errors'] = 0
         job['source_success'] = 0
+        job['source_stats'] = []
+        job['raw_links_count'] = 0
+        job['filtered_links_count'] = 0
         for src_idx, entry in enumerate(job['entries'], 1):
             source = entry['source']
             label = 'локальный список' if source in (LOCAL_LINKS_PATH_DEFAULT, 'file://' + LOCAL_LINKS_PATH_DEFAULT) else f'источник {src_idx}'
+            st = {'label': label, 'raw': 0, 'filtered': 0, 'format': '', 'status': 'unknown'}
             try:
                 payload = read_source_payload(source, hwid, device_model, kernel_ver, payload_cache, label)
             except subprocess.TimeoutExpired:
+                st['status'] = 'download_failed'
+                job['source_stats'].append(st)
                 log("ERROR", f"[{sec}]: Превышено время ожидания ответа сервера: {label}")
                 job['source_errors'] += 1
                 continue
             except Exception as e:
+                st['status'] = 'download_failed'
+                job['source_stats'].append(st)
                 log("ERROR", f"[{sec}]: Ошибка чтения источника {label} -> {e}")
                 job['source_errors'] += 1
                 continue
             links_raw, payload_type = extract_links_from_payload(payload)
+            st['format'] = payload_type
+            st['raw'] = len(links_raw)
+            job['raw_links_count'] += len(links_raw)
             if payload_type == 'invalid':
+                st['status'] = 'unsupported_format'
+                job['source_stats'].append(st)
                 log("ERROR", f"[{sec}]: {label} не plain-text URI и не валидный Base64")
                 job['source_errors'] += 1
                 continue
             if not links_raw:
+                st['status'] = 'empty_subscription'
+                job['source_stats'].append(st)
                 log("WARN", f"[{sec}]: в {label} нет ссылок поддерживаемого типа")
                 job['source_success'] += 1
                 continue
             filtered_links = filter_links(links_raw, entry['regex'], entry['match_mode'], entry['on_empty'], sec, label)
+            st['filtered'] = len(filtered_links)
+            job['filtered_links_count'] += len(filtered_links)
             if not filtered_links:
+                st['status'] = 'empty_after_filter'
+                job['source_stats'].append(st)
                 job['source_success'] += 1
                 continue
             section_links.extend(filtered_links)
             job['source_success'] += 1
+            st['status'] = 'ok'
+            job['source_stats'].append(st)
             log("INFO", f"[{sec}]: {label} ({payload_type}) -> ссылок после фильтра: {len(filtered_links)}")
         job['links'], dup_count = dedupe_links_keep_order(section_links)
         if dup_count:
@@ -616,7 +642,6 @@ def fetch_links(jobs, hwid, device_model, kernel_ver):
             log("INFO", f"[{sec}]: Итого уникальных новых ссылок из подписок: {len(job['links'])}")
         else:
             log("WARN", f"[{sec}]: После обработки всех источников не осталось ссылок.")
-
 
 def load_current_podkop_sections(config_path):
     result = {}
@@ -645,7 +670,7 @@ def load_current_podkop_sections(config_path):
 
 
 def default_state():
-    return {'version': 3, 'sections': {}, 'health': {}, 'recently_removed': {}}
+    return {'version': 3, 'sections': {}, 'health': {}, 'recently_removed': {}, 'meta': {}}
 
 
 def load_state(path):
@@ -660,6 +685,7 @@ def load_state(path):
         st.setdefault('sections', {})
         st.setdefault('health', {})
         st.setdefault('recently_removed', {})
+        st.setdefault('meta', {})
         return st
     except Exception as e:
         log("WARN", f"Не удалось прочитать state.json: {e}. Будет создан новый state.")
@@ -678,6 +704,335 @@ def save_state(path, state):
     except Exception:
         pass
 
+
+
+def fmt_time(ts):
+    try:
+        ts = int(ts or 0)
+    except Exception:
+        ts = 0
+    if ts <= 0:
+        return 'нет данных'
+    try:
+        return time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))
+    except Exception:
+        return str(ts)
+
+
+def status_text_for_code(code):
+    mapping = {
+        'ok': 'OK',
+        'partial_ok': 'частично OK',
+        'download_failed': 'ошибка загрузки подписок',
+        'empty_response': 'источник вернул пустой ответ',
+        'unsupported_format': 'неподдерживаемый формат подписки',
+        'empty_subscription': 'в подписке не найдено proxy-ссылок',
+        'empty_after_filter': 'все ключи отброшены фильтром',
+        'no_subscription_links': 'валидных ключей из подписок не найдено',
+        'no_jobs': 'нет настроенных подписок',
+        'config_write_error': 'ошибка записи конфига',
+        'time_not_ready': 'время роутера не синхронизировано',
+        'unknown': 'нет данных'
+    }
+    return mapping.get(str(code or 'unknown'), str(code or 'нет данных'))
+
+
+def state_status_summary(state):
+    meta = state.get('meta') if isinstance(state, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    health = state.get('health') if isinstance(state, dict) else {}
+    if not isinstance(health, dict):
+        health = {}
+
+    status = meta.get('last_subscription_status') or 'unknown'
+    success_ts = meta.get('last_subscription_success_ts')
+    attempt_ts = meta.get('last_subscription_attempt_ts')
+
+    if not success_ts and not attempt_ts:
+        return 'Состояние: первичная настройка — нажмите кнопку «Запустить updater» внизу страницы для первого подтягивания конфигов.'
+
+    ok = health.get('ok', meta.get('last_working_links', 0))
+    bad = health.get('bad', meta.get('last_bad_links', 0))
+    missing = health.get('missing', 0)
+    removed = meta.get('last_removed', 0)
+    local = meta.get('last_local_links', 0)
+    final_links = meta.get('last_final_links', 0)
+    unique_links = meta.get('last_unique_links', 0)
+    src_ok = meta.get('last_sources_ok', 0)
+    src_total = meta.get('last_sources_total', None)
+
+    if src_total is None:
+        try:
+            src_total = int(meta.get('last_sources_ok', 0) or 0) + int(meta.get('last_sources_failed', 0) or 0)
+        except Exception:
+            src_total = 0
+
+    try:
+        ok = int(ok or 0)
+    except Exception:
+        ok = 0
+    try:
+        bad = int(bad or 0) + int(missing or 0)
+    except Exception:
+        bad = 0
+    try:
+        removed = int(removed or 0)
+    except Exception:
+        removed = 0
+    try:
+        local = int(local or 0)
+    except Exception:
+        local = 0
+    try:
+        final_links = int(final_links or 0)
+    except Exception:
+        final_links = 0
+    try:
+        unique_links = int(unique_links or 0)
+    except Exception:
+        unique_links = 0
+    try:
+        src_ok = int(src_ok or 0)
+    except Exception:
+        src_ok = 0
+    try:
+        src_total = int(src_total or 0)
+    except Exception:
+        src_total = 0
+
+    # Если подписки успешно обработаны, это OK даже до первой observe-проверки.
+    # В этом случае рабочих ключей может быть 0 просто потому, что URLTest ещё не накопил статистику.
+    if status in ('ok', 'partial_ok'):
+        if ok > 0:
+            keys_part = 'рабочих ключей: %d, проблемных: %d' % (ok, bad)
+        elif final_links > 0:
+            keys_part = 'ключей в секции: %d, рабочих: нет данных' % final_links
+        elif unique_links > 0:
+            keys_part = 'загружено ключей: %d, рабочих: нет данных' % unique_links
+        else:
+            keys_part = 'рабочих ключей: нет данных'
+
+        return (
+            'Состояние: OK — обновлено: %s, источники: %d/%d, %s, удалено: %d, локальных: %d.'
+            % (fmt_time(success_ts), src_ok, src_total, keys_part, removed, local)
+        )
+
+    lines = []
+    lines.append('Состояние: авария — ' + status_text_for_code(status) + '.')
+    lines.append('Последнее успешное обновление: ' + fmt_time(success_ts) + '.')
+    if attempt_ts:
+        lines.append('Последняя попытка: ' + fmt_time(attempt_ts) + '.')
+    lines.append('Источники: %d/%d.' % (src_ok, src_total))
+    lines.append('Рабочих ключей: %d, проблемных: %d, ключей в секции: %d, удалено: %d, локальных: %d.' % (ok, bad, final_links, removed, local))
+
+    detail = meta.get('last_subscription_message')
+    if detail:
+        lines.append(str(detail))
+
+    source_details = meta.get('last_source_details') or []
+    problem_rows = []
+    for st in source_details:
+        if not isinstance(st, dict):
+            continue
+        code = st.get('status')
+        if code == 'ok':
+            continue
+
+        label = st.get('label') or 'источник'
+        try:
+            raw = int(st.get('raw', 0) or 0)
+        except Exception:
+            raw = 0
+
+        if code == 'download_failed':
+            problem_rows.append(f'{label}: ошибка загрузки.')
+        elif code == 'unsupported_format':
+            problem_rows.append(f'{label}: неподдерживаемый формат подписки.')
+        elif code == 'empty_after_filter':
+            problem_rows.append(f'{label}: после фильтра осталось 0 ключей из {raw}.')
+        elif code == 'empty_subscription':
+            problem_rows.append(f'{label}: поддерживаемых proxy-ссылок не найдено.')
+        elif code:
+            problem_rows.append(f'{label}: {status_text_for_code(code)}.')
+        else:
+            problem_rows.append(f'{label}: неизвестная ошибка.')
+
+    if problem_rows:
+        lines.append('Проблемы источников:')
+        lines.extend(problem_rows[:12])
+
+    if meta.get('catchup_retry_active'):
+        lines.append('Повтор обновления активен: следующая попытка будет выполнена по cron.')
+
+    return '\n'.join(lines)
+
+
+def print_status_summary(state_path):
+    state = load_state(state_path)
+    print(state_status_summary(state))
+
+
+def is_router_time_valid(state):
+    now = int(time.time())
+    if now >= VALID_TIME_MIN_TS:
+        return True
+    meta = state.setdefault('meta', {})
+    meta['last_subscription_status'] = 'time_not_ready'
+    meta['last_subscription_message'] = 'Время роутера ещё не синхронизировано, catch-up отложен.'
+    return False
+
+
+def subscription_run_success(state):
+    meta = state.get('meta', {})
+    return meta.get('last_subscription_status') in ('ok', 'partial_ok')
+
+
+def set_catchup_retry(state, active, reason=''):
+    meta = state.setdefault('meta', {})
+    meta['catchup_retry_active'] = bool(active)
+    if active:
+        meta['catchup_retry_fail_count'] = int(meta.get('catchup_retry_fail_count', 0) or 0) + 1
+        meta['catchup_retry_last_error'] = reason
+        meta['catchup_retry_last_attempt_ts'] = int(time.time())
+    else:
+        meta['catchup_retry_fail_count'] = 0
+        meta['catchup_retry_last_error'] = ''
+
+
+def run_subprocess_update(args):
+    cmd = [
+        sys.executable or 'python3', os.path.abspath(__file__),
+        '--subs', args.subs, '--config', args.config, '--state', args.state,
+        '--delete-after-fails', str(args.delete_after_fails), '--min-keep', str(args.min_keep), '--force'
+    ]
+    return subprocess.run(cmd).returncode
+
+
+def catch_up(args, retry_only=False):
+    state = load_state(args.state)
+    meta = state.setdefault('meta', {})
+    if not is_router_time_valid(state):
+        save_state(args.state, state)
+        log('WARN', 'catch-up: время роутера ещё не синхронизировано, обновление отложено')
+        return
+    if retry_only and not meta.get('catchup_retry_active'):
+        log('INFO', 'catch-up retry: активного аварийного повтора нет, выход')
+        return
+    now = int(time.time())
+    last_success = int(meta.get('last_subscription_success_ts', 0) or 0)
+    stale_after = CATCHUP_AFTER_HOURS_DEFAULT * 3600
+    if not retry_only and last_success and now - last_success < stale_after:
+        age_h = int((now - last_success) / 3600)
+        log('INFO', f'catch-up: последнее успешное обновление было {age_h} ч. назад, обновление не требуется')
+        return
+    if retry_only:
+        log('INFO', 'catch-up retry: предыдущий catch-up завершился ошибкой, пробую обновить ещё раз')
+    else:
+        log('INFO', 'catch-up: последнее успешное обновление устарело или отсутствует, запускаю обновление подписок')
+    rc = run_subprocess_update(args)
+    state = load_state(args.state)
+    if rc == 0 and subscription_run_success(state):
+        set_catchup_retry(state, False)
+        save_state(args.state, state)
+        log('INFO', 'catch-up: обновление прошло успешно, аварийный retry выключен')
+    else:
+        reason = state.get('meta', {}).get('last_subscription_status', 'update_failed')
+        set_catchup_retry(state, True, reason)
+        save_state(args.state, state)
+        log('WARN', f'catch-up: обновление не удалось или не дало валидных ключей, retry включён: {reason}')
+
+
+def classify_empty_status(jobs):
+    total_errors = total_success = total_raw = total_filtered = 0
+    saw_invalid = saw_empty = saw_after_filter = saw_download_error = False
+    for job in jobs.values():
+        total_errors += int(job.get('source_errors', 0) or 0)
+        total_success += int(job.get('source_success', 0) or 0)
+        total_raw += int(job.get('raw_links_count', 0) or 0)
+        total_filtered += int(job.get('filtered_links_count', 0) or 0)
+        for st in job.get('source_stats', []) or []:
+            code = st.get('status')
+            if code == 'unsupported_format': saw_invalid = True
+            elif code in ('empty_subscription', 'empty_response'): saw_empty = True
+            elif code == 'empty_after_filter': saw_after_filter = True
+            elif code == 'download_failed': saw_download_error = True
+    if total_raw > 0 and total_filtered == 0:
+        return 'empty_after_filter'
+    if saw_invalid:
+        return 'unsupported_format'
+    if saw_after_filter:
+        return 'empty_after_filter'
+    if saw_empty:
+        return 'empty_subscription'
+    if saw_download_error or total_errors > 0:
+        return 'download_failed'
+    return 'no_subscription_links'
+
+
+def update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final, protected_local_count, status=None, message=None):
+    now = int(time.time())
+    meta = state.setdefault('meta', {})
+    meta['last_subscription_attempt_ts'] = now
+    meta['last_subscription_attempt_iso'] = fmt_time(now)
+    source_errors = sum(int(j.get('source_errors', 0) or 0) for j in jobs.values())
+    source_success = sum(int(j.get('source_success', 0) or 0) for j in jobs.values())
+    raw_links = sum(int(j.get('raw_links_count', 0) or 0) for j in jobs.values())
+    filtered_links = sum(int(j.get('filtered_links_count', 0) or 0) for j in jobs.values())
+    unique_links = sum(len(j.get('links', []) or []) for j in jobs.values())
+    if status is None:
+        if unique_links > 0:
+            status = 'partial_ok' if source_errors else 'ok'
+        else:
+            status = classify_empty_status(jobs)
+    if message is None:
+        if status in ('ok', 'partial_ok'):
+            message = ''
+        elif status == 'empty_after_filter':
+            message = 'Подписки загружены, но после фильтрации не осталось валидных ключей. Проверьте Regex-фильтр и режим фильтрации.'
+        elif status == 'unsupported_format':
+            message = 'Источник вернул данные, но формат подписки не распознан: нет plain-text URI и нет валидного Base64 со ссылками.'
+        elif status == 'download_failed':
+            message = 'Источники подписок не загрузились. Возможны проблемы с сетью, DNS, сервером подписки или timeout.'
+        elif status == 'empty_subscription':
+            message = 'Подписки загружены, но в них не найдено поддерживаемых proxy-ссылок.'
+        else:
+            message = 'Валидных ключей из подписок не найдено.'
+    meta['last_subscription_status'] = status
+    meta['last_subscription_message'] = message
+    source_total = source_success + source_errors
+    source_details = []
+    for job in jobs.values():
+        for st in job.get('source_stats', []) or []:
+            source_details.append({
+                'label': st.get('label', ''),
+                'status': st.get('status', ''),
+                'raw': int(st.get('raw', 0) or 0),
+                'filtered': int(st.get('filtered', 0) or 0),
+                'format': st.get('format', '')
+            })
+
+    meta['last_sources_ok'] = source_success
+    meta['last_sources_failed'] = source_errors
+    meta['last_sources_total'] = source_total
+    meta['last_source_details'] = source_details[:30]
+    meta['last_raw_links'] = raw_links
+    meta['last_after_filter_links'] = filtered_links
+    meta['last_unique_links'] = unique_links
+    meta['last_added'] = int(total_added or 0)
+    meta['last_removed'] = int(total_removed or 0)
+    meta['last_final_links'] = int(total_final or 0)
+    meta['last_local_links'] = int(protected_local_count or 0)
+    meta['last_processed_sections'] = int(processed_sections or 0)
+    health = state.get('health', {})
+    if isinstance(health, dict):
+        meta['last_working_links'] = int(health.get('ok', 0) or 0)
+        meta['last_bad_links'] = int(health.get('bad', 0) or 0) + int(health.get('missing', 0) or 0)
+    if status in ('ok', 'partial_ok'):
+        meta['last_subscription_success_ts'] = now
+        meta['last_subscription_success_iso'] = fmt_time(now)
+        meta['catchup_retry_active'] = False
+        meta['catchup_retry_fail_count'] = 0
 
 def ensure_state_section(state, sec, ptype=None):
     sections = state.setdefault('sections', {})
@@ -1294,6 +1649,15 @@ def main():
     if args.version:
         print(f"podkop-subscriptions {APP_VERSION}")
         return
+    if args.status_summary:
+        print_status_summary(args.state)
+        return
+    if args.catch_up:
+        catch_up(args, retry_only=False)
+        return
+    if args.catch_up_retry:
+        catch_up(args, retry_only=True)
+        return
     if args.observe_only:
         validate_file_argument(args.config, '--config')
         observe_only(args.config, args.state)
@@ -1310,6 +1674,9 @@ def main():
     log("INFO", "X-HWID сгенерирован для запроса подписок")
     jobs = load_jobs(args.subs)
     if not jobs:
+        state = load_state(args.state)
+        update_subscription_meta(state, {}, 0, 0, 0, 0, 0, status='no_jobs', message='Нет включённых групп подписок.')
+        save_state(args.state, state)
         log("INFO", "Нет настроенных подписок. Выход без изменений.")
         return
     current_sections = load_current_podkop_sections(args.config)
@@ -1351,6 +1718,9 @@ def main():
     updates = {}
     summary_changed = False
     processed_sections = 0
+    total_added = 0
+    total_removed = 0
+    total_final_links = 0
     for sec, job in jobs.items():
         final_links, info = build_final_links_for_section(sec, job, current_sections, state, args.delete_after_fails, args.min_keep, protected_local_ids, proxies, recent_skip_ids)
         if info.get('skip'):
@@ -1372,6 +1742,9 @@ def main():
             extra.append(f"skipped_removed_this_run={info.get('skipped_removed_this_run')}")
         tail = (', ' + ', '.join(extra)) if extra else ''
         log("INFO", f"[{sec}]: added={info.get('added',0)}, removed={info.get('removed',0)}, duplicates={info.get('duplicates',0)}, final_links={len(final_links)}{tail}")
+        total_added += int(info.get('added', 0) or 0)
+        total_removed += int(info.get('removed', 0) or 0)
+        total_final_links += len(final_links)
         if info.get('changed'):
             updates[sec] = {'ptype': job.get('ptype', 'urltest'), 'links': final_links}
             summary_changed = True
@@ -1382,6 +1755,7 @@ def main():
     elif recent_skip_ids:
         log("INFO", f"Одноразовый список недавно удалённых ключей использован и очищен: {len(recent_skip_ids)}; новых записей для следующего запуска: {len(state.get('recently_removed', {}))}")
 
+    update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids))
     save_state(args.state, state)
     if not updates:
         if args.force:
@@ -1409,6 +1783,9 @@ def main():
         os.system("/etc/init.d/podkop restart")
         log("INFO", "Успешно завершено: конфиг обновлён, Podkop перезапущен.")
     except Exception as e:
+        state = load_state(args.state)
+        update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids), status='config_write_error', message=f'Ошибка при сохранении конфига: {e}')
+        save_state(args.state, state)
         log("ERROR", f"Ошибка при сохранении конфига: {e}")
 
 
