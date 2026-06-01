@@ -30,14 +30,14 @@ Sing-box: 1.12.22
 - Распознаёт `vless://`, `trojan://`, `ss://`, `socks4://`, `socks4a://`, `socks5://`, `hy2://`, `hysteria2://`.
 - Фильтрует ключи через regex.
 - Не очищает рабочую секцию Podkop, если подписки не загрузились.
-- Ведёт `fail_count` для мёртвых ключей.
+- Накопительно считает неудачные проверки ключей (`fail_count`) и по этому счётчику определяет, какие ключи долго не работают.
 - Удаляет старые мёртвые ключи при плановом обновлении.
 - Может ограничивать количество ключей в секции.
 - Может удалять ключи с ping выше заданного значения.
 - Может схлопывать SNI-ротации, когда новый ключ отличается от старого только `sni`.
 - После долгого отключения роутера может автоматически догнать пропущенное обновление.
 - В LuCI показывает краткое состояние сверху страницы.
-- Умеет мигрировать со старой схемы v3.0/v3.1.
+- При установке поверх существующей настройки сохраняет конфиг, локальные ключи и state.
 
 ## Установка
 
@@ -65,43 +65,6 @@ wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podk
 sh install.sh --local --with-panel --no-config
 ```
 
-## Обновление с v3.0/v3.1
-
-Версия `3.5` умеет переезжать со старой схемы настройки.
-
-При установке поверх старой версии выполняется:
-
-```text
-1. Создаётся backup:
-   /root/podkop-subscriptions-upgrade-backup-*.tar.gz
-
-2. Если /etc/config/podkop_subscriptions отсутствует,
-   старые subscription_group и subscription_schedule переносятся из /etc/config/podkop.
-
-3. Из /etc/config/podkop удаляются старые служебные секции:
-   subscription_group
-   subscription_schedule
-   subscriptions_ui
-   local_links
-
-4. Сохраняются:
-   /etc/config/podkop-local-links
-   /etc/podkop-subscriptions/state.json
-   /etc/config/podkop_subscriptions, если он уже был.
-
-5. Старые cron-строки Podkop Subscriptions удаляются и создаются заново.
-
-6. Старая встроенная вебморда удаляется.
-
-7. Новая вебморда ставится отдельно:
-   Services → Подписки Podkop
-```
-
-Команда обновления из распакованной папки:
-
-```sh
-sh install.sh --local --with-panel --no-config
-```
 
 ## Используемые файлы
 
@@ -346,6 +309,12 @@ cat /etc/crontabs/root | grep -E 'podkop-sub-health|podkop-sub-updater|podkop-su
 
 ```sh
 /usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop
+```
+
+Показать текущий `fail_count` по ключам без вывода proxy-ссылок:
+
+```sh
+/usr/bin/podkop-sub-updater.py --fail-count
 ```
 
 Запустить обновление подписок вручную:
