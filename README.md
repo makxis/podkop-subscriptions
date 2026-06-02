@@ -98,8 +98,32 @@ Five minutes after boot, the updater checks whether the last successful subscrip
 /usr/bin/podkop-sub-cron-sync
 ```
 
+
+
+## IP/domain duplicates
+
+If enabled:
+
+```text
+option dedupe_endpoint_host '1'
+```
+
+and several keys point to the same IP address or domain, the updater keeps the last variant from the subscription.
+
+Port, transport, `sni`, and other parameters are ignored for this comparison. The filter is disabled by default because some subscriptions may intentionally publish different valid ports on the same IP or domain.
+
+Local keys from `/etc/config/podkop-local-links` are not replaced.
+
 ## Uninstall
 
 ```sh
 wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
 ```
+
+## Podkop link compatibility
+
+Before writing links into `/etc/config/podkop`, the updater validates them. For `vless://` and `trojan://` links without the `type` parameter, it explicitly adds `type=tcp`, because Podkop treats an empty transport as `Unknown transport '' detected`.
+
+Section processing summary logs are printed in Russian: added, removed, final key count, removal reasons, collapsed SNI/IP-domain duplicates, and skipped keys. The summary line uses readable phrases instead of technical underscored field names.
+
+When run directly in a terminal, the section summary line highlights important numbers with ANSI colors. The format remains one-line. ANSI codes are not added to syslog, LuCI, or piped output.

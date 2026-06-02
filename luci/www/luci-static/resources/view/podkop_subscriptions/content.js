@@ -5,8 +5,8 @@
 "require baseclass";
 
 const LOCAL_LINKS = "/etc/config/podkop-local-links";
-const PODKOP_SUBSCRIPTIONS_VERSION = "3.5";
-const STATUS_STYLE_PLAIN_CARD_V35 = true;
+const PODKOP_SUBSCRIPTIONS_VERSION = "3.6";
+const STATUS_STYLE_PLAIN_CARD_V36 = true;
 
 function hideDuplicatedSubscriptionsTitle() {
   if (document.getElementById("podkop-subscriptions-title-hide-style"))
@@ -256,6 +256,15 @@ return baseclass.extend({
       "dedupe_sni_rotation",
       _("Схлопывать SNI-дубликаты"),
       _("Если новый ключ из подписки отличается от существующего только параметром sni, старый вариант будет заменён новым. Название ключа не используется для сравнения. Локальные ключи из /etc/config/podkop-local-links не заменяются.")
+    );
+    o.default = "0";
+    o.rmempty = false;
+
+    o = ss.option(
+      form.Flag,
+      "dedupe_endpoint_host",
+      _("Схлопывать IP/домен-дубликаты"),
+      _("Если несколько ключей ведут на один и тот же IP или домен, будет оставлен последний вариант из подписки. Порт, transport, sni и другие параметры при сравнении не учитываются. Локальные ключи из /etc/config/podkop-local-links не заменяются.")
     );
     o.default = "0";
     o.rmempty = false;
