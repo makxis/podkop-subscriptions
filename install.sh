@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.5"
+APP_VERSION="3.6"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
@@ -332,9 +332,10 @@ config subscription_group 'main'
     option max_links '0'
     option max_latency_ms '0'
 
-    # Жёсткая чистка и SNI-схлопывание.
+    # Жёсткая чистка и схлопывание похожих ключей.
     option force_cleanup '0'
     option dedupe_sni_rotation '0'
+    option dedupe_endpoint_host '0'
 
 
 # Пример расписания. Раскомментируйте enabled или настройте через интерактивный мастер/LuCI.

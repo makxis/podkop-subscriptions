@@ -1,6 +1,11 @@
 # Changelog
 
-## 3.5
+## 3.6
+
+- Added optional IP/domain duplicate collapse (`dedupe_endpoint_host`) without version bump.
+
+- Hotfix: normalize missing `type` for `vless://` and `trojan://` links to `type=tcp` before writing to Podkop, preventing `Unknown transport '' detected`.
+
 
 - Added migration from old v3.0/v3.1 configuration layout.
 - Creates upgrade backup in `/root/podkop-subscriptions-upgrade-backup-*.tar.gz`.

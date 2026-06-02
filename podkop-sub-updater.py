@@ -12,7 +12,7 @@ import json
 import time
 
 
-APP_VERSION = "3.5"
+APP_VERSION = "3.6"
 USER_AGENT = f"Podkop-Subscription-Updater/{APP_VERSION}"
 VALID_PROTOCOLS = ('vless://', 'ss://', 'trojan://', 'socks4://', 'socks4a://', 'socks5://', 'hy2://', 'hysteria2://')
 VALID_PTYPES = {'urltest', 'selector'}
@@ -27,6 +27,9 @@ SOURCE_TIMEOUT_DEFAULT = 45
 SOURCE_RETRIES_DEFAULT = 3
 CATCHUP_AFTER_HOURS_DEFAULT = 24
 VALID_TIME_MIN_TS = 1700000000
+SINGBOX_CHECK_TIMEOUT_DEFAULT = 15
+SINGBOX_CHECK_MAX_RUNS_DEFAULT = 40
+
 
 
 def setup_syslog():
@@ -43,15 +46,133 @@ def sanitize_log_message(msg):
     return msg
 
 
+
+REMOVE_REASON_LABELS_RU = {
+    'endpoint_host_rotation': 'IP/домен-ротация',
+    'sni_rotation': 'SNI-ротация',
+    'latency': 'ping выше лимита',
+    'force_fail_count': 'принудительно по fail_count',
+    'limit_fail_count': 'лимит: плохой fail_count',
+    'limit_na': 'лимит: нет ответа',
+    'limit_slowest': 'лимит: самый медленный',
+    'fail_count_threshold': 'долго не работает',
+    'recently_removed': 'недавно удалён',
+}
+
+
+def format_removed_reasons_ru(reasons):
+    if not reasons:
+        return ''
+    parts = []
+    for key, value in sorted(reasons.items(), key=lambda kv: str(kv[0])):
+        label = REMOVE_REASON_LABELS_RU.get(str(key), str(key))
+        parts.append(f'{label}:{value}')
+    return ', '.join(parts)
+
+
+def build_section_result_log_ru(sec, info, final_count):
+    parts = [
+        f'добавлено={colored_count(info.get("added", 0), "good_positive")}',
+        f'удалено={colored_count(info.get("removed", 0), "warn_positive")}',
+        f'дубликатов в текущем конфиге={colored_count(info.get("duplicates", 0), "warn_positive")}',
+        f'ключей итого={colored_count(final_count, "info_positive")}',
+    ]
+
+    removed_reasons = format_removed_reasons_ru(info.get('removed_by_reason') or {})
+    if removed_reasons:
+        parts.append(f'удалено по причинам={val_warn(removed_reasons)}')
+
+    if info.get('incoming_sni_collapsed'):
+        parts.append(f'схлопнуто SNI-ротаций из подписок={colored_count(info.get("incoming_sni_collapsed"), "info_positive")}')
+    if info.get('incoming_endpoint_collapsed'):
+        parts.append(f'схлопнуто IP/домен-дублей из подписок={colored_count(info.get("incoming_endpoint_collapsed"), "info_positive")}')
+    if info.get('skipped_sni_local'):
+        parts.append(f'пропущено SNI-дублей локальных={colored_count(info.get("skipped_sni_local"), "warn_positive")}')
+    if info.get('skipped_endpoint_local'):
+        parts.append(f'пропущено IP/домен-дублей локальных={colored_count(info.get("skipped_endpoint_local"), "warn_positive")}')
+    if info.get('skipped_by_limit'):
+        parts.append(f'не добавлено из-за лимита={colored_count(info.get("skipped_by_limit"), "warn_positive")}')
+    if info.get('skipped_recent'):
+        parts.append(f'пропущено недавно удалённых={colored_count(info.get("skipped_recent"), "warn_positive")}')
+    if info.get('skipped_removed_this_run'):
+        parts.append(f'пропущено удалённых в этом запуске={colored_count(info.get("skipped_removed_this_run"), "warn_positive")}')
+
+    return f'[{sec}]: итог: ' + ', '.join(parts)
+
+
+ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def strip_ansi(s):
+    return ANSI_RE.sub('', str(s))
+
+
+def terminal_colors_enabled():
+    if os.environ.get('NO_COLOR'):
+        return False
+    color_env = os.environ.get('PODKOP_SUB_COLOR', '').lower()
+    if color_env in ('0', 'false', 'no', 'off'):
+        return False
+    if color_env in ('1', 'true', 'yes', 'on', 'always'):
+        return True
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def ansi(text, code):
+    text = str(text)
+    if not terminal_colors_enabled():
+        return text
+    return f'\033[{code}m{text}\033[0m'
+
+
+def val_good(value):
+    return ansi(value, '32;1')
+
+
+def val_warn(value):
+    return ansi(value, '33;1')
+
+
+def val_bad(value):
+    return ansi(value, '31;1')
+
+
+def val_dim(value):
+    return ansi(value, '2')
+
+
+def val_info(value):
+    return ansi(value, '36;1')
+
+
+def colored_count(value, mode='auto'):
+    try:
+        n = int(value or 0)
+    except Exception:
+        n = 0
+
+    if mode == 'good_positive':
+        return val_good(n) if n > 0 else val_dim(n)
+    if mode == 'bad_positive':
+        return val_bad(n) if n > 0 else val_good(n)
+    if mode == 'warn_positive':
+        return val_warn(n) if n > 0 else val_good(n)
+    if mode == 'info_positive':
+        return val_info(n) if n > 0 else val_dim(n)
+    return val_info(n)
+
+
 def log(level, msg):
     safe_msg = sanitize_log_message(msg)
     print(f"[{level}] {safe_msg}")
     syslog_level = syslog.LOG_WARNING if level in ["ERROR", "WARN"] else syslog.LOG_INFO
     try:
-        syslog.syslog(syslog_level, f"[{level}] {safe_msg}")
+        syslog.syslog(syslog_level, f"[{level}] {strip_ansi(safe_msg)}")
     except Exception:
         pass
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Обновление подписок для Podkop")
@@ -258,6 +379,58 @@ def dedupe_sni_rotation_links_keep_last(links):
     return list(reversed(out_rev)), collapsed
 
 
+
+def endpoint_host_value(link):
+    """Return canonical host/domain/IP for optional endpoint dedupe.
+
+    This intentionally groups by host only, not by port or protocol.
+    The feature is optional because some providers may intentionally publish
+    several different ports on the same host.
+    """
+    try:
+        parts = _parse_link_parts(link)
+        host = str(parts.get('host') or '').strip().lower()
+    except Exception:
+        # Conservative fallback: best-effort authority parsing without rejecting the link here.
+        base = _url_without_fragment(link)
+        if '://' not in base:
+            return ''
+        rest = base.split('://', 1)[1].split('?', 1)[0].split('/', 1)[0]
+        if '@' in rest:
+            rest = rest.rsplit('@', 1)[1]
+        host, _port = _parse_hostport(rest)
+        host = str(host or '').strip().lower()
+    if host.startswith('[') and host.endswith(']'):
+        host = host[1:-1]
+    return host
+
+
+def endpoint_host_id(link):
+    host = endpoint_host_value(link)
+    if not host:
+        return ''
+    return hashlib.sha256(host.encode('utf-8', 'ignore')).hexdigest()[:24]
+
+
+def dedupe_endpoint_host_links_keep_last(links):
+    """Collapse incoming links by server host/domain/IP, keeping the last occurrence."""
+    out_rev = []
+    seen = set()
+    collapsed = 0
+
+    for link in reversed(list(links or [])):
+        eid = endpoint_host_id(link)
+        if eid:
+            if eid in seen:
+                collapsed += 1
+                continue
+            seen.add(eid)
+        out_rev.append(link)
+
+    return list(reversed(out_rev)), collapsed
+
+
+
 def link_name(link):
     if '#' not in link:
         return ''
@@ -334,6 +507,7 @@ def load_jobs_from_uci_podkop(config_path):
         max_latency_ms = parse_positive_int(opt.get('max_latency_ms', '0'), 0)
         force_cleanup = is_enabled_value(opt.get('force_cleanup', '0'))
         dedupe_sni_rotation = is_enabled_value(opt.get('dedupe_sni_rotation', '0'))
+        dedupe_endpoint_host = is_enabled_value(opt.get('dedupe_endpoint_host', '0'))
         if not sec_name:
             log("WARN", f"subscription_group '{g['name']}': не задана целевая секция Podkop. Пропуск.")
             continue
@@ -359,7 +533,8 @@ def load_jobs_from_uci_podkop(config_path):
                 'max_links': 0,
                 'max_latency_ms': 0,
                 'force_cleanup': False,
-                'dedupe_sni_rotation': False
+                'dedupe_sni_rotation': False,
+                'dedupe_endpoint_host': False
             }
         if jobs[sec_name]['ptype'] != ptype:
             log("WARN", f"subscription_group '{g['name']}': target_section '{sec_name}' уже использует '{jobs[sec_name]['ptype']}', нельзя смешивать с '{ptype}'. Пропуск.")
@@ -368,6 +543,7 @@ def load_jobs_from_uci_podkop(config_path):
         jobs[sec_name]['max_latency_ms'] = merge_min_positive(jobs[sec_name].get('max_latency_ms', 0), max_latency_ms)
         jobs[sec_name]['force_cleanup'] = bool(jobs[sec_name].get('force_cleanup')) or force_cleanup
         jobs[sec_name]['dedupe_sni_rotation'] = bool(jobs[sec_name].get('dedupe_sni_rotation')) or dedupe_sni_rotation
+        jobs[sec_name]['dedupe_endpoint_host'] = bool(jobs[sec_name].get('dedupe_endpoint_host')) or dedupe_endpoint_host
         for source in sources:
             source = source.strip()
             if not source:
@@ -411,7 +587,7 @@ def load_jobs_from_flat_file(subs_path):
                 log("WARN", f"Строка {line_num}: недопустимое действие '{on_empty}'. Пропуск.")
                 continue
             if sec_name not in jobs:
-                jobs[sec_name] = {'ptype': ptype, 'entries': [], 'links': [], 'source_errors': 0, 'source_success': 0, 'max_links': 0, 'max_latency_ms': 0, 'force_cleanup': False, 'dedupe_sni_rotation': False}
+                jobs[sec_name] = {'ptype': ptype, 'entries': [], 'links': [], 'source_errors': 0, 'source_success': 0, 'max_links': 0, 'max_latency_ms': 0, 'force_cleanup': False, 'dedupe_sni_rotation': False, 'dedupe_endpoint_host': False}
             if jobs[sec_name]['ptype'] != ptype:
                 log("WARN", f"Строка {line_num}: секция '{sec_name}' уже объявлена как '{jobs[sec_name]['ptype']}', нельзя смешивать с '{ptype}'. Пропуск.")
                 continue
@@ -579,6 +755,604 @@ def filter_links(links_raw, regex_pattern, match_mode, on_empty, sec, source_lab
     return filtered_links
 
 
+
+class LinkValidationError(Exception):
+    def __init__(self, reason, detail=''):
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+
+
+VALID_TRANSPORTS = {'', 'tcp', 'raw', 'ws', 'grpc'}
+VALID_SECURITY = {'', 'none', 'tls', 'reality'}
+SUPPORTED_SCHEMES = {'vless', 'ss', 'trojan', 'socks4', 'socks4a', 'socks5', 'hy2', 'hysteria2'}
+
+
+def validation_reason_text(reason):
+    mapping = {
+        'invalid_url': 'некорректная ссылка',
+        'unsupported_scheme': 'неподдерживаемый тип proxy',
+        'missing_host': 'не указан host',
+        'missing_port': 'не указан port',
+        'invalid_port': 'некорректный port',
+        'missing_userinfo': 'не указан пользователь/пароль',
+        'invalid_userinfo': 'некорректный userinfo',
+        'unsupported_transport': 'неподдерживаемый transport',
+        'unsupported_security': 'неподдерживаемый security',
+        'missing_reality_public_key': 'для reality отсутствует pbk',
+        'invalid_transport_param': 'некорректный параметр transport',
+        'singbox_not_found': 'sing-box не найден',
+        'singbox_check_failed': 'не прошёл sing-box check',
+        'singbox_check_limit': 'превышен лимит sing-box check',
+        'normalized_missing_transport': 'добавлен type=tcp для совместимости с Podkop'
+    }
+    return mapping.get(reason, reason or 'неизвестная ошибка')
+
+
+def _split_no_fragment(link):
+    return (link or '').split('#', 1)[0].strip()
+
+
+def _split_scheme(link):
+    base = _split_no_fragment(link)
+    if '://' not in base:
+        raise LinkValidationError('invalid_url')
+    scheme, rest = base.split('://', 1)
+    scheme = scheme.strip().lower()
+    if not scheme:
+        raise LinkValidationError('invalid_url')
+    return scheme, rest
+
+
+def _split_query(rest):
+    if '?' in rest:
+        main, query = rest.split('?', 1)
+    else:
+        main, query = rest, ''
+    return main, query
+
+
+def _parse_query(query):
+    result = {}
+    for part in (query or '').split('&'):
+        if not part:
+            continue
+        if '=' in part:
+            k, v = part.split('=', 1)
+        else:
+            k, v = part, ''
+        k = unquote_percent(k).strip()
+        v = unquote_percent(v).strip()
+        if k and k not in result:
+            result[k] = v
+    return result
+
+
+def _b64_decode_text(value):
+    compact = ''.join(str(value or '').split())
+    if not compact:
+        return ''
+    compact = compact.replace('-', '+').replace('_', '/')
+    compact += '=' * (-len(compact) % 4)
+    try:
+        return base64.b64decode(compact).decode('utf-8', 'replace')
+    except Exception:
+        return ''
+
+
+def _parse_hostport(hostport):
+    hostport = str(hostport or '').strip()
+    if not hostport:
+        return '', ''
+    if hostport.startswith('['):
+        end = hostport.find(']')
+        if end <= 0:
+            return '', ''
+        host = hostport[1:end]
+        rest = hostport[end + 1:]
+        if rest.startswith(':'):
+            return host, rest[1:]
+        return host, ''
+    if ':' not in hostport:
+        return hostport, ''
+    host, port = hostport.rsplit(':', 1)
+    return host.strip(), port.strip()
+
+
+def _parse_link_parts(link):
+    scheme, rest = _split_scheme(link)
+    if scheme not in SUPPORTED_SCHEMES:
+        raise LinkValidationError('unsupported_scheme')
+    main, query = _split_query(rest)
+    q = _parse_query(query)
+
+    # SIP002 shadowsocks иногда встречается как ss://base64(method:password@host:port)
+    # без явного userinfo@host:port. Декодируем только для разбора, сам ключ не меняем.
+    if scheme == 'ss' and '@' not in main:
+        decoded = _b64_decode_text(main)
+        if decoded and '@' in decoded:
+            main = decoded
+
+    # Отбрасываем path после authority. Для proxy URI он не должен влиять на host/port.
+    authority = main.split('/', 1)[0]
+    if '@' in authority:
+        userinfo, hostport = authority.rsplit('@', 1)
+    else:
+        userinfo, hostport = '', authority
+    host, port = _parse_hostport(hostport)
+    return {
+        'scheme': scheme,
+        'userinfo': unquote_percent(userinfo),
+        'host': unquote_percent(host),
+        'port': unquote_percent(port),
+        'query': q,
+    }
+
+
+def _port_int(port):
+    try:
+        p = int(str(port).strip())
+        if 1 <= p <= 65535:
+            return p
+    except Exception:
+        pass
+    raise LinkValidationError('invalid_port')
+
+
+def _validate_hysteria2_ports(port):
+    port = str(port or '').strip()
+    if not port:
+        raise LinkValidationError('missing_port')
+    if ',' not in port and '-' not in port:
+        return {'server_port': _port_int(port)}
+    items = []
+    for raw in port.split(','):
+        item = raw.strip()
+        if not item:
+            continue
+        if '-' in item:
+            a, b = item.split('-', 1)
+            ai = _port_int(a)
+            bi = _port_int(b)
+            if ai > bi:
+                raise LinkValidationError('invalid_port')
+            items.append(f'{ai}:{bi}')
+        else:
+            p = _port_int(item)
+            items.append(f'{p}:{p}')
+    if not items:
+        raise LinkValidationError('invalid_port')
+    return {'server_ports': items}
+
+
+def _split_csv(value):
+    return [x.strip() for x in str(value or '').split(',') if x.strip()]
+
+
+def _build_tls_object(parts):
+    scheme = parts['scheme']
+    q = parts['query']
+    security = (q.get('security', '') or '').strip().lower()
+    if not security and scheme in ('hy2', 'hysteria2'):
+        security = 'tls'
+    if security not in VALID_SECURITY:
+        raise LinkValidationError('unsupported_security')
+    if security in ('', 'none'):
+        return None
+
+    tls = {'enabled': True}
+    sni = q.get('sni') or q.get('peer') or ''
+    if sni:
+        tls['server_name'] = sni
+    insecure = (q.get('allowInsecure') or q.get('insecure') or '').strip().lower()
+    if insecure in ('1', 'true', 'yes', 'on'):
+        tls['insecure'] = True
+    alpn = _split_csv(q.get('alpn', ''))
+    if alpn:
+        tls['alpn'] = alpn
+    fp = q.get('fp', '')
+    if fp and scheme not in ('hy2', 'hysteria2'):
+        tls['utls'] = {'enabled': True, 'fingerprint': fp}
+    if security == 'reality':
+        pbk = q.get('pbk', '')
+        if not pbk:
+            raise LinkValidationError('missing_reality_public_key')
+        tls['reality'] = {'enabled': True, 'public_key': pbk}
+        sid = q.get('sid', '')
+        if sid:
+            tls['reality']['short_id'] = sid
+    return tls
+
+
+def _build_transport_object(parts):
+    q = parts['query']
+    transport = (q.get('type', '') or '').strip().lower()
+    if transport not in VALID_TRANSPORTS:
+        raise LinkValidationError('unsupported_transport')
+    if transport in ('', 'tcp', 'raw'):
+        return None
+    if transport == 'ws':
+        ws = {'type': 'ws', 'path': q.get('path', '')}
+        host = q.get('host', '')
+        if host:
+            ws['headers'] = {'Host': host}
+        ed = q.get('ed', '')
+        if ed:
+            try:
+                ws['max_early_data'] = int(ed)
+            except Exception:
+                raise LinkValidationError('invalid_transport_param')
+        eh = q.get('eh', '') or q.get('earlyDataHeaderName', '')
+        if eh:
+            ws['early_data_header_name'] = eh
+        return ws
+    if transport == 'grpc':
+        grpc = {'type': 'grpc'}
+        service_name = q.get('serviceName', '') or q.get('service_name', '')
+        if service_name:
+            grpc['service_name'] = service_name
+        return grpc
+    raise LinkValidationError('unsupported_transport')
+
+
+def _parse_ss_userinfo(userinfo):
+    userinfo = unquote_percent(userinfo or '')
+    if ':' not in userinfo:
+        decoded = _b64_decode_text(userinfo)
+        if decoded:
+            userinfo = decoded
+    if ':' not in userinfo:
+        raise LinkValidationError('invalid_userinfo')
+    method, password = userinfo.split(':', 1)
+    if not method or not password:
+        raise LinkValidationError('invalid_userinfo')
+    return method, password
+
+
+
+def _query_has_param(q, name):
+    name = str(name or '').strip()
+    return name in q
+
+
+def _set_query_param_preserve_fragment(link, key, value):
+    """Set or add a query parameter without touching the fragment/name.
+
+    Podkop treats an empty/missing transport type for vless/trojan as an
+    unknown transport. For common tcp links the URI often omits type=tcp,
+    while sing-box itself accepts the equivalent outbound without a transport
+    object. We normalize only the stored URI so Podkop parses it safely.
+    """
+    link = str(link or '').strip()
+    if '#' in link:
+        base, frag = link.split('#', 1)
+        frag = '#' + frag
+    else:
+        base, frag = link, ''
+
+    if '?' in base:
+        prefix, query = base.split('?', 1)
+        parts = []
+        changed = False
+        for part in query.split('&'):
+            if not part:
+                continue
+            k = part.split('=', 1)[0]
+            if unquote_percent(k).strip().lower() == key.lower():
+                parts.append(f'{k}={value}')
+                changed = True
+            else:
+                parts.append(part)
+        if not changed:
+            parts.append(f'{key}={value}')
+        return prefix + '?' + '&'.join(parts) + frag
+    return base + '?' + f'{key}={value}' + frag
+
+
+def normalize_link_for_podkop(link):
+    """Normalize URI quirks that Podkop does not tolerate but sing-box does.
+
+    Current Podkop calls _add_outbound_transport for vless/trojan and logs
+    Unknown transport '' when the `type` query parameter is missing/empty.
+    For these protocols missing type is commonly intended as plain TCP, so we
+    make it explicit before writing the link to /etc/config/podkop.
+    """
+    parts = _parse_link_parts(link)
+    scheme = parts['scheme']
+    q = parts['query']
+    if scheme in ('vless', 'trojan'):
+        transport = (q.get('type', '') or '').strip().lower()
+        if transport == '':
+            return _set_query_param_preserve_fragment(link, 'type', 'tcp'), 'normalized_missing_transport'
+    return link, ''
+
+def proxy_link_to_singbox_outbound(link, tag):
+    parts = _parse_link_parts(link)
+    scheme = parts['scheme']
+    host = parts['host']
+    port = parts['port']
+    userinfo = parts['userinfo']
+    q = parts['query']
+
+    if not host:
+        raise LinkValidationError('missing_host')
+    if not port:
+        raise LinkValidationError('missing_port')
+
+    outbound = {'tag': tag}
+
+    if scheme in ('socks4', 'socks4a', 'socks5'):
+        outbound.update({
+            'type': 'socks',
+            'server': host,
+            'server_port': _port_int(port),
+            'version': scheme.replace('socks', '')
+        })
+        if scheme == 'socks5' and userinfo:
+            if ':' in userinfo:
+                username, password = userinfo.split(':', 1)
+                if username:
+                    outbound['username'] = username
+                if password:
+                    outbound['password'] = password
+            else:
+                outbound['username'] = userinfo
+
+    elif scheme == 'ss':
+        method, password = _parse_ss_userinfo(userinfo)
+        outbound.update({
+            'type': 'shadowsocks',
+            'server': host,
+            'server_port': _port_int(port),
+            'method': method,
+            'password': password
+        })
+
+    elif scheme == 'vless':
+        uuid = userinfo
+        if not uuid:
+            raise LinkValidationError('missing_userinfo')
+        if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', uuid):
+            raise LinkValidationError('invalid_userinfo')
+        outbound.update({
+            'type': 'vless',
+            'server': host,
+            'server_port': _port_int(port),
+            'uuid': uuid
+        })
+        flow = q.get('flow', '')
+        if flow:
+            outbound['flow'] = flow
+        packet_encoding = q.get('packetEncoding', '')
+        if packet_encoding:
+            outbound['packet_encoding'] = packet_encoding
+
+    elif scheme == 'trojan':
+        if not userinfo:
+            raise LinkValidationError('missing_userinfo')
+        outbound.update({
+            'type': 'trojan',
+            'server': host,
+            'server_port': _port_int(port),
+            'password': userinfo
+        })
+
+    elif scheme in ('hy2', 'hysteria2'):
+        if not userinfo:
+            raise LinkValidationError('missing_userinfo')
+        outbound.update({
+            'type': 'hysteria2',
+            'server': host,
+            'password': userinfo
+        })
+        outbound.update(_validate_hysteria2_ports(port))
+        obfs_type = q.get('obfs', '')
+        obfs_password = q.get('obfs-password', '')
+        if obfs_type and obfs_password:
+            outbound['obfs'] = {'type': obfs_type, 'password': obfs_password}
+        for src, dst in (('upmbps', 'up_mbps'), ('downmbps', 'down_mbps')):
+            val = q.get(src, '')
+            if val:
+                try:
+                    outbound[dst] = int(val)
+                except Exception:
+                    raise LinkValidationError('invalid_transport_param')
+
+    else:
+        raise LinkValidationError('unsupported_scheme')
+
+    tls = _build_tls_object(parts)
+    if tls:
+        outbound['tls'] = tls
+    transport = _build_transport_object(parts)
+    if transport:
+        outbound['transport'] = transport
+    return outbound
+
+
+def _singbox_config_for_links(links):
+    outbounds = []
+    for idx, link in enumerate(links, 1):
+        outbounds.append(proxy_link_to_singbox_outbound(link, f'podkop-sub-test-{idx}'))
+    return {'log': {'disabled': True}, 'outbounds': outbounds}
+
+
+def run_singbox_check_for_links(links, timeout=SINGBOX_CHECK_TIMEOUT_DEFAULT):
+    if not links:
+        return True, ''
+    tmp_path = f'/tmp/podkop-sub-singbox-check-{os.getpid()}-{int(time.time() * 1000)}.json'
+    try:
+        cfg = _singbox_config_for_links(links)
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, separators=(',', ':'))
+            f.write('\n')
+        try:
+            result = subprocess.run(
+                ['sing-box', '-c', tmp_path, 'check'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout
+            )
+        except FileNotFoundError:
+            return False, 'singbox_not_found'
+        except subprocess.TimeoutExpired:
+            return False, 'singbox_check_failed'
+        if result.returncode == 0:
+            return True, ''
+        return False, 'singbox_check_failed'
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def hard_validate_links_with_singbox(links, max_runs=SINGBOX_CHECK_MAX_RUNS_DEFAULT):
+    if not links:
+        return [], {'ok': True, 'runs': 0, 'rejected': 0, 'rejected_by_reason': {}}
+
+    runs = {'n': 0}
+    bad_ids = set()
+    bad_reason = {}
+
+    def check(batch):
+        if not batch:
+            return True, ''
+        if runs['n'] >= max_runs:
+            raise LinkValidationError('singbox_check_limit')
+        runs['n'] += 1
+        return run_singbox_check_for_links(batch)
+
+    try:
+        ok, reason = check(links)
+        if ok:
+            return list(links), {'ok': True, 'runs': runs['n'], 'rejected': 0, 'rejected_by_reason': {}}
+        if reason == 'singbox_not_found':
+            return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {'singbox_not_found': len(links)}}
+
+        def isolate(batch):
+            if not batch:
+                return
+            if len(batch) == 1:
+                sid = stable_id(batch[0])
+                bad_ids.add(sid)
+                bad_reason[sid] = 'singbox_check_failed'
+                return
+            mid = len(batch) // 2
+            left = batch[:mid]
+            right = batch[mid:]
+            for part in (left, right):
+                if not part:
+                    continue
+                ok_part, reason_part = check(part)
+                if not ok_part:
+                    if reason_part == 'singbox_not_found':
+                        for link in part:
+                            sid = stable_id(link)
+                            bad_ids.add(sid)
+                            bad_reason[sid] = 'singbox_not_found'
+                    else:
+                        isolate(part)
+
+        isolate(list(links))
+        good = [x for x in links if stable_id(x) not in bad_ids]
+        if good:
+            ok_final, reason_final = check(good)
+            if not ok_final:
+                return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {reason_final or 'singbox_check_failed': len(links)}}
+        by_reason = {}
+        for sid in bad_ids:
+            r = bad_reason.get(sid, 'singbox_check_failed')
+            by_reason[r] = by_reason.get(r, 0) + 1
+        return good, {'ok': True, 'runs': runs['n'], 'rejected': len(bad_ids), 'rejected_by_reason': by_reason}
+    except LinkValidationError as e:
+        return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {e.reason: len(links)}}
+
+
+def validate_links_for_podkop_singbox(sec, links):
+    stats = {
+        'input': len(links or []),
+        'formal_ok': 0,
+        'rejected': 0,
+        'rejected_by_reason': {},
+        'singbox_runs': 0,
+        'hard_rejected': 0,
+        'hard_check_ok': False,
+    }
+    formally_ok = []
+    normalized_count = 0
+    for link in links or []:
+        try:
+            normalized_link, normalize_reason = normalize_link_for_podkop(link)
+            if normalize_reason:
+                normalized_count += 1
+                stats['rejected_by_reason'][normalize_reason] = stats['rejected_by_reason'].get(normalize_reason, 0) + 1
+            # Генерация outbound сама является формальной проверкой всех поддерживаемых параметров.
+            proxy_link_to_singbox_outbound(normalized_link, 'podkop-sub-formal-test')
+            formally_ok.append(normalized_link)
+        except LinkValidationError as e:
+            stats['rejected'] += 1
+            stats['rejected_by_reason'][e.reason] = stats['rejected_by_reason'].get(e.reason, 0) + 1
+
+    if normalized_count:
+        log('INFO', f"[{sec}]: для совместимости с Podkop добавлен type=tcp в ключах: {normalized_count}")
+
+    # Нормализация могла сделать несколько URI одинаковыми, поэтому повторно убираем дубли.
+    formally_ok, normalized_dups = dedupe_links_keep_order(formally_ok)
+    if normalized_dups:
+        log('INFO', f"[{sec}]: после нормализации URI отброшено дублей: {normalized_dups}")
+
+    stats['formal_ok'] = len(formally_ok)
+    if stats['rejected']:
+        log('WARN', f"[{sec}]: быстрая проверка совместимости отбросила ключей: {stats['rejected']}")
+        for reason, count in sorted(stats['rejected_by_reason'].items()):
+            if reason == 'normalized_missing_transport':
+                continue
+            log('WARN', f"[{sec}]: {validation_reason_text(reason)}: {count}")
+
+    if not formally_ok:
+        stats['hard_check_ok'] = False
+        return [], stats
+
+    valid, hard = hard_validate_links_with_singbox(formally_ok)
+    stats['singbox_runs'] = int(hard.get('runs', 0) or 0)
+    stats['hard_rejected'] = int(hard.get('rejected', 0) or 0)
+    for reason, count in (hard.get('rejected_by_reason') or {}).items():
+        stats['rejected_by_reason'][reason] = stats['rejected_by_reason'].get(reason, 0) + int(count or 0)
+    stats['rejected'] += stats['hard_rejected']
+    stats['hard_check_ok'] = bool(hard.get('ok')) and len(valid) > 0
+
+    if hard.get('ok'):
+        log('INFO', f"[{sec}]: проверка совместимости Podkop/sing-box: принято {len(valid)}, отброшено {stats['rejected']}, sing-box check запусков: {stats['singbox_runs']}")
+    else:
+        log('ERROR', f"[{sec}]: проверка совместимости Podkop/sing-box не смогла собрать безопасный список; секция не будет изменена")
+        for reason, count in sorted((hard.get('rejected_by_reason') or {}).items()):
+            log('ERROR', f"[{sec}]: {validation_reason_text(reason)}: {count}")
+
+    return valid, stats
+
+
+def validate_jobs_links_for_podkop(jobs):
+    for sec, job in jobs.items():
+        links = list(job.get('links') or [])
+        if not links:
+            job['validation'] = {
+                'input': 0,
+                'formal_ok': 0,
+                'rejected': 0,
+                'rejected_by_reason': {},
+                'singbox_runs': 0,
+                'hard_rejected': 0,
+                'hard_check_ok': False,
+            }
+            continue
+        valid, stats = validate_links_for_podkop_singbox(sec, links)
+        job['validation'] = stats
+        job['links'] = valid
+        if stats.get('input') and not valid:
+            job['validation_failed'] = True
+
 def fetch_links(jobs, hwid, device_model, kernel_ver):
     payload_cache = {}
     for sec, job in jobs.items():
@@ -732,6 +1506,7 @@ def status_text_for_code(code):
         'no_subscription_links': 'валидных ключей из подписок не найдено',
         'no_jobs': 'нет настроенных подписок',
         'config_write_error': 'ошибка записи конфига',
+        'validation_failed': 'ключи не прошли проверку совместимости с Podkop/sing-box',
         'time_not_ready': 'время роутера не синхронизировано',
         'unknown': 'нет данных'
     }
@@ -862,6 +1637,13 @@ def state_status_summary(state):
     if problem_rows:
         lines.append('Проблемы источников:')
         lines.extend(problem_rows[:12])
+
+    validation_rejected = int(meta.get('last_validation_rejected', 0) or 0)
+    if validation_rejected:
+        lines.append('Проверка совместимости отклонила ключей: %d.' % validation_rejected)
+        by_reason = meta.get('last_validation_rejected_by_reason') or {}
+        for reason, count in sorted(by_reason.items()):
+            lines.append('%s: %s.' % (validation_reason_text(reason), count))
 
     if meta.get('catchup_retry_active'):
         lines.append('Повтор обновления активен: следующая попытка будет выполнена по cron.')
@@ -1015,7 +1797,10 @@ def catch_up(args, retry_only=False):
 def classify_empty_status(jobs):
     total_errors = total_success = total_raw = total_filtered = 0
     saw_invalid = saw_empty = saw_after_filter = saw_download_error = False
+    saw_validation_failed = False
     for job in jobs.values():
+        if job.get('validation_failed') or int((job.get('validation') or {}).get('rejected', 0) or 0) > 0:
+            saw_validation_failed = True
         total_errors += int(job.get('source_errors', 0) or 0)
         total_success += int(job.get('source_success', 0) or 0)
         total_raw += int(job.get('raw_links_count', 0) or 0)
@@ -1026,6 +1811,8 @@ def classify_empty_status(jobs):
             elif code in ('empty_subscription', 'empty_response'): saw_empty = True
             elif code == 'empty_after_filter': saw_after_filter = True
             elif code == 'download_failed': saw_download_error = True
+    if saw_validation_failed:
+        return 'validation_failed'
     if total_raw > 0 and total_filtered == 0:
         return 'empty_after_filter'
     if saw_invalid:
@@ -1065,8 +1852,26 @@ def update_subscription_meta(state, jobs, processed_sections, total_added, total
             message = 'Источники подписок не загрузились. Возможны проблемы с сетью, DNS, сервером подписки или timeout.'
         elif status == 'empty_subscription':
             message = 'Подписки загружены, но в них не найдено поддерживаемых proxy-ссылок.'
+        elif status == 'validation_failed':
+            message = 'Ключи из подписок загружены, но не прошли проверку совместимости с Podkop/sing-box. Текущая секция Podkop не изменялась.'
         else:
             message = 'Валидных ключей из подписок не найдено.'
+    validation_rejected = 0
+    validation_checked = 0
+    validation_singbox_runs = 0
+    validation_by_reason = {}
+    for job in jobs.values():
+        vst = job.get('validation') or {}
+        validation_checked += int(vst.get('input', 0) or 0)
+        validation_rejected += int(vst.get('rejected', 0) or 0)
+        validation_singbox_runs += int(vst.get('singbox_runs', 0) or 0)
+        for reason, count in (vst.get('rejected_by_reason') or {}).items():
+            validation_by_reason[reason] = validation_by_reason.get(reason, 0) + int(count or 0)
+
+    meta['last_validation_checked'] = validation_checked
+    meta['last_validation_rejected'] = validation_rejected
+    meta['last_validation_singbox_runs'] = validation_singbox_runs
+    meta['last_validation_rejected_by_reason'] = validation_by_reason
     meta['last_subscription_status'] = status
     meta['last_subscription_message'] = message
     source_total = source_success + source_errors
@@ -1389,6 +2194,7 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     max_latency_ms = parse_positive_int(job.get('max_latency_ms', 0), 0)
     force_cleanup = bool(job.get('force_cleanup'))
     dedupe_sni_rotation = bool(job.get('dedupe_sni_rotation'))
+    dedupe_endpoint_host = bool(job.get('dedupe_endpoint_host'))
     state.setdefault('recently_removed', {})
 
     # Синхронизируем state с текущим конфигом.
@@ -1410,12 +2216,19 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
 
     subscription_links = list(job.get('links', []))
     incoming_sni_collapsed = 0
+    incoming_endpoint_collapsed = 0
     skipped_sni_local = 0
+    skipped_endpoint_local = 0
 
     if dedupe_sni_rotation:
         subscription_links, incoming_sni_collapsed = dedupe_sni_rotation_links_keep_last(subscription_links)
         if incoming_sni_collapsed:
             log("INFO", f"[{sec}]: SNI-ротации внутри подписки схлопнуты: {incoming_sni_collapsed}")
+
+    if dedupe_endpoint_host:
+        subscription_links, incoming_endpoint_collapsed = dedupe_endpoint_host_links_keep_last(subscription_links)
+        if incoming_endpoint_collapsed:
+            log("INFO", f"[{sec}]: IP/домен-дубликаты внутри подписки схлопнуты: {incoming_endpoint_collapsed}")
 
     mark_subscription_seen(state, sec, subscription_links)
 
@@ -1428,11 +2241,27 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
             if has_sni_param(link) and (sid in protected_ids or item.get('protected_local')):
                 protected_rotation_ids.add(sni_rotation_id(link))
 
+    protected_endpoint_ids = set()
+    if dedupe_endpoint_host:
+        for link in current_unique:
+            sid = stable_id(link)
+            item = st_sec['links'].get(sid, {})
+            eid = endpoint_host_id(link)
+            if eid and (sid in protected_ids or item.get('protected_local')):
+                protected_endpoint_ids.add(eid)
+
     incoming_rotation = {}
     if dedupe_sni_rotation:
         for link in subscription_links:
             if has_sni_param(link):
                 incoming_rotation[sni_rotation_id(link)] = link
+
+    incoming_endpoint = {}
+    if dedupe_endpoint_host:
+        for link in subscription_links:
+            eid = endpoint_host_id(link)
+            if eid:
+                incoming_endpoint[eid] = link
 
     initial_new_candidates = []
     skipped_recent = 0
@@ -1449,6 +2278,9 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         if dedupe_sni_rotation and has_sni_param(link) and sni_rotation_id(link) in protected_rotation_ids:
             skipped_sni_local += 1
             continue
+        if dedupe_endpoint_host and endpoint_host_id(link) in protected_endpoint_ids:
+            skipped_endpoint_local += 1
+            continue
         initial_new_candidates.append(link)
 
     potential_count = len(current_unique) + len(initial_new_candidates)
@@ -1461,10 +2293,14 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         log("WARN", f"[{sec}]: включена принудительная чистка: fail_count>=2 и ping выше лимита могут быть удалены")
     if dedupe_sni_rotation:
         log("INFO", f"[{sec}]: включено схлопывание SNI-ротаций")
+    if dedupe_endpoint_host:
+        log("INFO", f"[{sec}]: включено схлопывание IP/домен-дубликатов")
     if skipped_recent:
         log("INFO", f"[{sec}]: ключей из одноразового списка недавно удалённых пропущено при добавлении: {skipped_recent}")
     if skipped_sni_local:
         log("INFO", f"[{sec}]: SNI-дубликатов защищённых локальных ключей пропущено: {skipped_sni_local}")
+    if skipped_endpoint_local:
+        log("INFO", f"[{sec}]: IP/домен-дубликатов защищённых локальных ключей пропущено: {skipped_endpoint_local}")
 
     proxy_snap = proxy_snapshot_for_links(sec, current_unique, proxies)
     remove = []
@@ -1495,6 +2331,34 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
                 'fail_count': 0,
                 'delay': -1,
                 'status': 'sni_rotation'
+            })
+            remove_ids.add(sid)
+
+    if dedupe_endpoint_host and incoming_endpoint:
+        for idx, link in enumerate(current_unique, 1):
+            sid = stable_id(link)
+            item = st_sec['links'].get(sid, {})
+            if sid in protected_ids or item.get('protected_local'):
+                continue
+            eid = endpoint_host_id(link)
+            if not eid:
+                continue
+            new_link = incoming_endpoint.get(eid)
+            if not new_link:
+                continue
+            new_sid = stable_id(new_link)
+            if new_sid == sid:
+                continue
+            remove.append({
+                'sid': sid,
+                'idx': idx,
+                'link': link,
+                'item': item,
+                'reason': 'endpoint_host_rotation',
+                'priority': -1,
+                'fail_count': 0,
+                'delay': -1,
+                'status': 'endpoint_host_rotation'
             })
             remove_ids.add(sid)
 
@@ -1596,8 +2460,11 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         'max_latency_ms': max_latency_ms,
         'force_cleanup': force_cleanup,
         'dedupe_sni_rotation': dedupe_sni_rotation,
+        'dedupe_endpoint_host': dedupe_endpoint_host,
         'incoming_sni_collapsed': incoming_sni_collapsed,
+        'incoming_endpoint_collapsed': incoming_endpoint_collapsed,
         'skipped_sni_local': skipped_sni_local,
+        'skipped_endpoint_local': skipped_endpoint_local,
         'skipped_by_limit': skipped_by_limit,
         'skipped_recent': skipped_recent,
         'skipped_removed_this_run': skipped_removed_this_run,
@@ -1771,6 +2638,7 @@ def main():
     if imported or updated:
         log("INFO", f"State синхронизирован с текущим Podkop config: новых={imported}, обновлено={updated}")
     fetch_links(jobs, hwid, device_model, kernel_ver)
+    validate_jobs_links_for_podkop(jobs)
     protected_local_ids = load_local_protected_ids()
 
     need_proxies = any(
@@ -1799,21 +2667,7 @@ def main():
             log("INFO", f"[{sec}]: пропуск изменения секции ({info.get('reason')})")
             continue
         processed_sections += 1
-        extra = []
-        if info.get('removed_by_reason'):
-            extra.append('removed_by_reason=' + ','.join(f"{k}:{v}" for k, v in sorted(info['removed_by_reason'].items())))
-        if info.get('incoming_sni_collapsed'):
-            extra.append(f"incoming_sni_collapsed={info.get('incoming_sni_collapsed')}")
-        if info.get('skipped_sni_local'):
-            extra.append(f"skipped_sni_local={info.get('skipped_sni_local')}")
-        if info.get('skipped_by_limit'):
-            extra.append(f"skipped_by_limit={info.get('skipped_by_limit')}")
-        if info.get('skipped_recent'):
-            extra.append(f"skipped_recent_once={info.get('skipped_recent')}")
-        if info.get('skipped_removed_this_run'):
-            extra.append(f"skipped_removed_this_run={info.get('skipped_removed_this_run')}")
-        tail = (', ' + ', '.join(extra)) if extra else ''
-        log("INFO", f"[{sec}]: added={info.get('added',0)}, removed={info.get('removed',0)}, duplicates={info.get('duplicates',0)}, final_links={len(final_links)}{tail}")
+        log("INFO", build_section_result_log_ru(sec, info, len(final_links)))
         total_added += int(info.get('added', 0) or 0)
         total_removed += int(info.get('removed', 0) or 0)
         total_final_links += len(final_links)
