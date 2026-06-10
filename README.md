@@ -1,16 +1,16 @@
 # Podkop Subscriptions
 
-Add-on for Podkop. It loads proxy links from subscriptions, writes the final list into a selected Podkop section, and keeps the list up to date.
+Podkop Subscriptions is a small OpenWrt helper for Podkop. It downloads proxy links from subscription URLs, filters them, validates them against Podkop/sing-box, and writes the final list into a selected `/etc/config/podkop` section.
 
-Starting with version `3.3`, the web UI is not embedded into the native Podkop page. It is installed as a separate LuCI page:
+The main goal is safety: a failed or broken subscription must not overwrite a working Podkop section.
+
+Since v3.3, the LuCI UI is a standalone page:
 
 ```text
-Services → Подписки Podkop
+Services → Podkop Subscriptions
 ```
 
-Podkop remains separate. Podkop Subscriptions only reads Podkop/URLTest status, updates the proxy list, and writes the final result into `/etc/config/podkop`.
-
-## Tested configuration
+## Tested with
 
 ```text
 OpenWrt: 24.10.3–24.10.6; 25.12.4
@@ -27,103 +27,162 @@ Interactive install:
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
 ```
 
-Install without LuCI:
-
-```sh
-wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --no-panel
-```
-
-Install with LuCI:
+Install with LuCI panel:
 
 ```sh
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --with-panel
 ```
 
+Install without LuCI panel:
+
+```sh
+wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --no-panel
+```
+
+Upgrade over an existing setup without recreating config:
+
+```sh
+sh install.sh --local --with-panel --no-config
+```
+
+Clean temporary install files:
+
+```sh
+/usr/bin/podkop-sub-clean-temp
+```
 
 ## Main files
 
 ```text
-/etc/config/podkop_subscriptions
-/etc/config/podkop
-/etc/config/podkop-local-links
-/etc/podkop-subscriptions/state.json
-/tmp/podkop-sub-updater.log
+/etc/config/podkop_subscriptions    main settings
+/etc/config/podkop                  native Podkop config updated by the updater
+/etc/config/podkop-local-links      protected local links, one link per line
+/etc/podkop-subscriptions/state.json service state and fail_count
+/tmp/podkop-sub-updater.log          last manual run log
 ```
 
-## LuCI
-
-Open:
+## Minimal configuration
 
 ```text
-Services → Подписки Podkop
+config subscription_group 'main'
+    option enabled '1'
+    option target_section 'main'
+    list source 'https://example.com/subscription'
+    option use_local_links '1'
+    option regex ''
+    option match_mode 'ifnotmatch'
+    option on_empty 'skip'
+    option proxy_type 'urltest'
+    option max_links '50'
+    option max_latency_ms '500'
+    option force_cleanup '0'
+    option dedupe_sni_rotation '1'
+    option dedupe_endpoint_host '0'
+
+config subscription_schedule 'main_0310'
+    option enabled '1'
+    option hour '3'
+    option minute '10'
+    option jitter '1800'
+    option force '0'
 ```
 
-After changing settings, press **Save & Apply**. This only saves settings. To load subscriptions for the first time, click **Run updater** at the bottom of the page.
+Manual run:
 
-## Regex filter
+```sh
+/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
+```
 
-Use `|` as “or”:
+## Regex filtering
+
+Regex is applied to the entire decoded proxy link. Matching is case-insensitive: `YouTube`, `youtube`, and `YOUTUBE` are equivalent.
+
+Modes:
 
 ```text
-option regex 'Netherlands|Нидерланды|NL'
-option regex 'Finland|Финляндия|FI'
-option regex 'Torrents Free|Messengers'
+match_mode = ifmatch     # keep matching links only
+match_mode = ifnotmatch  # exclude matching links
 ```
 
-Comma is not an alternative separator.
-
-## Status
-
-Normal status is short:
+Example excluding filter:
 
 ```text
-Состояние: OK — обновлено: 2026-05-31 23:49, источники: 3/3, ключей в секции: 75, рабочих: нет данных, удалено: 0, локальных: 2.
+xhttp|#.*(YouTube|youtube|Ютуб|ютуб|YT|без рекламы|Messengers|MultiIP|Белый|список|Россия|Финляндия|🇦🇺|🇫🇮|\bAI\b)
 ```
 
-Errors are verbose only when there is a real emergency.
+Meaning:
 
-## Catch-up after downtime
+```text
+xhttp      — matched anywhere in the proxy link;
+#.*(...)   — everything inside the brackets is matched only in the node name after #;
+\bAI\b     — AI as a standalone word, not inside Premium+Main;
+YouTube    — must be listed separately: YT does not match YouTube.
+```
 
-Five minutes after boot, the updater checks whether the last successful subscription update is older than 24 hours. If it is stale, subscriptions are updated immediately. If the update fails or produces no valid keys, retry mode runs every 30 minutes until a successful update.
+## Validation pipeline
 
-## Manual commands
+Before writing to Podkop:
+
+```text
+download subscriptions
+→ extract proxy links
+→ apply regex
+→ remove duplicates
+→ normalize missing type=tcp for vless/trojan
+→ run Python format checks
+→ run sing-box check on a temporary config
+→ write to Podkop
+```
+
+If no compatible links remain, the current Podkop section is kept unchanged.
+
+## Duplicate handling
+
+```text
+option dedupe_sni_rotation '1'
+option dedupe_endpoint_host '1'
+```
+
+`dedupe_endpoint_host` keeps the last link from the subscription when several links use the same IP/domain. It is disabled by default.
+
+## Limits and fail_count
+
+```text
+option max_links '50'
+option max_latency_ms '500'
+option force_cleanup '0'
+```
+
+`force_cleanup` may remove links with `fail_count >= 2` or high ping even when `max_links` is not exceeded. Use carefully.
+
+Show fail counts without printing proxy links:
+
+```sh
+/usr/bin/podkop-sub-updater.py --fail-count
+```
+
+## HTTP headers for subscription requests
+
+The updater does not send the real OpenWrt model or kernel version to subscription providers. It uses a fixed profile:
+
+```text
+User-Agent: v2raytun/android
+X-HWID: 2CB6745020B32B99
+X-Device-OS: Android
+X-Ver-OS: Android 11
+X-Device-Model: OnePlus MT2110
+X-App-Version: 5.23.74
+```
+
+## Useful commands
 
 ```sh
 /usr/bin/podkop-sub-updater.py --version
 /usr/bin/podkop-sub-updater.py --status-summary
+/usr/bin/podkop-sub-updater.py --fail-count
 /usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop
 /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
 /usr/bin/podkop-sub-run-now
 /usr/bin/podkop-sub-run-now --status
 /usr/bin/podkop-sub-cron-sync
 ```
-
-
-
-## IP/domain duplicates
-
-If enabled:
-
-```text
-option dedupe_endpoint_host '1'
-```
-
-and several keys point to the same IP address or domain, the updater keeps the last variant from the subscription.
-
-Port, transport, `sni`, and other parameters are ignored for this comparison. The filter is disabled by default because some subscriptions may intentionally publish different valid ports on the same IP or domain.
-
-Local keys from `/etc/config/podkop-local-links` are not replaced.
-
-## Uninstall
-
-```sh
-wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
-```
-
-## Podkop link compatibility
-
-Before writing links into `/etc/config/podkop`, the updater validates them. For `vless://` and `trojan://` links without the `type` parameter, it explicitly adds `type=tcp`, because Podkop treats an empty transport as `Unknown transport '' detected`.
-
-Section processing summary logs are printed in Russian: added, removed, final key count, removal reasons, collapsed SNI/IP-domain duplicates, and skipped keys. The summary line uses readable phrases instead of technical underscored field names.
-
-When run directly in a terminal, the section summary line highlights important numbers with ANSI colors. The format remains one-line. ANSI codes are not added to syslog, LuCI, or piped output.

@@ -13,7 +13,16 @@ import time
 
 
 APP_VERSION = "3.6"
-USER_AGENT = f"Podkop-Subscription-Updater/{APP_VERSION}"
+# Headers used only for subscription HTTP requests.
+# Do not expose the real OpenWrt model/kernel to subscription providers.
+SUBSCRIPTION_USER_AGENT = 'v2raytun/android'
+SUBSCRIPTION_DEVICE_OS = 'Android'
+SUBSCRIPTION_VER_OS = 'Android 11'
+SUBSCRIPTION_DEVICE_MODEL = 'OnePlus MT2110'
+SUBSCRIPTION_APP_VERSION = '5.23.74'
+# Must match the external subscription proxy profile exactly.
+SUBSCRIPTION_HWID = '2CB6745020B32B99'
+USER_AGENT = SUBSCRIPTION_USER_AGENT
 VALID_PROTOCOLS = ('vless://', 'ss://', 'trojan://', 'socks4://', 'socks4a://', 'socks5://', 'hy2://', 'hysteria2://')
 VALID_PTYPES = {'urltest', 'selector'}
 VALID_ON_EMPTY = {'all', 'skip'}
@@ -632,11 +641,15 @@ def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=Non
     timeout = SOURCE_TIMEOUT_DEFAULT
 
     if is_url_source(source):
-        cmd = ['wget', '-qO-', f'--user-agent={USER_AGENT}']
+        # Always use a fixed Android-like profile for outbound subscription requests.
+        # The real OpenWrt model/kernel is intentionally not sent to subscription servers.
+        cmd = ['wget', '-qO-', f'--user-agent={SUBSCRIPTION_USER_AGENT}']
+        cmd.extend(['--header', f'User-Agent: {SUBSCRIPTION_USER_AGENT}'])
         cmd.extend(['--header', f'X-HWID: {hwid}'])
-        cmd.extend(['--header', 'X-Device-OS: OpenWrt Linux'])
-        cmd.extend(['--header', f'X-Device-Model: {device_model}'])
-        cmd.extend(['--header', f'X-Ver-OS: {kernel_ver}'])
+        cmd.extend(['--header', f'X-Device-OS: {SUBSCRIPTION_DEVICE_OS}'])
+        cmd.extend(['--header', f'X-Ver-OS: {SUBSCRIPTION_VER_OS}'])
+        cmd.extend(['--header', f'X-Device-Model: {SUBSCRIPTION_DEVICE_MODEL}'])
+        cmd.extend(['--header', f'X-App-Version: {SUBSCRIPTION_APP_VERSION}'])
         cmd.append(source)
 
         last_error = 'неизвестная ошибка'
@@ -2604,13 +2617,11 @@ def main():
     validate_file_argument(args.config, '--config')
     validate_file_argument(args.subs, '--subs')
     log("INFO", "=== ЗАПУСК ОБНОВЛЕНИЯ ПОДПИСОК ===")
-    mac = get_mac_address()
-    device_model = get_device_model()
-    kernel_ver = get_kernel_version()
-    raw_hwid_str = f"{mac}{device_model}"
-    hwid = hashlib.md5(raw_hwid_str.encode('utf-8')).hexdigest()[:16]
-    log("INFO", f"Устройство: {device_model} (Ядро: {kernel_ver})")
-    log("INFO", "X-HWID сгенерирован для запроса подписок")
+    device_model = SUBSCRIPTION_DEVICE_MODEL
+    kernel_ver = SUBSCRIPTION_VER_OS
+    hwid = SUBSCRIPTION_HWID
+    log("INFO", f"Профиль запроса подписок: {SUBSCRIPTION_USER_AGENT}, {SUBSCRIPTION_DEVICE_OS}, {SUBSCRIPTION_VER_OS}, {SUBSCRIPTION_DEVICE_MODEL}; используется фиксированный X-HWID, реальная модель роутера не отправляется")
+    log("INFO", "X-HWID фиксированный для совместимости с основным профилем подписки")
     jobs = load_jobs(args.subs)
     if not jobs:
         state = load_state(args.state)
