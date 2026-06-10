@@ -1,0 +1,31 @@
+#!/bin/sh
+# Clean temporary Podkop Subscriptions installation files.
+# Does not remove configs, state, backups, updater logs, or installed files.
+
+set -eu
+
+say() { printf '%s\n' "$*"; }
+
+say "Cleaning temporary Podkop Subscriptions installation files..."
+
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* /tmp/luci-indexcache* 2>/dev/null || true
+rm -rf /tmp/luci-modulecache 2>/dev/null || true
+
+rm -f /tmp/podkop-sub-install.sh 2>/dev/null || true
+rm -f /tmp/podkop-sub-uninstall.sh 2>/dev/null || true
+rm -f /tmp/podkop-sub-upgrade-backup-errors.log 2>/dev/null || true
+
+rm -f /tmp/podkop-subscriptions-stateful-v*.tar.gz 2>/dev/null || true
+rm -f /tmp/podkop-subscriptions-stateful-v*.zip 2>/dev/null || true
+rm -rf /tmp/podkop-subscriptions-clean-v* 2>/dev/null || true
+rm -rf /tmp/podkop-subscriptions-v* 2>/dev/null || true
+
+rm -rf /tmp/opkg-* 2>/dev/null || true
+
+say "Done."
+say "Kept:"
+say "  /etc/config/podkop_subscriptions"
+say "  /etc/config/podkop-local-links"
+say "  /etc/podkop-subscriptions/state.json"
+say "  /tmp/podkop-sub-updater.log"
+say "  /root/podkop-subscriptions-upgrade-backup-*.tar.gz"

@@ -168,7 +168,7 @@ return baseclass.extend({
       _("Источники"),
       _("Ссылки HTTP/HTTPS-подписок. Локальный список включается отдельной галкой ниже.")
     );
-    o.placeholder = "https://example.org/sub?target=V2Ray";
+    o.placeholder = "";
     o.rmempty = true;
 
     o = ss.option(
@@ -181,13 +181,20 @@ return baseclass.extend({
     o.rmempty = false;
 
     o = ss.option(
-      form.Value,
+      form.TextValue,
       "regex",
       _("Фильтр Regex"),
-      _("Фильтр применяется ко всей proxy-ссылке. Например: russia|xhttp. Можно оставить пустым.")
+      _("Фильтр применяется ко всей proxy-ссылке. Регистр не важен. Пример: xhttp|#.*(YouTube|youtube|Ютуб|ютуб|YT|без рекламы|Messengers|MultiIP|Белый|список|Россия|Финляндия|🇦🇺|🇫🇮|\\bAI\\b). xhttp сработает по всему ключу, остальное ищется только после решётки # в названии.")
     );
-    o.placeholder = "russia|xhttp";
+    o.rows = 2;
+    o.placeholder = "";
     o.rmempty = true;
+    o.inputstyle = "width: 100%; min-height: 4.2em; resize: vertical; font-family: monospace;";
+    o.write = function(section_id, value) {
+      value = String(value || "").replace(/^\s+|\s+$/g, "");
+      return form.TextValue.prototype.write.apply(this, [section_id, value]);
+    };
+
 
     o = ss.option(
       form.ListValue,

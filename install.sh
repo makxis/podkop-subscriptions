@@ -22,6 +22,7 @@ esac
 for arg in "$@"; do
   case "$arg" in
     --with-panel) PANEL_MODE="yes" ;;
+    --with-panel-hidden) PANEL_MODE="hidden" ;;
     --no-panel|--core-only) PANEL_MODE="no" ;;
     --configure) CONFIG_MODE="yes" ;;
     --no-config) CONFIG_MODE="no" ;;
@@ -462,13 +463,14 @@ install_core() {
   install_file "podkop-sub-updater.py" /usr/bin/podkop-sub-updater.py
   install_file "podkop-sub-cron-sync" /usr/bin/podkop-sub-cron-sync
   install_file "podkop-sub-run-now" /usr/bin/podkop-sub-run-now
+  install_file "podkop-sub-clean-temp" /usr/bin/podkop-sub-clean-temp
   mkdir -p /usr/share/podkop-subscriptions
   if [ -f "$SCRIPT_DIR/VERSION" ]; then
     install_file "VERSION" /usr/share/podkop-subscriptions/VERSION
   else
     printf '%s\n' "$APP_VERSION" > /usr/share/podkop-subscriptions/VERSION
   fi
-  chmod 0755 /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now
+  chmod 0755 /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now /usr/bin/podkop-sub-clean-temp
   touch "$LOCAL_LINKS"
   chmod 0600 "$LOCAL_LINKS" || true
   prepare_upgrade_from_legacy
@@ -527,6 +529,31 @@ PY
   rm -f /www/luci-static/resources/view/podkop/subscriptions.js 2>/dev/null || true
 }
 
+
+hide_panel_menu_entry() {
+  menu_file="/usr/share/luci/menu.d/luci-app-podkop-subscriptions.json"
+  [ -f "$menu_file" ] || return 0
+
+  python3 - "$menu_file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+
+with open(path, 'r', encoding='utf-8', errors='replace') as f:
+    data = json.load(f)
+
+entry = data.get('admin/services/podkop-subscriptions')
+if isinstance(entry, dict):
+    entry.pop('title', None)
+    entry.pop('order', None)
+
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+PY
+}
+
 install_panel() {
   if [ ! -d /www/luci-static/resources/view ]; then
     warn "LuCI static view directory was not found. Install LuCI first, then rerun with --with-panel."
@@ -545,19 +572,47 @@ install_panel() {
   install_file "luci/www/luci-static/resources/view/podkop_subscriptions/content.js" /www/luci-static/resources/view/podkop_subscriptions/content.js
   install_file "luci/www/luci-static/resources/view/podkop_subscriptions/subscriptions.js" /www/luci-static/resources/view/podkop_subscriptions/subscriptions.js
   install_file "luci/usr/share/luci/menu.d/luci-app-podkop-subscriptions.json" /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json
+  if [ "$PANEL_MODE" = "hidden" ]; then
+    hide_panel_menu_entry
+  fi
   install_file "luci/usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json" /usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json
 
   rm -f /tmp/luci-indexcache 2>/dev/null || true
   rm -rf /tmp/luci-modulecache 2>/dev/null || true
   /etc/init.d/rpcd restart >/dev/null 2>&1 || true
   /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
-  say "LuCI app installed. Open LuCI: Services -> Подписки Podkop."
+  if [ "$PANEL_MODE" = "hidden" ]; then
+    say "LuCI app installed in hidden mode. Direct URL: /cgi-bin/luci/admin/services/podkop-subscriptions"
+  else
+    say "LuCI app installed. Open LuCI: Services -> Подписки Podkop."
+  fi
 }
 
 ask_panel() {
   [ "$PANEL_MODE" = "yes" ] && return 0
+  [ "$PANEL_MODE" = "hidden" ] && return 0
   [ "$PANEL_MODE" = "no" ] && return 1
-  ask_yn "Install optional LuCI panel for subscriptions?" "yes"
+
+  printf '%s %s: ' "Install optional LuCI panel for subscriptions?" "[Y/n]" >&2
+  read ans || ans=""
+  case "$ans" in
+    ys|YS|Ys|yS)
+      PANEL_MODE="hidden"
+      return 0
+      ;;
+    y|Y|yes|YES|Yes|'')
+      PANEL_MODE="yes"
+      return 0
+      ;;
+    n|N|no|NO|No)
+      PANEL_MODE="no"
+      return 1
+      ;;
+    *)
+      PANEL_MODE="yes"
+      return 0
+      ;;
+  esac
 }
 
 ask_configure() {
