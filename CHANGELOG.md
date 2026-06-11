@@ -52,3 +52,4 @@
 - Added SNI rotation deduplication.
 - Added key count and latency-based filtering.
 - Added live updater log in LuCI.
+- Updater: endpoint dedupe now uses IP/domain + port, so the same host on different ports is preserved.

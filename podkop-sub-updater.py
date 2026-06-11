@@ -57,7 +57,7 @@ def sanitize_log_message(msg):
 
 
 REMOVE_REASON_LABELS_RU = {
-    'endpoint_host_rotation': 'IP/домен-ротация',
+    'endpoint_host_rotation': 'IP/домен:порт-ротация',
     'sni_rotation': 'SNI-ротация',
     'latency': 'ping выше лимита',
     'force_fail_count': 'принудительно по fail_count',
@@ -94,11 +94,11 @@ def build_section_result_log_ru(sec, info, final_count):
     if info.get('incoming_sni_collapsed'):
         parts.append(f'схлопнуто SNI-ротаций из подписок={colored_count(info.get("incoming_sni_collapsed"), "info_positive")}')
     if info.get('incoming_endpoint_collapsed'):
-        parts.append(f'схлопнуто IP/домен-дублей из подписок={colored_count(info.get("incoming_endpoint_collapsed"), "info_positive")}')
+        parts.append(f'схлопнуто IP/домен:порт-дублей из подписок={colored_count(info.get("incoming_endpoint_collapsed"), "info_positive")}')
     if info.get('skipped_sni_local'):
         parts.append(f'пропущено SNI-дублей локальных={colored_count(info.get("skipped_sni_local"), "warn_positive")}')
     if info.get('skipped_endpoint_local'):
-        parts.append(f'пропущено IP/домен-дублей локальных={colored_count(info.get("skipped_endpoint_local"), "warn_positive")}')
+        parts.append(f'пропущено IP/домен:порт-дублей локальных={colored_count(info.get("skipped_endpoint_local"), "warn_positive")}')
     if info.get('skipped_by_limit'):
         parts.append(f'не добавлено из-за лимита={colored_count(info.get("skipped_by_limit"), "warn_positive")}')
     if info.get('skipped_recent'):
@@ -390,39 +390,46 @@ def dedupe_sni_rotation_links_keep_last(links):
 
 
 def endpoint_host_value(link):
-    """Return canonical host/domain/IP for optional endpoint dedupe.
+    """Return canonical host/domain/IP for endpoint diagnostics."""
+    return endpoint_host_port_value(link)[0]
 
-    This intentionally groups by host only, not by port or protocol.
-    The feature is optional because some providers may intentionally publish
-    several different ports on the same host.
+
+def endpoint_host_port_value(link):
+    """Return canonical (host, port) for optional endpoint dedupe.
+
+    Dedupe must not collapse the same host/IP with different ports:
+    providers may publish several working protocols on one address.
     """
     try:
         parts = _parse_link_parts(link)
         host = str(parts.get('host') or '').strip().lower()
+        port = str(parts.get('port') or '').strip()
     except Exception:
         # Conservative fallback: best-effort authority parsing without rejecting the link here.
         base = _url_without_fragment(link)
         if '://' not in base:
-            return ''
+            return '', ''
         rest = base.split('://', 1)[1].split('?', 1)[0].split('/', 1)[0]
         if '@' in rest:
             rest = rest.rsplit('@', 1)[1]
-        host, _port = _parse_hostport(rest)
+        host, port = _parse_hostport(rest)
         host = str(host or '').strip().lower()
+        port = str(port or '').strip()
     if host.startswith('[') and host.endswith(']'):
         host = host[1:-1]
-    return host
+    return host, port
 
 
 def endpoint_host_id(link):
-    host = endpoint_host_value(link)
+    host, port = endpoint_host_port_value(link)
     if not host:
         return ''
-    return hashlib.sha256(host.encode('utf-8', 'ignore')).hexdigest()[:24]
+    endpoint = f'{host}:{port}' if port else host
+    return hashlib.sha256(endpoint.encode('utf-8', 'ignore')).hexdigest()[:24]
 
 
 def dedupe_endpoint_host_links_keep_last(links):
-    """Collapse incoming links by server host/domain/IP, keeping the last occurrence."""
+    """Collapse incoming links by server host/domain/IP + port, keeping the last occurrence."""
     out_rev = []
     seen = set()
     collapsed = 0
@@ -2241,7 +2248,7 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     if dedupe_endpoint_host:
         subscription_links, incoming_endpoint_collapsed = dedupe_endpoint_host_links_keep_last(subscription_links)
         if incoming_endpoint_collapsed:
-            log("INFO", f"[{sec}]: IP/домен-дубликаты внутри подписки схлопнуты: {incoming_endpoint_collapsed}")
+            log("INFO", f"[{sec}]: IP/домен:порт-дубликаты внутри подписки схлопнуты: {incoming_endpoint_collapsed}")
 
     mark_subscription_seen(state, sec, subscription_links)
 
@@ -2307,13 +2314,13 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     if dedupe_sni_rotation:
         log("INFO", f"[{sec}]: включено схлопывание SNI-ротаций")
     if dedupe_endpoint_host:
-        log("INFO", f"[{sec}]: включено схлопывание IP/домен-дубликатов")
+        log("INFO", f"[{sec}]: включено схлопывание IP/домен:порт-дубликатов")
     if skipped_recent:
         log("INFO", f"[{sec}]: ключей из одноразового списка недавно удалённых пропущено при добавлении: {skipped_recent}")
     if skipped_sni_local:
         log("INFO", f"[{sec}]: SNI-дубликатов защищённых локальных ключей пропущено: {skipped_sni_local}")
     if skipped_endpoint_local:
-        log("INFO", f"[{sec}]: IP/домен-дубликатов защищённых локальных ключей пропущено: {skipped_endpoint_local}")
+        log("INFO", f"[{sec}]: IP/домен:порт-дубликатов защищённых локальных ключей пропущено: {skipped_endpoint_local}")
 
     proxy_snap = proxy_snapshot_for_links(sec, current_unique, proxies)
     remove = []
