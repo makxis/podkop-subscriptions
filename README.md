@@ -93,6 +93,20 @@ Manual run:
 /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
 ```
 
+
+### Important note about IP/domain deduplication
+
+The “Collapse IP/domain:port duplicates” option compares both the server address and the port.
+
+This is intentional: the same IP or domain may expose several working variants on different ports. For example:
+
+```text
+server.example.com:443
+server.example.com:8443
+```
+
+Such links are now treated as different and do not remove each other. Only links with the same IP/domain and the same port are collapsed. If SNI, name, path, fingerprint, or other parameters differ but the address and port are the same, the last variant from the subscription is kept.
+
 ## Regex filtering
 
 Regex is applied to the entire decoded proxy link. Matching is case-insensitive: `YouTube`, `youtube`, and `YOUTUBE` are equivalent.
