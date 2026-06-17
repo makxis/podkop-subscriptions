@@ -30,6 +30,10 @@ VALID_MATCH_MODES = {'ifmatch', 'ifnotmatch'}
 STATE_PATH_DEFAULT = '/etc/podkop-subscriptions/state.json'
 SUBSCRIPTIONS_CONFIG_DEFAULT = '/etc/config/podkop_subscriptions'
 LOCAL_LINKS_PATH_DEFAULT = '/etc/config/podkop-local-links'
+
+
+def is_local_links_source(source):
+    return source in (LOCAL_LINKS_PATH_DEFAULT, 'file://' + LOCAL_LINKS_PATH_DEFAULT)
 DELETE_AFTER_FAIL_COUNT_DEFAULT = 72
 MIN_KEEP_PER_SECTION_DEFAULT = 1
 SOURCE_TIMEOUT_DEFAULT = 45
@@ -603,7 +607,7 @@ def load_jobs_from_flat_file(subs_path):
                 log("WARN", f"Строка {line_num}: недопустимое действие '{on_empty}'. Пропуск.")
                 continue
             if sec_name not in jobs:
-                jobs[sec_name] = {'ptype': ptype, 'entries': [], 'links': [], 'source_errors': 0, 'source_success': 0, 'max_links': 0, 'max_latency_ms': 0, 'force_cleanup': False, 'dedupe_sni_rotation': False, 'dedupe_endpoint_host': False}
+                jobs[sec_name] = {'ptype': ptype, 'entries': [], 'links': [], 'source_errors': 0, 'source_success': 0, 'external_valid_count': 0, 'local_links_count': 0, 'max_links': 0, 'max_latency_ms': 0, 'force_cleanup': False, 'dedupe_sni_rotation': False, 'dedupe_endpoint_host': False}
             if jobs[sec_name]['ptype'] != ptype:
                 log("WARN", f"Строка {line_num}: секция '{sec_name}' уже объявлена как '{jobs[sec_name]['ptype']}', нельзя смешивать с '{ptype}'. Пропуск.")
                 continue
@@ -635,7 +639,7 @@ def is_url_source(source):
 def source_display_label(source, label=None):
     if label:
         return label
-    if source == LOCAL_LINKS_PATH_DEFAULT or source == 'file://' + LOCAL_LINKS_PATH_DEFAULT:
+    if is_local_links_source(source):
         return 'локальный список'
     return 'источник'
 
@@ -1346,9 +1350,9 @@ def validate_links_for_podkop_singbox(sec, links):
     if hard.get('ok'):
         log('INFO', f"[{sec}]: проверка совместимости Podkop/sing-box: принято {len(valid)}, отброшено {stats['rejected']}, sing-box check запусков: {stats['singbox_runs']}")
     else:
-        log('ERROR', f"[{sec}]: проверка совместимости Podkop/sing-box не смогла собрать безопасный список; секция не будет изменена")
+        log('WARN', f"[{sec}]: проверка совместимости Podkop/sing-box не смогла собрать безопасный список; секция не будет изменена")
         for reason, count in sorted((hard.get('rejected_by_reason') or {}).items()):
-            log('ERROR', f"[{sec}]: {validation_reason_text(reason)}: {count}")
+            log('WARN', f"[{sec}]: {validation_reason_text(reason)}: {count}")
 
     return valid, stats
 
@@ -1370,6 +1374,8 @@ def validate_jobs_links_for_podkop(jobs):
         valid, stats = validate_links_for_podkop_singbox(sec, links)
         job['validation'] = stats
         job['links'] = valid
+        external_candidate_ids = set(job.get('external_candidate_ids') or set())
+        job['external_valid_count'] = sum(1 for link in valid if stable_id(link) in external_candidate_ids)
         if stats.get('input') and not valid:
             job['validation_failed'] = True
 
@@ -1378,65 +1384,116 @@ def fetch_links(jobs, hwid, device_model, kernel_ver):
     for sec, job in jobs.items():
         log("DEBUG", f"--- Обработка секции: [{sec}] ---")
         section_links = []
+        external_section_links = []
+        local_links = []
         job['source_errors'] = 0
         job['source_success'] = 0
         job['source_stats'] = []
         job['raw_links_count'] = 0
         job['filtered_links_count'] = 0
+        job['external_valid_count'] = 0
+        job['local_links_count'] = 0
+
+        external_idx = 0
         for src_idx, entry in enumerate(job['entries'], 1):
             source = entry['source']
-            label = 'локальный список' if source in (LOCAL_LINKS_PATH_DEFAULT, 'file://' + LOCAL_LINKS_PATH_DEFAULT) else f'источник {src_idx}'
-            st = {'label': label, 'raw': 0, 'filtered': 0, 'format': '', 'status': 'unknown'}
+            is_local = is_local_links_source(source)
+            if is_local:
+                label = 'локальный список'
+            else:
+                external_idx += 1
+                label = f'источник {external_idx}'
+
+            st = {'label': label, 'raw': 0, 'filtered': 0, 'format': '', 'status': 'unknown', 'local': bool(is_local)}
             try:
                 payload = read_source_payload(source, hwid, device_model, kernel_ver, payload_cache, label)
             except subprocess.TimeoutExpired:
                 st['status'] = 'download_failed'
-                job['source_stats'].append(st)
-                log("ERROR", f"[{sec}]: Превышено время ожидания ответа сервера: {label}")
-                job['source_errors'] += 1
+                if not is_local:
+                    job['source_stats'].append(st)
+                    log("WARN", f"[{sec}]: источник недоступен: {label} -> timeout; продолжаю, если есть резервные источники")
+                    job['source_errors'] += 1
+                else:
+                    log("DEBUG", f"[{sec}]: локальный список не прочитан: timeout")
                 continue
             except Exception as e:
                 st['status'] = 'download_failed'
-                job['source_stats'].append(st)
-                log("ERROR", f"[{sec}]: Ошибка чтения источника {label} -> {e}")
-                job['source_errors'] += 1
+                if not is_local:
+                    job['source_stats'].append(st)
+                    log("WARN", f"[{sec}]: источник недоступен: {label} -> {e}; продолжаю, если есть резервные источники")
+                    job['source_errors'] += 1
+                else:
+                    log("DEBUG", f"[{sec}]: локальный список не прочитан: {e}")
                 continue
+
             links_raw, payload_type = extract_links_from_payload(payload)
             st['format'] = payload_type
             st['raw'] = len(links_raw)
-            job['raw_links_count'] += len(links_raw)
+            if not is_local:
+                job['raw_links_count'] += len(links_raw)
+
             if payload_type == 'invalid':
                 st['status'] = 'unsupported_format'
-                job['source_stats'].append(st)
-                log("ERROR", f"[{sec}]: {label} не plain-text URI и не валидный Base64")
-                job['source_errors'] += 1
+                if not is_local:
+                    job['source_stats'].append(st)
+                    log("WARN", f"[{sec}]: {label} вернул неподдерживаемый формат; продолжаю, если есть резервные источники")
+                    job['source_errors'] += 1
+                else:
+                    log("DEBUG", f"[{sec}]: локальный список имеет неподдерживаемый формат")
                 continue
+
             if not links_raw:
                 st['status'] = 'empty_subscription'
-                job['source_stats'].append(st)
-                log("WARN", f"[{sec}]: в {label} нет ссылок поддерживаемого типа")
-                job['source_success'] += 1
+                if not is_local:
+                    job['source_stats'].append(st)
+                    log("WARN", f"[{sec}]: в {label} нет ссылок поддерживаемого типа; продолжаю, если есть резервные источники")
+                    job['source_errors'] += 1
+                else:
+                    log("DEBUG", f"[{sec}]: локальный список пустой")
                 continue
+
             filtered_links = filter_links(links_raw, entry['regex'], entry['match_mode'], entry['on_empty'], sec, label)
             st['filtered'] = len(filtered_links)
-            job['filtered_links_count'] += len(filtered_links)
+            if not is_local:
+                job['filtered_links_count'] += len(filtered_links)
+
             if not filtered_links:
                 st['status'] = 'empty_after_filter'
-                job['source_stats'].append(st)
-                job['source_success'] += 1
+                if not is_local:
+                    job['source_stats'].append(st)
+                    log("WARN", f"[{sec}]: после фильтра в {label} не осталось ссылок; продолжаю, если есть резервные источники")
+                    job['source_errors'] += 1
+                else:
+                    log("DEBUG", f"[{sec}]: после фильтра в локальном списке не осталось ссылок")
                 continue
+
             section_links.extend(filtered_links)
-            job['source_success'] += 1
-            st['status'] = 'ok'
-            job['source_stats'].append(st)
-            log("INFO", f"[{sec}]: {label} ({payload_type}) -> ссылок после фильтра: {len(filtered_links)}")
+            if is_local:
+                local_links.extend(filtered_links)
+            else:
+                external_section_links.extend(filtered_links)
+                job['source_success'] += 1
+                st['status'] = 'ok'
+                job['source_stats'].append(st)
+                log("INFO", f"[{sec}]: {label} ({payload_type}) -> ссылок после фильтра: {len(filtered_links)}")
+
+        external_unique, external_dups = dedupe_links_keep_order(external_section_links)
+        job['external_candidate_ids'] = {stable_id(x) for x in external_unique}
+        job['external_candidate_count'] = len(external_unique)
+
+        local_unique, local_dups = dedupe_links_keep_order(local_links)
+        job['local_links_count'] = len(local_unique)
+
         job['links'], dup_count = dedupe_links_keep_order(section_links)
         if dup_count:
             log("INFO", f"[{sec}]: Дубликатов в новых ссылках подписки отброшено: {dup_count}")
-        if job['links']:
-            log("INFO", f"[{sec}]: Итого уникальных новых ссылок из подписок: {len(job['links'])}")
+        if external_dups:
+            log("INFO", f"[{sec}]: Дубликатов во внешних источниках отброшено: {external_dups}")
+
+        if job['external_candidate_count']:
+            log("INFO", f"[{sec}]: Итого уникальных новых ссылок из внешних подписок: {job['external_candidate_count']}")
         else:
-            log("WARN", f"[{sec}]: После обработки всех источников не осталось ссылок.")
+            log("WARN", f"[{sec}]: После обработки внешних источников не осталось ссылок.")
 
 def load_current_podkop_sections(config_path):
     result = {}
@@ -1831,15 +1888,15 @@ def classify_empty_status(jobs):
             elif code in ('empty_subscription', 'empty_response'): saw_empty = True
             elif code == 'empty_after_filter': saw_after_filter = True
             elif code == 'download_failed': saw_download_error = True
-    if saw_validation_failed:
+    if saw_validation_failed and total_success == 0:
         return 'validation_failed'
-    if total_raw > 0 and total_filtered == 0:
+    if total_success == 0 and total_raw > 0 and total_filtered == 0:
         return 'empty_after_filter'
-    if saw_invalid:
+    if total_success == 0 and saw_invalid:
         return 'unsupported_format'
-    if saw_after_filter:
+    if total_success == 0 and saw_after_filter:
         return 'empty_after_filter'
-    if saw_empty:
+    if total_success == 0 and saw_empty:
         return 'empty_subscription'
     if saw_download_error or total_errors > 0:
         return 'download_failed'
@@ -1855,7 +1912,8 @@ def update_subscription_meta(state, jobs, processed_sections, total_added, total
     source_success = sum(int(j.get('source_success', 0) or 0) for j in jobs.values())
     raw_links = sum(int(j.get('raw_links_count', 0) or 0) for j in jobs.values())
     filtered_links = sum(int(j.get('filtered_links_count', 0) or 0) for j in jobs.values())
-    unique_links = sum(len(j.get('links', []) or []) for j in jobs.values())
+    unique_links = sum(int(j.get('external_valid_count', 0) or 0) for j in jobs.values())
+    local_links = sum(int(j.get('local_links_count', 0) or 0) for j in jobs.values())
     if status is None:
         if unique_links > 0:
             status = 'partial_ok' if source_errors else 'ok'
@@ -1913,6 +1971,7 @@ def update_subscription_meta(state, jobs, processed_sections, total_added, total
     meta['last_raw_links'] = raw_links
     meta['last_after_filter_links'] = filtered_links
     meta['last_unique_links'] = unique_links
+    meta['last_local_links'] = local_links
     meta['last_added'] = int(total_added or 0)
     meta['last_removed'] = int(total_removed or 0)
     meta['last_final_links'] = int(total_final or 0)
@@ -2227,12 +2286,13 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         if sid in protected_ids:
             item['protected_local'] = True
 
-    # Если источники не дали ни одной валидной ссылки — ничего не чистим и не меняем.
-    if job.get('source_success', 0) == 0 or not job.get('links'):
-        log("WARN", f"[{sec}]: источники подписок не дали валидных ссылок; секция не изменяется")
-        return None, {'skip': True, 'reason': 'no_subscription_links'}
+    # Если внешние источники не дали ни одной валидной ссылки — ничего не чистим и не меняем.
+    # Локальный список не считается внешней подпиской и не должен маскировать аварию загрузки.
+    if int(job.get('external_valid_count', 0) or 0) == 0:
+        log("WARN", f"[{sec}]: внешние источники подписок не дали валидных ссылок; секция не изменяется")
+        return None, {'skip': True, 'reason': 'no_external_subscription_links'}
     if job.get('source_errors', 0) > 0:
-        log("WARN", f"[{sec}]: часть источников подписки недоступна, но валидные ссылки получены; обслуживание продолжается")
+        log("WARN", f"[{sec}]: часть внешних источников подписки недоступна или пуста, но валидные ссылки получены; обслуживание продолжается")
 
     subscription_links = list(job.get('links', []))
     incoming_sni_collapsed = 0
@@ -2700,6 +2760,10 @@ def main():
         log("INFO", f"Одноразовый список недавно удалённых ключей использован и очищен: {len(recent_skip_ids)}; новых записей для следующего запуска: {len(state.get('recently_removed', {}))}")
 
     update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids))
+    meta_status = (state.get('meta') or {}).get('last_subscription_status', '')
+    meta_msg = (state.get('meta') or {}).get('last_subscription_message', '')
+    if meta_status not in ('ok', 'partial_ok') and processed_sections == 0:
+        log("ERROR", f"Не удалось получить валидные ключи из внешних подписок ни для одной секции: {meta_msg or meta_status}")
     save_state(args.state, state)
     if not updates:
         if args.force:

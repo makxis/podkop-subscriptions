@@ -94,18 +94,20 @@ Manual run:
 ```
 
 
-### Important note about IP/domain deduplication
 
-The “Collapse IP/domain:port duplicates” option compares both the server address and the port.
 
-This is intentional: the same IP or domain may expose several working variants on different ports. For example:
+### IP/domain:port deduplication
+
+The “Collapse IP/domain:port duplicates” option compares the server address together with the port. The same IP or domain on different ports is treated as different working variants and is not removed.
+
+For example, these links are treated as different:
 
 ```text
 server.example.com:443
 server.example.com:8443
 ```
 
-Such links are now treated as different and do not remove each other. Only links with the same IP/domain and the same port are collapsed. If SNI, name, path, fingerprint, or other parameters differ but the address and port are the same, the last variant from the subscription is kept.
+Only links with the same IP/domain and the same port are collapsed. `transport`, `sni`, `path`, `fp`, the link name, and other parameters are not used for this comparison; the last variant from the subscription is kept.
 
 ## Regex filtering
 
@@ -200,3 +202,17 @@ X-App-Version: 5.23.74
 /usr/bin/podkop-sub-run-now --status
 /usr/bin/podkop-sub-cron-sync
 ```
+
+
+### Individual source failures
+
+If one subscription source fails but other reserve sources still provide valid keys, this is not treated as a fatal error. The updater logs it as `WARN`, not `ERROR`, so LuCI does not flood the interface with pop-up errors.
+
+A fatal error is logged only when no valid keys can be assembled for any section. The previous working Podkop configuration is not overwritten in this case.
+
+
+### Source counters and errors
+
+Only external subscription sources are counted in status and statistics. The local list `/etc/config/podkop-local-links` is not a network source: it does not increase the successful subscription counter and does not hide problems with external subscription downloads.
+
+If some external sources fail but at least one reserve source provides valid keys, this is not a fatal error. The updater logs a warning and continues. A red error is emitted only when no valid keys can be assembled from external subscriptions for any section. In that case the previous working Podkop configuration is not overwritten.

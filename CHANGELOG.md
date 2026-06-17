@@ -53,3 +53,5 @@
 - Added key count and latency-based filtering.
 - Added live updater log in LuCI.
 - Updater: endpoint dedupe now uses IP/domain + port, so the same host on different ports is preserved.
+- Updater: individual source download/format failures are now WARN; ERROR is emitted only when no section gets valid fresh keys.
+- Updater/LuCI: source status ignores the local list; red ERROR is emitted only when external subscriptions produce no valid keys. Endpoint dedupe help now correctly says IP/domain + port.
