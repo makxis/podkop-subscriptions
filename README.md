@@ -216,3 +216,16 @@ A fatal error is logged only when no valid keys can be assembled for any section
 Only external subscription sources are counted in status and statistics. The local list `/etc/config/podkop-local-links` is not a network source: it does not increase the successful subscription counter and does not hide problems with external subscription downloads.
 
 If some external sources fail but at least one reserve source provides valid keys, this is not a fatal error. The updater logs a warning and continues. A red error is emitted only when no valid keys can be assembled from external subscriptions for any section. In that case the previous working Podkop configuration is not overwritten.
+
+
+### Auto-update status
+
+The status line shows not only the latest subscription update result, but also whether the schedule is actually applied in cron:
+
+```text
+auto-update: enabled
+auto-update: not applied
+auto-update: not configured
+```
+
+This matters because `/etc/config/podkop_subscriptions` is only the saved setting. The real scheduled execution is defined by `/etc/crontabs/root`. If a schedule exists in settings but not in cron, the UI reports that auto-update is not applied.

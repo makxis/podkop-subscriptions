@@ -12,7 +12,7 @@ import json
 import time
 
 
-APP_VERSION = "3.6"
+APP_VERSION = "3.6.1"
 # Headers used only for subscription HTTP requests.
 # Do not expose the real OpenWrt model/kernel to subscription providers.
 SUBSCRIPTION_USER_AGENT = 'v2raytun/android'
@@ -1571,6 +1571,52 @@ def fmt_time(ts):
         return str(ts)
 
 
+
+def enabled_subscription_schedules(config_path=SUBSCRIPTIONS_CONFIG_DEFAULT):
+    """Return enabled schedule sections from UCI config.
+
+    This is the desired schedule. The real applied schedule is checked in cron.
+    """
+    try:
+        sections = parse_uci_sections(config_path)
+    except Exception:
+        return []
+    result = []
+    for s in sections:
+        if s.get('type') != 'subscription_schedule':
+            continue
+        opt = s.get('options') or {}
+        if opt.get('enabled', '1') == '0':
+            continue
+        hour = str(opt.get('hour', '')).strip()
+        minute = str(opt.get('minute', '')).strip()
+        if not hour or not minute:
+            continue
+        result.append(s)
+    return result
+
+
+def cron_text(path='/etc/crontabs/root'):
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except Exception:
+        return ''
+
+
+def autoupdate_status_text(config_path=SUBSCRIPTIONS_CONFIG_DEFAULT, cron_path='/etc/crontabs/root'):
+    """Compare desired schedules from UCI with real cron entries.
+
+    UCI is only a saved setting. /etc/crontabs/root is what crond actually runs.
+    """
+    schedules = enabled_subscription_schedules(config_path)
+    if not schedules:
+        return 'автообновление: не задано'
+    cr = cron_text(cron_path)
+    if '# podkop-sub-updater:' in cr and '/usr/bin/podkop-sub-updater.py' in cr:
+        return 'автообновление: включено'
+    return 'автообновление: не применено'
+
 def status_text_for_code(code):
     mapping = {
         'ok': 'OK',
@@ -1666,9 +1712,10 @@ def state_status_summary(state):
         else:
             keys_part = 'рабочих ключей: нет данных'
 
+        auto_part = autoupdate_status_text()
         return (
-            'Состояние: OK — обновлено: %s, источники: %d/%d, %s, удалено: %d, локальных: %d.'
-            % (fmt_time(success_ts), src_ok, src_total, keys_part, removed, local)
+            'Состояние: OK — обновлено: %s, источники: %d/%d, %s, удалено: %d, локальных: %d, %s.'
+            % (fmt_time(success_ts), src_ok, src_total, keys_part, removed, local, auto_part)
         )
 
     lines = []
@@ -1677,7 +1724,7 @@ def state_status_summary(state):
     if attempt_ts:
         lines.append('Последняя попытка: ' + fmt_time(attempt_ts) + '.')
     lines.append('Источники: %d/%d.' % (src_ok, src_total))
-    lines.append('Рабочих ключей: %d, проблемных: %d, ключей в секции: %d, удалено: %d, локальных: %d.' % (ok, bad, final_links, removed, local))
+    lines.append('Рабочих ключей: %d, проблемных: %d, ключей в секции: %d, удалено: %d, локальных: %d, %s.' % (ok, bad, final_links, removed, local, autoupdate_status_text()))
 
     detail = meta.get('last_subscription_message')
     if detail:

@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.6.1
+
+- Status summary now shows whether auto-update is actually applied in cron.
+- Version bumped from 3.6 to 3.6.1.
+
 ## 3.6
 
 - Added safe subscription validation before writing links to Podkop:
@@ -55,3 +60,4 @@
 - Updater: endpoint dedupe now uses IP/domain + port, so the same host on different ports is preserved.
 - Updater: individual source download/format failures are now WARN; ERROR is emitted only when no section gets valid fresh keys.
 - Updater/LuCI: source status ignores the local list; red ERROR is emitted only when external subscriptions produce no valid keys. Endpoint dedupe help now correctly says IP/domain + port.
+- LuCI/status: status summary now reports whether configured schedules are actually applied in cron.
