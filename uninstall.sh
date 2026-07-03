@@ -24,6 +24,12 @@ restore_latest_backup() {
   fi
 }
 
+if [ -x /etc/init.d/podkop_subscriptions ]; then
+  /etc/init.d/podkop_subscriptions stop >/dev/null 2>&1 || true
+  /etc/init.d/podkop_subscriptions disable >/dev/null 2>&1 || true
+fi
+rm -f /etc/init.d/podkop_subscriptions
+
 CRON_FILE=/etc/crontabs/root
 TAG="# podkop-sub-updater"
 UPDATER=/usr/bin/podkop-sub-updater.py
@@ -40,7 +46,8 @@ rm -f /www/luci-static/resources/view/podkop/subscriptions.js
 rm -rf /www/luci-static/resources/view/podkop_subscriptions
 rm -f /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json
 rm -f /usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json
-rm -f /tmp/podkop-sub-updater.lock /tmp/podkop-sub-updater.log /tmp/podkop-sub-updater.status
+rm -rf /tmp/podkop-sub-updater.lock /tmp/podkop-sub-cron-sync.lock
+rm -f /tmp/podkop-sub-updater.flock /tmp/podkop-sub-updater.log /tmp/podkop-sub-updater.status
 
 if [ "$PURGE_CONFIG" = "1" ]; then
   rm -f /etc/config/podkop-local-links /etc/config/podkop_subscriptions

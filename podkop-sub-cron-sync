@@ -7,16 +7,78 @@ SUB_CFG="/etc/config/podkop_subscriptions"
 UPDATER_TAG="# podkop-sub-updater"
 HEALTH_TAG="# podkop-sub-health"
 CATCHUP_TAG="# podkop-sub-catchup"
+TMP_FILE="${CRON_FILE}.tmp.$$"
+
+# LuCI and the procd config trigger may invoke synchronization almost
+# simultaneously. Use a kernel-backed flock, held by a tiny Python parent,
+# so lock acquisition is atomic and a crashed process cannot leave a stale
+# mkdir/PID lock behind. The child shell inherits the locked descriptor.
+if [ "${PODKOP_CRON_SYNC_LOCKED:-0}" != "1" ]; then
+  exec python3 - "$0" "$@" <<'PYLOCK'
+import fcntl
+import os
+import subprocess
+import sys
+import time
+
+LOCK_PATH = "/tmp/podkop-sub-cron-sync.flock"
+WAIT_SECONDS = 30.0
+POLL_SECONDS = 0.2
+
+fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+deadline = time.monotonic() + WAIT_SECONDS
+
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            print(
+                "Cron synchronization lock remained busy for 30 seconds.",
+                file=sys.stderr,
+            )
+            os.close(fd)
+            raise SystemExit(1)
+        time.sleep(POLL_SECONDS)
+
+env = os.environ.copy()
+env["PODKOP_CRON_SYNC_LOCKED"] = "1"
+
+try:
+    rc = subprocess.call(
+        ["/bin/sh", sys.argv[1], *sys.argv[2:]],
+        env=env,
+        pass_fds=(fd,),
+    )
+finally:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+raise SystemExit(rc)
+PYLOCK
+fi
+
+cleanup() {
+  rm -f "$TMP_FILE" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
 touch "$CRON_FILE"
+chmod 0600 "$CRON_FILE" 2>/dev/null || true
 
-# Удаляем только наши управляемые строки. Штатный podkop list_update не трогаем.
-grep -v "$UPDATER_TAG" "$CRON_FILE" | grep -v "$HEALTH_TAG" | grep -v "$CATCHUP_TAG" > "$CRON_FILE.tmp"
-mv "$CRON_FILE.tmp" "$CRON_FILE"
+# Remove only lines managed by this project. Native Podkop list_update stays intact.
+grep -v "$UPDATER_TAG" "$CRON_FILE" \
+  | grep -v "$HEALTH_TAG" \
+  | grep -v "$CATCHUP_TAG" > "$TMP_FILE" || true
+mv "$TMP_FILE" "$CRON_FILE"
+chmod 0600 "$CRON_FILE" 2>/dev/null || true
 
 if [ ! -f "$SUB_CFG" ]; then
-  /etc/init.d/cron enable >/dev/null 2>&1
-  /etc/init.d/cron restart >/dev/null 2>&1
+  /etc/init.d/cron enable >/dev/null 2>&1 || true
+  /etc/init.d/cron restart >/dev/null 2>&1 || true
   echo "Subscriptions config not found: $SUB_CFG"
   exit 0
 fi
@@ -78,8 +140,8 @@ config_load podkop_subscriptions
 config_foreach count_group subscription_group
 
 if [ "$GROUPS_COUNT" -eq 0 ]; then
-  /etc/init.d/cron enable >/dev/null 2>&1
-  /etc/init.d/cron restart >/dev/null 2>&1
+  /etc/init.d/cron enable >/dev/null 2>&1 || true
+  /etc/init.d/cron restart >/dev/null 2>&1 || true
   echo "No enabled subscription groups. Cron disabled."
   exit 0
 fi
@@ -88,13 +150,13 @@ add_hourly_observer
 add_catchup_jobs
 config_foreach add_schedule subscription_schedule
 
-/etc/init.d/cron enable >/dev/null 2>&1
-/etc/init.d/cron restart >/dev/null 2>&1
+/etc/init.d/cron enable >/dev/null 2>&1 || true
+/etc/init.d/cron restart >/dev/null 2>&1 || true
 
 if [ "$SCHEDULES_COUNT" -eq 0 ]; then
-  echo "No enabled subscription schedules. Only hourly health observer was enabled:"
-  grep "$HEALTH_TAG\|$CATCHUP_TAG" "$CRON_FILE"
+  echo "No enabled subscription schedules. Only hourly health observer and catch-up jobs were enabled:"
+  grep "$HEALTH_TAG\|$CATCHUP_TAG" "$CRON_FILE" || true
 else
   echo "Cron updated:"
-  grep "$HEALTH_TAG\|$UPDATER_TAG\|$CATCHUP_TAG" "$CRON_FILE"
+  grep "$HEALTH_TAG\|$UPDATER_TAG\|$CATCHUP_TAG" "$CRON_FILE" || true
 fi

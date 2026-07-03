@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.6.2
+
+- Fixed LuCI schedule changes not reaching `/etc/crontabs/root`: the JS form now runs `podkop-sub-cron-sync` through the real `Map.save()` path.
+- Added `/etc/init.d/podkop_subscriptions` with a procd `config.change` trigger, so every `uci commit podkop_subscriptions` synchronizes cron regardless of whether the change came from LuCI, SSH, or another script.
+- Made `podkop-sub-cron-sync` concurrency-safe and idempotent for duplicate LuCI/procd invocations.
+- Cron synchronization now uses an atomic kernel `fcntl.flock`, eliminating the previous `mkdir` → PID-file race and stale lock directories.
+- Added one common `fcntl.flock` inside `podkop-sub-updater.py` for scheduled updates, observer, catch-up, retry, and manual runs.
+- `--observe-only` now quietly skips when another updater is active; normal and catch-up runs wait up to 300 seconds and return code 75 if the lock remains busy.
+- Installer now installs, enables, backs up, and starts the procd trigger; uninstaller stops, disables, and removes it.
+- Upgrade behavior still preserves `/etc/config/podkop_subscriptions`, local links, `state.json`, cron, and backups.
+
 ## 3.6.1
 
 - Status summary now shows whether auto-update is actually applied in cron.

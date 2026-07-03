@@ -59,6 +59,7 @@ Clean temporary install files:
 /etc/config/podkop-local-links      protected local links, one link per line
 /etc/podkop-subscriptions/state.json service state and fail_count
 /tmp/podkop-sub-updater.log          last manual run log
+/etc/init.d/podkop_subscriptions      procd trigger for automatic cron synchronization
 ```
 
 ## Minimal configuration
@@ -190,6 +191,22 @@ X-Device-Model: OnePlus MT2110
 X-App-Version: 5.23.74
 ```
 
+
+## Automatic cron synchronization
+
+Since version 3.6.2 cron is synchronized through two independent paths:
+
+- the LuCI form immediately runs `/usr/bin/podkop-sub-cron-sync` after a successful Save / Save & Apply;
+- `/etc/init.d/podkop_subscriptions` registers a procd `config.change` trigger, so any `uci commit podkop_subscriptions` from LuCI, SSH, or another script rebuilds the managed cron entries.
+
+`podkop-sub-cron-sync` is idempotent and uses an atomic kernel `fcntl.flock`; there is no separate lock-creation/PID-write window. Manual execution is only needed for diagnostics or forced recovery.
+
+## Concurrent updater protection
+
+Every execution path uses the same `/tmp/podkop-sub-updater.flock`: scheduled updates, `--observe-only`, catch-up, retry, and manual runs. The observer quietly skips while another update is active; normal and catch-up runs wait up to 300 seconds and return code `75` with a warning if the lock remains busy.
+
+The older `/tmp/podkop-sub-updater.lock` directory in `podkop-sub-run-now` remains only for LuCI manual-run status. The Python updater flock provides the actual race protection.
+
 ## Useful commands
 
 ```sh
@@ -228,4 +245,4 @@ auto-update: not applied
 auto-update: not configured
 ```
 
-This matters because `/etc/config/podkop_subscriptions` is only the saved setting. The real scheduled execution is defined by `/etc/crontabs/root`. If a schedule exists in settings but not in cron, the UI reports that auto-update is not applied.
+This matters because `/etc/config/podkop_subscriptions` is the saved setting, while `/etc/crontabs/root` is what actually runs. If a schedule exists in settings but not in cron, the UI reports that auto-update is not applied. Version 3.6.2 automatically repairs synchronization after LuCI saves and after any `uci commit podkop_subscriptions`.

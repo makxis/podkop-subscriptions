@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.6.1"
+APP_VERSION="3.6.2"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
@@ -32,7 +32,7 @@ for arg in "$@"; do
     --branch=*) BRANCH="${arg#--branch=}"; RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}" ;;
     --raw-base=*) RAW_BASE="${arg#--raw-base=}" ;;
     -h|--help)
-      echo "Usage: sh install.sh [--with-panel|--no-panel] [--configure|--no-config] [--local|--remote] [--repo=owner/repo] [--branch=main]"
+      echo "Usage: sh install.sh [--with-panel|--with-panel-hidden|--no-panel] [--configure|--no-config] [--local|--remote] [--repo=owner/repo] [--branch=main]"
       exit 0
       ;;
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
@@ -173,6 +173,7 @@ create_upgrade_backup() {
     /etc/config/podkop-local-links \
     /etc/podkop-subscriptions \
     /etc/crontabs/root \
+    /etc/init.d/podkop_subscriptions \
     /usr/bin/podkop-sub-updater.py \
     /usr/bin/podkop-sub-cron-sync \
     /usr/bin/podkop-sub-run-now \
@@ -304,7 +305,7 @@ write_default_config() {
   cat > "$SUB_CFG" <<'CFG'
 # Podkop Subscriptions config
 # Основной файл настройки дополнения.
-# После изменения выполните: /usr/bin/podkop-sub-cron-sync
+# Cron синхронизируется автоматически после uci commit; ручная команда нужна только для диагностики.
 
 config subscription_group 'main'
     option enabled '0'
@@ -460,10 +461,12 @@ install_core() {
   backup_file /usr/bin/podkop-sub-updater.py
   backup_file /usr/bin/podkop-sub-cron-sync
   backup_file /usr/bin/podkop-sub-run-now
+  backup_file /etc/init.d/podkop_subscriptions
   install_file "podkop-sub-updater.py" /usr/bin/podkop-sub-updater.py
   install_file "podkop-sub-cron-sync" /usr/bin/podkop-sub-cron-sync
   install_file "podkop-sub-run-now" /usr/bin/podkop-sub-run-now
   install_file "podkop-sub-clean-temp" /usr/bin/podkop-sub-clean-temp
+  install_file "etc/init.d/podkop_subscriptions" /etc/init.d/podkop_subscriptions
   mkdir -p /usr/share/podkop-subscriptions
   if [ -f "$SCRIPT_DIR/VERSION" ]; then
     install_file "VERSION" /usr/share/podkop-subscriptions/VERSION
@@ -471,10 +474,13 @@ install_core() {
     printf '%s\n' "$APP_VERSION" > /usr/share/podkop-subscriptions/VERSION
   fi
   chmod 0755 /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now /usr/bin/podkop-sub-clean-temp
+  chmod 0755 /etc/init.d/podkop_subscriptions
   touch "$LOCAL_LINKS"
   chmod 0600 "$LOCAL_LINKS" || true
   prepare_upgrade_from_legacy
   write_default_config
+  /etc/init.d/podkop_subscriptions enable >/dev/null 2>&1 || true
+  /etc/init.d/podkop_subscriptions restart >/dev/null 2>&1 || /etc/init.d/podkop_subscriptions start >/dev/null 2>&1 || true
   say "Core installed. Version: $APP_VERSION"
 }
 

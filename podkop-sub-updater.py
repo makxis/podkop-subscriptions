@@ -10,9 +10,10 @@ import hashlib
 import platform
 import json
 import time
+import fcntl
 
 
-APP_VERSION = "3.6.1"
+APP_VERSION = "3.6.2"
 # Headers used only for subscription HTTP requests.
 # Do not expose the real OpenWrt model/kernel to subscription providers.
 SUBSCRIPTION_USER_AGENT = 'v2raytun/android'
@@ -42,8 +43,83 @@ CATCHUP_AFTER_HOURS_DEFAULT = 24
 VALID_TIME_MIN_TS = 1700000000
 SINGBOX_CHECK_TIMEOUT_DEFAULT = 15
 SINGBOX_CHECK_MAX_RUNS_DEFAULT = 40
+UPDATER_FLOCK_PATH = '/tmp/podkop-sub-updater.flock'
+UPDATER_LOCK_WAIT_SECONDS = 300
+UPDATER_LOCK_BUSY_EXIT_CODE = 75
+UPDATER_INHERITED_LOCK_ENV = 'PODKOP_SUB_LOCK_FD'
 
 
+
+
+def updater_mode_name(args):
+    if args.observe_only:
+        return 'observe-only'
+    if args.catch_up_retry:
+        return 'catch-up-retry'
+    if args.catch_up:
+        return 'catch-up'
+    return 'update'
+
+
+def acquire_updater_lock(args):
+    """Acquire one common flock for every updater execution path.
+
+    Catch-up launches the real update as a child process. In that case the
+    already locked file descriptor is explicitly inherited by the child, so
+    parent and child remain inside the same critical section.
+    """
+    inherited = os.environ.pop(UPDATER_INHERITED_LOCK_ENV, '')
+    if inherited:
+        try:
+            fd = int(inherited)
+            os.fstat(fd)
+            return {'fd': fd, 'owned': False, 'inherited': True}
+        except Exception:
+            pass
+
+    fd = os.open(UPDATER_FLOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+    wait_seconds = 0 if args.observe_only else UPDATER_LOCK_WAIT_SECONDS
+    deadline = time.monotonic() + wait_seconds
+
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if args.observe_only:
+                os.close(fd)
+                return None
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(1)
+
+    try:
+        info = f'pid={os.getpid()} mode={updater_mode_name(args)} started={int(time.time())}\n'
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, info.encode('utf-8', 'replace'))
+        os.fsync(fd)
+    except Exception:
+        pass
+
+    return {'fd': fd, 'owned': True, 'inherited': False}
+
+
+def release_updater_lock(lock_info):
+    if not lock_info:
+        return
+    fd = lock_info.get('fd')
+    if fd is None:
+        return
+    try:
+        # An inherited fd shares the parent's open file description. Do not
+        # explicitly unlock it from the child; closing the child copy is safe.
+        if lock_info.get('owned'):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    except Exception:
+        pass
 
 def setup_syslog():
     syslog.openlog("podkop-updater", syslog.LOG_PID, syslog.LOG_USER)
@@ -1875,16 +1951,22 @@ def set_catchup_retry(state, active, reason=''):
         meta['catchup_retry_last_error'] = ''
 
 
-def run_subprocess_update(args):
+def run_subprocess_update(args, lock_fd=None):
     cmd = [
         sys.executable or 'python3', os.path.abspath(__file__),
         '--subs', args.subs, '--config', args.config, '--state', args.state,
         '--delete-after-fails', str(args.delete_after_fails), '--min-keep', str(args.min_keep), '--force'
     ]
-    return subprocess.run(cmd).returncode
+    kwargs = {}
+    if lock_fd is not None:
+        env = os.environ.copy()
+        env[UPDATER_INHERITED_LOCK_ENV] = str(lock_fd)
+        kwargs['env'] = env
+        kwargs['pass_fds'] = (lock_fd,)
+    return subprocess.run(cmd, **kwargs).returncode
 
 
-def catch_up(args, retry_only=False):
+def catch_up(args, retry_only=False, lock_fd=None):
     state = load_state(args.state)
     meta = state.setdefault('meta', {})
     if not is_router_time_valid(state):
@@ -1905,7 +1987,7 @@ def catch_up(args, retry_only=False):
         log('INFO', 'catch-up retry: предыдущий catch-up завершился ошибкой, пробую обновить ещё раз')
     else:
         log('INFO', 'catch-up: последнее успешное обновление устарело или отсутствует, запускаю обновление подписок')
-    rc = run_subprocess_update(args)
+    rc = run_subprocess_update(args, lock_fd=lock_fd)
     state = load_state(args.state)
     if rc == 0 and subscription_run_success(state):
         set_catchup_retry(state, False)
@@ -2709,140 +2791,156 @@ def validate_file_argument(path, arg_name):
 def main():
     setup_syslog()
     args = parse_args()
+
+    # Read-only informational commands must never be blocked by an update.
     if args.version:
         print(f"podkop-subscriptions {APP_VERSION}")
-        return
+        return 0
     if args.status_summary:
         print_status_summary(args.state)
-        return
+        return 0
     if args.fail_count:
         print_fail_count_summary(args.state)
-        return
-    if args.catch_up:
-        catch_up(args, retry_only=False)
-        return
-    if args.catch_up_retry:
-        catch_up(args, retry_only=True)
-        return
-    if args.observe_only:
-        validate_file_argument(args.config, '--config')
-        observe_only(args.config, args.state)
-        return
-    validate_file_argument(args.config, '--config')
-    validate_file_argument(args.subs, '--subs')
-    log("INFO", "=== ЗАПУСК ОБНОВЛЕНИЯ ПОДПИСОК ===")
-    device_model = SUBSCRIPTION_DEVICE_MODEL
-    kernel_ver = SUBSCRIPTION_VER_OS
-    hwid = SUBSCRIPTION_HWID
-    log("INFO", f"Профиль запроса подписок: {SUBSCRIPTION_USER_AGENT}, {SUBSCRIPTION_DEVICE_OS}, {SUBSCRIPTION_VER_OS}, {SUBSCRIPTION_DEVICE_MODEL}; используется фиксированный X-HWID, реальная модель роутера не отправляется")
-    log("INFO", "X-HWID фиксированный для совместимости с основным профилем подписки")
-    jobs = load_jobs(args.subs)
-    if not jobs:
-        state = load_state(args.state)
-        update_subscription_meta(state, {}, 0, 0, 0, 0, 0, status='no_jobs', message='Нет включённых групп подписок.')
-        save_state(args.state, state)
-        log("INFO", "Нет настроенных подписок. Выход без изменений.")
-        return
-    current_sections = load_current_podkop_sections(args.config)
-    state = load_state(args.state)
+        return 0
 
-    saved_recently_removed = state.get('recently_removed', {})
-    if not isinstance(saved_recently_removed, dict):
-        saved_recently_removed = {}
-    recent_skip_ids = set(saved_recently_removed.keys())
+    lock_info = acquire_updater_lock(args)
+    if lock_info is None:
+        if args.observe_only:
+            # An hourly observer is optional; quietly skip it while another
+            # update owns the common lock.
+            return 0
+        log("WARN", f"Запуск пропущен: другой updater не освободил общий lock за {UPDATER_LOCK_WAIT_SECONDS} секунд ({UPDATER_FLOCK_PATH}).")
+        return UPDATER_LOCK_BUSY_EXIT_CODE
 
-    # recently_removed работает как одноразовый список:
-    # ключи, удалённые в прошлом запуске, пропускаются один раз при добавлении,
-    # затем старый список очищается. Новые удаления текущего запуска попадут сюда
-    # и будут использованы только на следующем запуске.
-    state['recently_removed'] = {}
-    if recent_skip_ids:
-        log("INFO", f"Одноразовый список недавно удалённых ключей загружен: {len(recent_skip_ids)}")
-
-    imported, updated = import_current_links_to_state(state, current_sections)
-    if imported or updated:
-        log("INFO", f"State синхронизирован с текущим Podkop config: новых={imported}, обновлено={updated}")
-    fetch_links(jobs, hwid, device_model, kernel_ver)
-    validate_jobs_links_for_podkop(jobs)
-    protected_local_ids = load_local_protected_ids()
-
-    need_proxies = any(
-        parse_positive_int(job.get('max_links', 0), 0)
-        or parse_positive_int(job.get('max_latency_ms', 0), 0)
-        or bool(job.get('force_cleanup'))
-        for job in jobs.values()
-    )
-    proxies = None
-    if need_proxies:
-        try:
-            proxies = load_podkop_proxies()
-            log("INFO", "Текущее состояние Podkop URLTest получено для отсеивателя.")
-        except Exception as e:
-            log("WARN", f"Не удалось получить текущее состояние Podkop URLTest для отсеивателя: {e}. Будет использован только state.json.")
-
-    updates = {}
-    summary_changed = False
-    processed_sections = 0
-    total_added = 0
-    total_removed = 0
-    total_final_links = 0
-    for sec, job in jobs.items():
-        final_links, info = build_final_links_for_section(sec, job, current_sections, state, args.delete_after_fails, args.min_keep, protected_local_ids, proxies, recent_skip_ids)
-        if info.get('skip'):
-            log("INFO", f"[{sec}]: пропуск изменения секции ({info.get('reason')})")
-            continue
-        processed_sections += 1
-        log("INFO", build_section_result_log_ru(sec, info, len(final_links)))
-        total_added += int(info.get('added', 0) or 0)
-        total_removed += int(info.get('removed', 0) or 0)
-        total_final_links += len(final_links)
-        if info.get('changed'):
-            updates[sec] = {'ptype': job.get('ptype', 'urltest'), 'links': final_links}
-            summary_changed = True
-    if processed_sections == 0 and recent_skip_ids:
-        # Подписки не дали валидных ключей / все секции пропущены.
-        # Одноразовый список не считаем использованным и возвращаем как был.
-        state['recently_removed'] = saved_recently_removed
-    elif recent_skip_ids:
-        log("INFO", f"Одноразовый список недавно удалённых ключей использован и очищен: {len(recent_skip_ids)}; новых записей для следующего запуска: {len(state.get('recently_removed', {}))}")
-
-    update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids))
-    meta_status = (state.get('meta') or {}).get('last_subscription_status', '')
-    meta_msg = (state.get('meta') or {}).get('last_subscription_message', '')
-    if meta_status not in ('ok', 'partial_ok') and processed_sections == 0:
-        log("ERROR", f"Не удалось получить валидные ключи из внешних подписок ни для одной секции: {meta_msg or meta_status}")
-    save_state(args.state, state)
-    if not updates:
-        if args.force:
-            log("INFO", "Изменений нет. Конфиг Podkop не изменялся, перезапуск не выполняется.")
-        else:
-            log("INFO", "Изменений не обнаружено. Конфиг и Podkop не трогаются.")
-        return
-    old_content, new_content = update_uci_config_with_final_links(args.config, updates)
-    is_content_changed = normalize_config(old_content) != normalize_config(new_content)
-    if not args.force and not is_content_changed:
-        log("INFO", "После сборки изменений в конфиге не обнаружено. Перезапуск не требуется.")
-        return
     try:
-        backup_path = f"{args.config}.podkop-subscriptions.bak"
-        try:
-            with open(backup_path, 'w', encoding='utf-8') as f:
-                f.write(old_content)
-        except Exception as e:
-            log("WARN", f"Не удалось создать backup {backup_path}: {e}")
-        tmp_path = f"{args.config}.tmp.{os.getpid()}"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-        os.replace(tmp_path, args.config)
-        apply_updates_with_uci(args.config, updates)
-        os.system("/etc/init.d/podkop restart")
-        log("INFO", "Успешно завершено: конфиг обновлён, Podkop перезапущен.")
-    except Exception as e:
+        if args.catch_up:
+            catch_up(args, retry_only=False, lock_fd=lock_info.get('fd'))
+            return 0
+        if args.catch_up_retry:
+            catch_up(args, retry_only=True, lock_fd=lock_info.get('fd'))
+            return 0
+        if args.observe_only:
+            validate_file_argument(args.config, '--config')
+            observe_only(args.config, args.state)
+            return 0
+        validate_file_argument(args.config, '--config')
+        validate_file_argument(args.subs, '--subs')
+        log("INFO", "=== ЗАПУСК ОБНОВЛЕНИЯ ПОДПИСОК ===")
+        device_model = SUBSCRIPTION_DEVICE_MODEL
+        kernel_ver = SUBSCRIPTION_VER_OS
+        hwid = SUBSCRIPTION_HWID
+        log("INFO", f"Профиль запроса подписок: {SUBSCRIPTION_USER_AGENT}, {SUBSCRIPTION_DEVICE_OS}, {SUBSCRIPTION_VER_OS}, {SUBSCRIPTION_DEVICE_MODEL}; используется фиксированный X-HWID, реальная модель роутера не отправляется")
+        log("INFO", "X-HWID фиксированный для совместимости с основным профилем подписки")
+        jobs = load_jobs(args.subs)
+        if not jobs:
+            state = load_state(args.state)
+            update_subscription_meta(state, {}, 0, 0, 0, 0, 0, status='no_jobs', message='Нет включённых групп подписок.')
+            save_state(args.state, state)
+            log("INFO", "Нет настроенных подписок. Выход без изменений.")
+            return
+        current_sections = load_current_podkop_sections(args.config)
         state = load_state(args.state)
-        update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids), status='config_write_error', message=f'Ошибка при сохранении конфига: {e}')
+
+        saved_recently_removed = state.get('recently_removed', {})
+        if not isinstance(saved_recently_removed, dict):
+            saved_recently_removed = {}
+        recent_skip_ids = set(saved_recently_removed.keys())
+
+        # recently_removed работает как одноразовый список:
+        # ключи, удалённые в прошлом запуске, пропускаются один раз при добавлении,
+        # затем старый список очищается. Новые удаления текущего запуска попадут сюда
+        # и будут использованы только на следующем запуске.
+        state['recently_removed'] = {}
+        if recent_skip_ids:
+            log("INFO", f"Одноразовый список недавно удалённых ключей загружен: {len(recent_skip_ids)}")
+
+        imported, updated = import_current_links_to_state(state, current_sections)
+        if imported or updated:
+            log("INFO", f"State синхронизирован с текущим Podkop config: новых={imported}, обновлено={updated}")
+        fetch_links(jobs, hwid, device_model, kernel_ver)
+        validate_jobs_links_for_podkop(jobs)
+        protected_local_ids = load_local_protected_ids()
+
+        need_proxies = any(
+            parse_positive_int(job.get('max_links', 0), 0)
+            or parse_positive_int(job.get('max_latency_ms', 0), 0)
+            or bool(job.get('force_cleanup'))
+            for job in jobs.values()
+        )
+        proxies = None
+        if need_proxies:
+            try:
+                proxies = load_podkop_proxies()
+                log("INFO", "Текущее состояние Podkop URLTest получено для отсеивателя.")
+            except Exception as e:
+                log("WARN", f"Не удалось получить текущее состояние Podkop URLTest для отсеивателя: {e}. Будет использован только state.json.")
+
+        updates = {}
+        summary_changed = False
+        processed_sections = 0
+        total_added = 0
+        total_removed = 0
+        total_final_links = 0
+        for sec, job in jobs.items():
+            final_links, info = build_final_links_for_section(sec, job, current_sections, state, args.delete_after_fails, args.min_keep, protected_local_ids, proxies, recent_skip_ids)
+            if info.get('skip'):
+                log("INFO", f"[{sec}]: пропуск изменения секции ({info.get('reason')})")
+                continue
+            processed_sections += 1
+            log("INFO", build_section_result_log_ru(sec, info, len(final_links)))
+            total_added += int(info.get('added', 0) or 0)
+            total_removed += int(info.get('removed', 0) or 0)
+            total_final_links += len(final_links)
+            if info.get('changed'):
+                updates[sec] = {'ptype': job.get('ptype', 'urltest'), 'links': final_links}
+                summary_changed = True
+        if processed_sections == 0 and recent_skip_ids:
+            # Подписки не дали валидных ключей / все секции пропущены.
+            # Одноразовый список не считаем использованным и возвращаем как был.
+            state['recently_removed'] = saved_recently_removed
+        elif recent_skip_ids:
+            log("INFO", f"Одноразовый список недавно удалённых ключей использован и очищен: {len(recent_skip_ids)}; новых записей для следующего запуска: {len(state.get('recently_removed', {}))}")
+
+        update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids))
+        meta_status = (state.get('meta') or {}).get('last_subscription_status', '')
+        meta_msg = (state.get('meta') or {}).get('last_subscription_message', '')
+        if meta_status not in ('ok', 'partial_ok') and processed_sections == 0:
+            log("ERROR", f"Не удалось получить валидные ключи из внешних подписок ни для одной секции: {meta_msg or meta_status}")
         save_state(args.state, state)
-        log("ERROR", f"Ошибка при сохранении конфига: {e}")
+        if not updates:
+            if args.force:
+                log("INFO", "Изменений нет. Конфиг Podkop не изменялся, перезапуск не выполняется.")
+            else:
+                log("INFO", "Изменений не обнаружено. Конфиг и Podkop не трогаются.")
+            return
+        old_content, new_content = update_uci_config_with_final_links(args.config, updates)
+        is_content_changed = normalize_config(old_content) != normalize_config(new_content)
+        if not args.force and not is_content_changed:
+            log("INFO", "После сборки изменений в конфиге не обнаружено. Перезапуск не требуется.")
+            return
+        try:
+            backup_path = f"{args.config}.podkop-subscriptions.bak"
+            try:
+                with open(backup_path, 'w', encoding='utf-8') as f:
+                    f.write(old_content)
+            except Exception as e:
+                log("WARN", f"Не удалось создать backup {backup_path}: {e}")
+            tmp_path = f"{args.config}.tmp.{os.getpid()}"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            os.replace(tmp_path, args.config)
+            apply_updates_with_uci(args.config, updates)
+            os.system("/etc/init.d/podkop restart")
+            log("INFO", "Успешно завершено: конфиг обновлён, Podkop перезапущен.")
+        except Exception as e:
+            state = load_state(args.state)
+            update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids), status='config_write_error', message=f'Ошибка при сохранении конфига: {e}')
+            save_state(args.state, state)
+            log("ERROR", f"Ошибка при сохранении конфига: {e}")
+        return 0
+    finally:
+        release_updater_lock(lock_info)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
