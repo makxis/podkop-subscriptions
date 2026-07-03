@@ -5,7 +5,7 @@
 "require baseclass";
 
 const LOCAL_LINKS = "/etc/config/podkop-local-links";
-const PODKOP_SUBSCRIPTIONS_VERSION = "3.6.1";
+const PODKOP_SUBSCRIPTIONS_VERSION = "3.6.2";
 const STATUS_STYLE_PLAIN_CARD_V36 = true;
 
 function hideDuplicatedSubscriptionsTitle() {

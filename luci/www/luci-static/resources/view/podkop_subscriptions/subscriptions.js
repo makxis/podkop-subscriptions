@@ -50,8 +50,16 @@ return view.extend({
       _("Настройки обновления proxy-ссылок из подписок для Podkop.")
     );
 
-    m.on_after_commit = function() {
-      return fs.exec("/usr/bin/podkop-sub-cron-sync", []).catch(function() {});
+    // form.js does not call the legacy Lua-CBI on_after_commit hook.
+    // Wrap the real Map.save() method so Save / Save & Apply immediately
+    // synchronizes the saved subscription schedules with root crontab.
+    const originalSave = m.save.bind(m);
+    m.save = function(cb, silent) {
+      return originalSave(cb, silent).then(function(rv) {
+        return fs.exec("/usr/bin/podkop-sub-cron-sync", []).catch(function() {}).then(function() {
+          return rv;
+        });
+      });
     };
 
     const section = m.section(
