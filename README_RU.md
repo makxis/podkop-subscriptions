@@ -10,6 +10,48 @@ Podkop Subscriptions — дополнение для Podkop на OpenWrt. Оно
 Services → Подписки Podkop
 ```
 
+## Самые важные команды
+
+Эти команды вынесены наверх, чтобы для обычной установки, обновления и проверки не приходилось искать их по всему README.
+
+### 1. Обычная установка с вопросами
+
+Установщик спросит, нужно ли сразу настроить подписки и устанавливать ли веб-панель LuCI:
+
+```sh
+wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
+```
+
+### 2. Установка без вопросов с веб-панелью
+
+Устанавливает ядро и видимую панель LuCI, ничего не спрашивает. Если конфига ещё нет, создаётся отключённый пример, который затем можно настроить через LuCI:
+
+```sh
+wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --remote --with-panel --no-config && /usr/bin/podkop-sub-clean-temp
+```
+
+### 3. Обновление без вопросов
+
+Загружает актуальные файлы из GitHub и обновляет установленную версию. Существующий `/etc/config/podkop_subscriptions`, локальные ключи и `state.json` не пересоздаются:
+
+```sh
+wget -O /tmp/podkop-sub-upgrade.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-upgrade.sh --remote --with-panel --no-config && /usr/bin/podkop-sub-clean-temp
+```
+
+### Запустить обновление ключей вручную
+
+```sh
+/usr/bin/podkop-sub-run-now
+```
+
+### Посмотреть накопленные fail_count
+
+Показывает текущее историческое состояние проблемных ключей без вывода самих proxy-ссылок:
+
+```sh
+/usr/bin/podkop-sub-updater.py --fail-count
+```
+
 ## Проверено на
 
 ```text
