@@ -10,6 +10,48 @@ Since v3.3, the LuCI UI is a standalone page:
 Services → Podkop Subscriptions
 ```
 
+## Essential commands
+
+These commands are kept near the top so installation, updating, and basic diagnostics do not require searching through the full README.
+
+### 1. Interactive installation
+
+The installer asks whether to configure subscriptions immediately and whether to install the LuCI panel:
+
+```sh
+wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
+```
+
+### 2. Unattended installation with LuCI panel
+
+Installs the core and visible LuCI panel without asking questions. If no config exists, a disabled example config is created and can then be edited in LuCI:
+
+```sh
+wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --remote --with-panel --no-config && /usr/bin/podkop-sub-clean-temp
+```
+
+### 3. Unattended update
+
+Downloads the current project files from GitHub and updates the installed version. The existing `/etc/config/podkop_subscriptions`, local links, and `state.json` are preserved:
+
+```sh
+wget -O /tmp/podkop-sub-upgrade.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-upgrade.sh --remote --with-panel --no-config && /usr/bin/podkop-sub-clean-temp
+```
+
+### Run a subscription update now
+
+```sh
+/usr/bin/podkop-sub-run-now
+```
+
+### Show accumulated fail_count statistics
+
+Shows the current historical failure counters without printing proxy links:
+
+```sh
+/usr/bin/podkop-sub-updater.py --fail-count
+```
+
 ## Tested with
 
 ```text
