@@ -575,6 +575,8 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 
 Re-running is safe: configs are backed up to `/root` first.
 
+Works with both opkg (OpenWrt 24.10 and older) and apk (25.12 and newer); the package manager is detected automatically. The branch and architecture come from `/etc/openwrt_release` — if detection fails, set them by hand with `--release` and `--arch`.
+
 ---
 
 ## Troubleshooting
