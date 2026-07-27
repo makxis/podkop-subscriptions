@@ -20,6 +20,9 @@
         ],
         "/etc/podkop-subscriptions/local-links": [
           "read"
+        ],
+        "/usr/share/podkop-subscriptions/VERSION": [
+          "read"
         ]
       },
       "uci": [

@@ -36,12 +36,17 @@ function parsePodkopSections(text) {
 
 return view.extend({
   load: function() {
-    return fs.read("/etc/config/podkop").catch(function() {
-      return "";
-    });
+    // Версия читается здесь, а не в cfgvalue: form.js вызывает cfgvalue
+    // синхронно, и промис отрисовался бы как [object Promise].
+    return Promise.all([
+      fs.read("/etc/config/podkop").catch(function() { return ""; }),
+      fs.read("/usr/share/podkop-subscriptions/VERSION").catch(function() { return ""; })
+    ]);
   },
 
-  render: function(podkopText) {
+  render: function(data) {
+    const podkopText = data[0];
+    const version = String(data[1] || "").trim().split("\n")[0];
     const podkopSections = parsePodkopSections(podkopText);
 
     const m = new form.Map(
@@ -68,7 +73,7 @@ return view.extend({
       ""
     );
 
-    subscriptions.createSubscriptionsContent(section, podkopSections);
+    subscriptions.createSubscriptionsContent(section, podkopSections, version);
 
     return m.render();
   }

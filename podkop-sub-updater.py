@@ -13,7 +13,24 @@ import time
 import fcntl
 
 
-APP_VERSION = "3.6.2"
+VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
+# Fallback only. The installed VERSION file is the source of truth, so this
+# constant cannot drift out of sync with releases the way it used to.
+APP_VERSION_FALLBACK = "3.6.5"
+
+
+def app_version():
+    try:
+        with open(VERSION_FILE, 'r', encoding='utf-8') as f:
+            v = f.readline().strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    return APP_VERSION_FALLBACK
+
+
+APP_VERSION = app_version()
 # Headers used only for subscription HTTP requests.
 # Do not expose the real OpenWrt model/kernel to subscription providers.
 SUBSCRIPTION_USER_AGENT = 'v2raytun/android'
