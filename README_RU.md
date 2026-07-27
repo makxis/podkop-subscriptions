@@ -584,6 +584,7 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 ### Как выглядит путь запроса
 
 ```mermaid
+%%{init: {"flowchart": {"diagramPadding": 90}}}%%
 flowchart LR
     C["Устройство<br/>в локальной сети"] --> D["dnsmasq<br/>LAN-адрес роутера:53"]
     D --> P["Podkop / sing-box<br/>127.0.0.42:53"]

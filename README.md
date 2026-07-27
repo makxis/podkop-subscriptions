@@ -582,6 +582,7 @@ Works with both opkg (OpenWrt 24.10 and older) and apk (25.12 and newer); the pa
 ### What a query's path looks like
 
 ```mermaid
+%%{init: {"flowchart": {"diagramPadding": 90}}}%%
 flowchart LR
     C["LAN device"] --> D["dnsmasq<br/>router LAN address:53"]
     D --> P["Podkop / sing-box<br/>127.0.0.42:53"]

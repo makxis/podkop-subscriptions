@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.6.5
 
 - Reworked the default DNS servers in `install-dnsproxy.sh` (installer 1.2.0),
   after benchmarking 24 public resolvers from the router itself — a throwaway
@@ -21,6 +21,8 @@
   - `--no-isp-dns` now covers `bootstrap` as well as `fallback`.
 - Documented the whole DNS path and the three server lists in both READMEs,
   with a diagram, so the design is legible before installing rather than after.
+  The diagram sets `diagramPadding` so GitHub's zoom and copy controls, which
+  float over the top-right corner, stop covering the first node.
 
 ## 3.6.4
 
