@@ -73,7 +73,9 @@ With `--no-config` an existing config is never rewritten; if none exists, a disa
 Services → Подписки Podkop
 ```
 
-Set the target Podkop section and the subscription URLs, then press **Save & Apply**. Save & Apply only stores settings — it does not fetch links yet.
+Set the target Podkop section and the subscription URLs, then press **Save & Apply**.
+
+Save & Apply only stores settings — it does not fetch links yet.
 
 > The LuCI page, the status line, and the log messages are currently Russian-only. This README translates them where they are quoted.
 
