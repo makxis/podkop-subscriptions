@@ -73,7 +73,9 @@ wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podk
 Services → Подписки Podkop
 ```
 
-Укажите целевую секцию Podkop и URL подписок, нажмите **Save & Apply**. Save & Apply только сохраняет настройки — ключи ещё не подтягиваются.
+Укажите целевую секцию Podkop и URL подписок, нажмите **Save & Apply**.
+
+Save & Apply только сохраняет настройки — ключи ещё не подтягиваются.
 
 **Через SSH** — правкой конфига:
 
