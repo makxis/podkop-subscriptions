@@ -1,110 +1,245 @@
 # Podkop Subscriptions
 
-Podkop Subscriptions is a small OpenWrt helper for Podkop. It downloads proxy links from subscription URLs, filters them, validates them against Podkop/sing-box, and writes the final list into a selected `/etc/config/podkop` section.
+An OpenWrt add-on for [Podkop](https://github.com/itdoginfo/podkop). It downloads proxy links from HTTP/HTTPS subscriptions, filters them, validates them against Podkop/sing-box, and writes the resulting list into a chosen section of `/etc/config/podkop`.
 
-The main goal is safety: a failed or broken subscription must not overwrite a working Podkop section.
+The guiding principle is **never break a working configuration**. If a subscription fails to load, returns an empty response, or serves broken links, the current Podkop section is left untouched.
 
-Since v3.3, the LuCI UI is a standalone page:
+[Русская версия](README_RU.md) · [Changelog](CHANGELOG.md)
 
-```text
-Services → Podkop Subscriptions
-```
+---
 
-## Essential commands
+## Update links right now
 
-These commands are kept near the top so installation, updating, and basic diagnostics do not require searching through the full README.
-
-### 1. Interactive installation
-
-The installer asks whether to configure subscriptions immediately and whether to install the LuCI panel:
-
-```sh
-wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
-```
-
-### 2. Unattended installation with LuCI panel
-
-Installs the core and visible LuCI panel without asking questions. If no config exists, a disabled example config is created and can then be edited in LuCI:
-
-```sh
-wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --remote --with-panel --no-config && /usr/bin/podkop-sub-clean-temp
-```
-
-### 3. Unattended update
-
-Downloads the current project files from GitHub and updates the installed version. The existing `/etc/config/podkop_subscriptions`, local links, and `state.json` are preserved:
-
-```sh
-wget -O /tmp/podkop-sub-upgrade.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-upgrade.sh --remote --with-panel --no-config && /usr/bin/podkop-sub-clean-temp
-```
-
-### Run a subscription update now
+The command you will use most. It downloads the subscriptions, filters, validates, and writes links into Podkop:
 
 ```sh
 /usr/bin/podkop-sub-run-now
 ```
 
-### Show accumulated fail_count statistics
-
-Shows the current historical failure counters without printing proxy links:
+It runs in the background and returns immediately. To see how it went:
 
 ```sh
-/usr/bin/podkop-sub-updater.py --fail-count
+/usr/bin/podkop-sub-run-now --status
 ```
 
-## Tested with
+Live log:
 
-```text
-OpenWrt: 24.10.3–24.10.6; 25.12.4
-Podkop: v0.7.17–v0.7.19
-LuCI App Podkop: v0.7.17–v0.7.19
-Sing-box: 1.12.17; 1.12.22
+```sh
+tail -f /tmp/podkop-sub-updater.log
 ```
 
-## Installation
+If you need a synchronous run (blocks until finished and returns an exit code), call the updater directly:
 
-Interactive install:
+```sh
+/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
+```
+
+---
+
+## Quick start
+
+The steps are in the order you actually perform them on a fresh router.
+
+### Step 1. Install
+
+Interactive installer — asks about the LuCI panel and about creating a config:
 
 ```sh
 wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh
 ```
 
-Install with LuCI panel:
+Unattended, with the LuCI panel (recommended if unsure):
 
 ```sh
-wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --with-panel
+wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --remote --with-panel --no-config
 ```
 
-Install without LuCI panel:
+With `--no-config` an existing config is never rewritten; if none exists, a disabled example is created that you can then edit in LuCI.
+
+### Step 2. Configure subscriptions
+
+**Via LuCI** (if installed with the panel):
+
+```text
+Services → Подписки Podkop
+```
+
+Set the target Podkop section and the subscription URLs, then press **Save & Apply**. Save & Apply only stores settings — it does not fetch links yet.
+
+> The LuCI page, the status line, and the log messages are currently Russian-only. This README translates them where they are quoted.
+
+**Via SSH** — edit the config:
 
 ```sh
-wget -O /tmp/podkop-sub-install.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-install.sh --no-panel
+vi /etc/config/podkop_subscriptions
+uci commit podkop_subscriptions
 ```
 
-Upgrade over an existing setup without recreating config:
+A minimal working example is in [Configuration](#configuration).
+
+### Step 3. Fetch links for the first time
 
 ```sh
-sh install.sh --local --with-panel --no-config
+/usr/bin/podkop-sub-run-now
 ```
 
-Clean temporary install files:
+In LuCI the same thing is done by the **Запустить updater** button at the bottom of the page. Until the first run, the page shows a first-time-setup hint instead of a status.
+
+### Step 4. Check the result
+
+```sh
+/usr/bin/podkop-sub-updater.py --status-summary
+```
+
+A healthy status line looks like this (output is Russian):
+
+```text
+Состояние: OK — обновлено: 2026-05-31 23:49, источники: 3/3, ключей в секции: 75,
+рабочих: нет данных, удалено: 0, локальных: 2, автообновление: включено.
+```
+
+Confirm the links really landed in Podkop:
+
+```sh
+grep -c "proxy_string" /etc/config/podkop
+```
+
+### Step 5. Clean up installation leftovers
 
 ```sh
 /usr/bin/podkop-sub-clean-temp
 ```
 
-## Main files
+Removes downloaded archives, unpacked directories, and the LuCI cache. Configs, local links, `state.json`, backups, and the last run log are kept.
 
-```text
-/etc/config/podkop_subscriptions    main settings
-/etc/config/podkop                  native Podkop config updated by the updater
-/etc/config/podkop-local-links      protected local links, one link per line
-/etc/podkop-subscriptions/state.json service state and fail_count
-/tmp/podkop-sub-updater.log          last manual run log
-/etc/init.d/podkop_subscriptions      procd trigger for automatic cron synchronization
+### Step 6 (later). Update the software itself
+
+```sh
+wget -O /tmp/podkop-sub-upgrade.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-upgrade.sh --remote --with-panel --no-config && /usr/bin/podkop-sub-clean-temp
 ```
 
-## Minimal configuration
+`/etc/config/podkop_subscriptions`, local links, and `state.json` are preserved.
+
+---
+
+## Tested with
+
+```text
+OpenWrt:         24.10.3–24.10.6; 25.12.4
+Podkop:          v0.7.17–v0.7.19
+LuCI App Podkop: v0.7.17–v0.7.19
+sing-box:        1.12.17; 1.12.22
+```
+
+## Features
+
+- downloads plain-text and base64 subscriptions;
+- supports `vless://`, `trojan://`, `ss://`, `socks4://`, `socks4a://`, `socks5://`, `hy2://`, `hysteria2://`;
+- validates links with a Python checker and `sing-box check` **before** writing to Podkop;
+- never overwrites a working section when no valid links remain;
+- filters links with a regular expression;
+- collapses SNI rotations and `IP/domain:port` duplicates;
+- tracks `fail_count` for links that stay dead and can prune them;
+- caps the number of links and drops high-latency ones;
+- supports a protected local link list;
+- works over SSH/cron with no LuCI at all;
+- rebuilds cron automatically after any `uci commit podkop_subscriptions`;
+- catches up on missed updates after long router downtime;
+- guards every execution path with a shared file lock.
+
+---
+
+## All commands
+
+### Everyday
+
+| Command | What it does |
+|---|---|
+| `/usr/bin/podkop-sub-run-now` | **Update links now.** Runs the full cycle (download → filter → validate → write to Podkop) in the background, logging to `/tmp/podkop-sub-updater.log`. Silently skips if the updater is already running. |
+| `/usr/bin/podkop-sub-run-now --status` | Manual-run state: `running` / `finished` / `idle`, plus the tail of the log. |
+| `/usr/bin/podkop-sub-run-now --version` | Installed version. |
+| `/usr/bin/podkop-sub-updater.py --status-summary` | One-line status for LuCI: update time, sources, link count, auto-update state. |
+| `/usr/bin/podkop-sub-updater.py --fail-count` | Accumulated `fail_count` per link. Proxy links themselves are not printed, so the output is safe to share. |
+
+### Install and upgrade
+
+| Command | What it does |
+|---|---|
+| `sh install.sh` | Interactive install: asks about the LuCI panel and the config. |
+| `sh install.sh --with-panel` | Install with a visible LuCI page. |
+| `sh install.sh --with-panel-hidden` | Install the panel files but do not add a menu entry. |
+| `sh install.sh --no-panel` (`--core-only`) | Core only, no LuCI. Managed over SSH/cron. |
+| `sh install.sh --configure` | Create/recreate `/etc/config/podkop_subscriptions` without prompting. |
+| `sh install.sh --no-config` | Leave an existing config alone. Required when upgrading in place. |
+| `sh install.sh --remote` | Pull files from GitHub (for a standalone `install.sh` in `/tmp`). |
+| `sh install.sh --local` | Use files next to the script (for a repository clone). |
+| `sh install.sh --repo=owner/repo` | Install from a fork. |
+| `sh install.sh --branch=main` | Install from another branch. |
+| `sh install.sh --raw-base=URL` | Custom base URL instead of raw.githubusercontent.com. |
+| `sh podkop-sub-upgrade` | Upgrade from a local repository clone. Shorthand for `sh install.sh --local --with-panel --no-config`. This script lives in the repository and is **not** copied to `/usr/bin`. |
+| `/usr/bin/podkop-sub-clean-temp` | Delete installation leftovers and the LuCI cache. Settings, links, state, backups, and the log are untouched. |
+
+### Diagnostics and maintenance
+
+| Command | What it does |
+|---|---|
+| `/usr/bin/podkop-sub-updater.py --version` | Updater version. |
+| `/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force` | Synchronous full run that force-rewrites the section and restarts Podkop. The main debugging tool: all output goes to the terminal. |
+| `/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop` | Observation only: refreshes `fail_count` from Podkop URLTest data without touching the config. Runs hourly from cron. |
+| `/usr/bin/podkop-sub-updater.py --catch-up ...` | Update subscriptions if the last successful update is older than 24 hours. Installed in cron as `@reboot`. |
+| `/usr/bin/podkop-sub-updater.py --catch-up-retry ...` | Retry catch-up only if the previous one failed. Installed in cron every 30 minutes. |
+| `/usr/bin/podkop-sub-cron-sync` | Rebuild the managed lines in `/etc/crontabs/root` from the current config and print the result. Normally invoked automatically; run it by hand only for diagnostics or forced recovery. |
+
+Useful updater flags for fine-tuning:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--config PATH` | `/etc/config/podkop` | Path to the Podkop config. |
+| `--subs PATH` | `/etc/config/podkop_subscriptions` | Path to the subscriptions config. |
+| `--state PATH` | `/etc/podkop-subscriptions/state.json` | Path to the state file. |
+| `--force` | off | Rewrite the Podkop section and restart the service even when nothing changed. |
+| `--delete-after-fails N` | `72` | Delete a link after N consecutive failed observations (roughly three days with the hourly observer). |
+| `--min-keep N` | `1` | Minimum number of links that must never be pruned from a section. |
+
+### Uninstall
+
+```sh
+wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
+```
+
+Removes the scripts, the LuCI page, the procd trigger, and the cron lines. Configs and accumulated state stay; `/etc/config/podkop` is restored from the latest `*.bak.*` backup.
+
+Remove settings as well:
+
+```sh
+sh /tmp/podkop-sub-uninstall.sh --purge-config
+```
+
+Additionally deletes `/etc/config/podkop_subscriptions`, `/etc/config/podkop-local-links`, and `/etc/podkop-subscriptions/`.
+
+---
+
+## Files
+
+| Path | Purpose |
+|---|---|
+| `/etc/config/podkop_subscriptions` | Main config: subscription groups, sources, filters, limits, schedule. |
+| `/etc/config/podkop` | Native Podkop config. The updater reads sections from it and writes the final links back. |
+| `/etc/config/podkop-local-links` | Personal links, one per line. Protected from automatic pruning. |
+| `/etc/podkop-subscriptions/state.json` | Service state: `fail_count`, last status, catch-up/retry, recently removed links. |
+| `/tmp/podkop-sub-updater.log` | Log of the last manual run (`podkop-sub-run-now` or the LuCI button). |
+| `/tmp/podkop-sub-updater.status` | Machine-readable manual-run status for LuCI. |
+| `/tmp/podkop-sub-updater.flock` | Shared lock across all updater execution paths. |
+| `/etc/init.d/podkop_subscriptions` | procd trigger that syncs cron after `uci commit podkop_subscriptions`. |
+| `/usr/share/podkop-subscriptions/VERSION` | Installed version. |
+
+---
+
+## Configuration
+
+Everything lives in `/etc/config/podkop_subscriptions`, editable through LuCI or directly. After editing over SSH run `uci commit podkop_subscriptions`; the schedule is synced to cron automatically.
+
+Minimal working config:
 
 ```text
 config subscription_group 'main'
@@ -130,161 +265,318 @@ config subscription_schedule 'main_0310'
     option force '0'
 ```
 
-Manual run:
+### `config subscription_group`
 
-```sh
-/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
-```
+| Option | Default | Purpose |
+|---|---|---|
+| `enabled` | `1` | `0` — the group is ignored entirely. |
+| `target_section` | section name | Which `/etc/config/podkop` section to write links into. Several groups may target one section; their results are merged. |
+| `source` (list) | — | Subscription URL. Multiple lines mean redundancy, not duplication. |
+| `use_local_links` | `0` | `1` — also include links from `/etc/config/podkop-local-links`. |
+| `regex` | empty | Filter applied to the proxy link. Empty disables filtering. |
+| `match_mode` | `ifnotmatch` | `ifmatch` — keep matching links only; `ifnotmatch` — exclude matching links. |
+| `on_empty` | `skip` | What to do when the filter leaves nothing from a source: `skip` — skip that source; `all` — take every link unfiltered. |
+| `proxy_type` | `urltest` | Podkop section type: `urltest` or `selector`. |
+| `max_links` | `0` | Maximum links in a section. `0` or empty — unlimited. |
+| `max_latency_ms` | `0` | Drop links slower than this, based on Podkop URLTest data. `0` or empty — never drop by latency. |
+| `force_cleanup` | `0` | `1` — prune links with `fail_count >= 2` and over-latency links even when `max_links` is not reached. |
+| `dedupe_sni_rotation` | `0` | `1` — treat links differing only by `sni` as one. |
+| `dedupe_endpoint_host` | `0` | `1` — collapse links sharing the same `IP/domain:port`. |
 
+When several groups write into one section, numeric limits take the smallest value set, and the flags (`force_cleanup`, both `dedupe_*`) turn on if enabled in at least one group.
 
+### `config subscription_schedule`
 
+| Option | Purpose |
+|---|---|
+| `enabled` | `0` — the schedule is not installed into cron. |
+| `hour` | Hour of the run (0–23). |
+| `minute` | Minute of the run (0–59). |
+| `jitter` | Random pre-run delay in seconds. `1800` means up to 30 minutes; `0` means no delay. Keeps you from hitting the subscription server at the same second as everyone else. |
+| `force` | `1` — append `--force`: rewrite the section and restart Podkop even without changes. |
 
-### IP/domain:port deduplication
+You can define several schedules — for example, a night and a daytime one.
 
-The “Collapse IP/domain:port duplicates” option compares the server address together with the port. The same IP or domain on different ports is treated as different working variants and is not removed.
+---
 
-For example, these links are treated as different:
+## How links are processed
 
 ```text
-server.example.com:443
-server.example.com:8443
+download subscriptions
+→ extract proxy links (plain text or base64)
+→ apply regex
+→ remove duplicates
+→ normalize missing type=tcp for vless/trojan
+→ Python format checks
+→ sing-box check on a temporary config
+→ SNI / endpoint deduplication
+→ apply limits, latency, and fail_count
+→ write to Podkop
 ```
 
-Only links with the same IP/domain and the same port are collapsed. `transport`, `sni`, `path`, `fp`, the link name, and other parameters are not used for this comparison; the last variant from the subscription is kept.
+This is **not** a ping or speed test — it is protection against malformed links that would break sing-box config generation. If no compatible links remain, the current Podkop section is left unchanged.
+
+The log line:
+
+```text
+[main]: проверка совместимости Podkop/sing-box: принято 75, отброшено 0, sing-box check запусков: 2
+```
+
+(`принято` = accepted, `отброшено` = rejected.) `отброшено 0` means the validator and `sing-box check` dropped nothing — so any missing links were lost to the regex, deduplication, limits, or forced cleanup.
+
+---
 
 ## Regex filtering
 
-Regex is applied to the entire decoded proxy link. Matching is case-insensitive: `YouTube`, `youtube`, and `YOUTUBE` are equivalent.
-
-Modes:
+The filter is applied to the **entire** proxy link after percent-decoding. Matching is case-insensitive: `YouTube`, `youtube`, and `YOUTUBE` are equivalent.
 
 ```text
 match_mode = ifmatch     # keep matching links only
 match_mode = ifnotmatch  # exclude matching links
 ```
 
-Example excluding filter:
+An excluding filter almost always needs this pair:
+
+```text
+match_mode = ifnotmatch
+on_empty = skip
+```
+
+Example: exclude `xhttp` anywhere in the link, but match the other words only in the node name (after `#`):
 
 ```text
 xhttp|#.*(YouTube|youtube|Ютуб|ютуб|YT|без рекламы|Messengers|MultiIP|Белый|список|Россия|Финляндия|🇦🇺|🇫🇮|\bAI\b)
 ```
 
-Meaning:
+How to read it:
 
 ```text
-xhttp      — matched anywhere in the proxy link;
-#.*(...)   — everything inside the brackets is matched only in the node name after #;
-\bAI\b     — AI as a standalone word, not inside Premium+Main;
+xhttp      — matches anywhere in the proxy link;
+#.*(...)   — everything in the brackets is matched only after the hash, i.e. in the node name;
+\bAI\b     — AI as a standalone word, so Premium+Main is not hit;
 YouTube    — must be listed separately: YT does not match YouTube.
 ```
 
-## Validation pipeline
-
-Before writing to Podkop:
+Escape dots in IP addresses:
 
 ```text
-download subscriptions
-→ extract proxy links
-→ apply regex
-→ remove duplicates
-→ normalize missing type=tcp for vless/trojan
-→ run Python format checks
-→ run sing-box check on a temporary config
-→ write to Podkop
+107\.150\.93\.
 ```
 
-If no compatible links remain, the current Podkop section is kept unchanged.
+Verify after changing a filter:
 
-## Duplicate handling
+```sh
+/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
+grep -nE "Premium|LTE|YouTube|Финляндия|YT" /etc/config/podkop
+```
+
+An invalid regular expression does not abort the update: the source is skipped and an `ERROR` is logged.
+
+---
+
+## Local links
+
+```sh
+vi /etc/config/podkop-local-links
+```
+
+One link per line:
 
 ```text
-option dedupe_sni_rotation '1'
-option dedupe_endpoint_host '1'
+vless://...
+trojan://...
+ss://...
 ```
 
-`dedupe_endpoint_host` keeps the last link from the subscription when several links use the same IP/domain. It is disabled by default.
-
-## Limits and fail_count
+Attach them to a group with:
 
 ```text
-option max_links '50'
-option max_latency_ms '500'
-option force_cleanup '0'
+option use_local_links '1'
 ```
 
-`force_cleanup` may remove links with `fail_count >= 2` or high ping even when `max_links` is not exceeded. Use carefully.
+Local links are never pruned automatically and are never replaced by SNI/IP deduplication. They do **not** count as a network source in the statistics: they neither increase the successful-subscription counter nor mask problems with external URLs.
 
-Show fail counts without printing proxy links:
+---
+
+## Deduplication
+
+### SNI rotations — `dedupe_sni_rotation`
+
+If a new link differs from an old one only by `sni`, the old variant is replaced by the new one.
+
+### `IP/domain:port` — `dedupe_endpoint_host`
+
+The server address is compared **together with the port**. The same host on different ports counts as different working variants and they do not evict each other:
+
+```text
+server.example.com:443     ← different links,
+server.example.com:8443    ← both are kept
+```
+
+Only fully matching `host:port` pairs are collapsed. `transport`, `sni`, `path`, `fp`, and the node name play no part in the comparison; the last variant from the subscription wins.
+
+The option is off by default. Enable it only if you are sure that several links on one host really are a rotation rather than distinct working variants.
+
+---
+
+## Limits, latency, and fail_count
+
+| Option | Effect |
+|---|---|
+| `max_links '50'` | Maximum links in a section. `0` or empty — unlimited. |
+| `max_latency_ms '500'` | Drop links slower than this, based on Podkop URLTest data. `0` or empty — never drop by latency. |
+| `force_cleanup '0'` | `1` — prune links with `fail_count >= 2` and over-latency links even when `max_links` is not reached. |
+
+`fail_count` is accumulated by the hourly observer (`--observe-only`) from Podkop URLTest data. To inspect it without printing the links themselves:
 
 ```sh
 /usr/bin/podkop-sub-updater.py --fail-count
 ```
+
+---
+
+## Auto-update and cron
+
+The schedule in `/etc/config/podkop_subscriptions` is a **saved setting**. Only what reaches `/etc/crontabs/root` actually runs, which is why the status carries a separate marker:
+
+```text
+автообновление: включено       — schedule defined and applied in cron
+автообновление: не применено   — schedule exists, but cron is not synced yet
+автообновление: не задано      — no schedules in the config
+```
+
+Synchronization happens through two independent paths, so you never need to trigger it manually:
+
+- LuCI runs `/usr/bin/podkop-sub-cron-sync` right after a successful Save / Save & Apply;
+- the procd trigger `/etc/init.d/podkop_subscriptions` does the same after any `uci commit podkop_subscriptions` — from LuCI, SSH, or a third-party script.
+
+`podkop-sub-cron-sync` is idempotent and uses an atomic kernel `fcntl.flock`, so repeated and concurrent invocations are safe.
+
+Besides the `subscription_schedule` entries, the script creates three service lines:
+
+```text
+0 * * * *    --observe-only     # hourly fail_count collection
+@reboot      --catch-up         # 5 minutes after router boot
+*/30 * * * * --catch-up-retry    # retry if catch-up failed
+```
+
+Check that they are in place:
+
+```sh
+grep -E 'podkop-sub-health|podkop-sub-updater|podkop-sub-catchup' /etc/crontabs/root
+```
+
+### Catch-up after downtime
+
+Cron does not run jobs missed while the router was off. Therefore:
+
+- 5 minutes after boot, the age of the last successful update is checked;
+- if more than 24 hours have passed, subscriptions are updated;
+- if that fails, it retries every 30 minutes until it succeeds.
+
+---
+
+## Status and errors
+
+A healthy status is short:
+
+```text
+Состояние: OK — обновлено: 2026-05-31 23:49, источники: 3/3, ключей в секции: 75,
+рабочих: нет данных, удалено: 0, локальных: 2, автообновление: включено.
+```
+
+Details are printed only on a real failure: empty subscriptions, unsupported format, all links rejected, config write failure.
+
+**What counts as a failure.** A single failing source does not: multiple subscriptions usually exist precisely for redundancy. That case is logged as `WARN` so LuCI does not flood the interface with pop-up errors. A red error appears only when no valid links could be assembled for **any** section — and even then the previous working Podkop config is not overwritten.
+
+---
+
+## Concurrent-run protection
+
+Every updater execution path — scheduled update, `--observe-only`, catch-up, retry, and manual run — shares the `/tmp/podkop-sub-updater.flock` lock:
+
+- `--observe-only` quietly skips when the updater is busy;
+- normal and catch-up runs wait up to 300 seconds for the lock;
+- if the lock is still held, the run exits with a clear warning and code `75`.
+
+The `/tmp/podkop-sub-updater.lock` directory in `podkop-sub-run-now` exists only to report manual-run state to LuCI; the actual protection comes from the flock inside the Python updater.
+
+---
 
 ## HTTP headers for subscription requests
 
 The updater does not send the real OpenWrt model or kernel version to subscription providers. It uses a fixed profile:
 
 ```text
-User-Agent: v2raytun/android
-X-HWID: 2CB6745020B32B99
-X-Device-OS: Android
-X-Ver-OS: Android 11
-X-Device-Model: OnePlus MT2110
-X-App-Version: 5.23.74
+User-Agent:      v2raytun/android
+X-HWID:          2CB6745020B32B99
+X-Device-OS:     Android
+X-Ver-OS:        Android 11
+X-Device-Model:  OnePlus MT2110
+X-App-Version:   5.23.74
 ```
 
+This way a direct request from the router and an external subscription client look like a single device to the provider.
 
-## Automatic cron synchronization
+---
 
-Since version 3.6.2 cron is synchronized through two independent paths:
+## Optional: DNS via dnsproxy
 
-- the LuCI form immediately runs `/usr/bin/podkop-sub-cron-sync` after a successful Save / Save & Apply;
-- `/etc/init.d/podkop_subscriptions` registers a procd `config.change` trigger, so any `uci commit podkop_subscriptions` from LuCI, SSH, or another script rebuilds the managed cron entries.
-
-`podkop-sub-cron-sync` is idempotent and uses an atomic kernel `fcntl.flock`; there is no separate lock-creation/PID-write window. Manual execution is only needed for diagnostics or forced recovery.
-
-## Concurrent updater protection
-
-Every execution path uses the same `/tmp/podkop-sub-updater.flock`: scheduled updates, `--observe-only`, catch-up, retry, and manual runs. The observer quietly skips while another update is active; normal and catch-up runs wait up to 300 seconds and return code `75` with a warning if the lock remains busy.
-
-The older `/tmp/podkop-sub-updater.lock` directory in `podkop-sub-run-now` remains only for LuCI manual-run status. The Python updater flock provides the actual race protection.
-
-## Useful commands
+A separate, optional script unrelated to subscriptions themselves. It installs and configures AdGuard dnsproxy on `127.0.0.10:53`, adds hardened upstream servers, and points Podkop's DNS at itself.
 
 ```sh
-/usr/bin/podkop-sub-updater.py --version
-/usr/bin/podkop-sub-updater.py --status-summary
-/usr/bin/podkop-sub-updater.py --fail-count
-/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop
+wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
+```
+
+| Flag | What it does |
+|---|---|
+| `--no-podkop` | Do not modify `/etc/config/podkop`. |
+| `--no-podkop-restart` | Configure Podkop but do not restart it. |
+| `--no-isp-dns` | Do not add the ISP DNS servers to the fallback list. |
+| `--config-only` | Do not install packages, only write the config. |
+| `--release 24.10` | Force the Fantastic Packages branch. |
+| `--arch x86_64` | Force the package architecture. |
+
+Re-running is safe: configs are backed up to `/root` first.
+
+---
+
+## Troubleshooting
+
+**No links appeared in Podkop.** Run it synchronously and read the output:
+
+```sh
 /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
-/usr/bin/podkop-sub-run-now
-/usr/bin/podkop-sub-run-now --status
+```
+
+**The log says `rejected 0` but there are few links.** The validator is not to blame — look at `regex`, `dedupe_*`, `max_links`, `max_latency_ms`, or `force_cleanup`.
+
+**Scheduled updates do not run.** The status shows `auto-update: not applied`, meaning cron is out of sync:
+
+```sh
 /usr/bin/podkop-sub-cron-sync
+grep -E 'podkop-sub-health|podkop-sub-updater|podkop-sub-catchup' /etc/crontabs/root
 ```
 
+**The updater hangs or is permanently "running".** Check the state and the locks:
 
-### Individual source failures
-
-If one subscription source fails but other reserve sources still provide valid keys, this is not treated as a fatal error. The updater logs it as `WARN`, not `ERROR`, so LuCI does not flood the interface with pop-up errors.
-
-A fatal error is logged only when no valid keys can be assembled for any section. The previous working Podkop configuration is not overwritten in this case.
-
-
-### Source counters and errors
-
-Only external subscription sources are counted in status and statistics. The local list `/etc/config/podkop-local-links` is not a network source: it does not increase the successful subscription counter and does not hide problems with external subscription downloads.
-
-If some external sources fail but at least one reserve source provides valid keys, this is not a fatal error. The updater logs a warning and continues. A red error is emitted only when no valid keys can be assembled from external subscriptions for any section. In that case the previous working Podkop configuration is not overwritten.
-
-
-### Auto-update status
-
-The status line shows not only the latest subscription update result, but also whether the schedule is actually applied in cron:
-
-```text
-auto-update: enabled
-auto-update: not applied
-auto-update: not configured
+```sh
+/usr/bin/podkop-sub-run-now --status
+ls -la /tmp/podkop-sub-updater.lock /tmp/podkop-sub-updater.flock
 ```
 
-This matters because `/etc/config/podkop_subscriptions` is the saved setting, while `/etc/crontabs/root` is what actually runs. If a schedule exists in settings but not in cron, the UI reports that auto-update is not applied. Version 3.6.2 automatically repairs synchronization after LuCI saves and after any `uci commit podkop_subscriptions`.
+Exit code `75` means the lock stayed busy for more than 300 seconds.
+
+**The LuCI page does not open after installation.** Clear the caches:
+
+```sh
+/usr/bin/podkop-sub-clean-temp
+/etc/init.d/rpcd restart
+/etc/init.d/uhttpd restart
+```
+
+---
+
+## License
+
+See [LICENSE](LICENSE).
