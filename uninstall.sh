@@ -50,7 +50,8 @@ rm -rf /tmp/podkop-sub-updater.lock /tmp/podkop-sub-cron-sync.lock
 rm -f /tmp/podkop-sub-updater.flock /tmp/podkop-sub-updater.log /tmp/podkop-sub-updater.status
 
 if [ "$PURGE_CONFIG" = "1" ]; then
-  rm -f /etc/config/podkop-local-links /etc/config/podkop_subscriptions
+  rm -f /etc/config/podkop-local-links /etc/config/podkop-subs /etc/config/podkop.podkop-subscriptions.bak
+  rm -f /etc/config/podkop_subscriptions
   rm -rf /etc/podkop-subscriptions
 fi
 

@@ -230,7 +230,7 @@ Remove settings as well:
 sh /tmp/podkop-sub-uninstall.sh --purge-config
 ```
 
-Additionally deletes `/etc/config/podkop_subscriptions`, `/etc/config/podkop-local-links`, and `/etc/podkop-subscriptions/`.
+Additionally deletes `/etc/config/podkop_subscriptions`, `/etc/podkop-subscriptions/local-links`, and `/etc/podkop-subscriptions/`.
 
 ---
 
@@ -240,7 +240,7 @@ Additionally deletes `/etc/config/podkop_subscriptions`, `/etc/config/podkop-loc
 |---|---|
 | `/etc/config/podkop_subscriptions` | Main config: subscription groups, sources, filters, limits, schedule. |
 | `/etc/config/podkop` | Native Podkop config. The updater reads sections from it and writes the final links back. |
-| `/etc/config/podkop-local-links` | Personal links, one per line. Protected from automatic pruning. |
+| `/etc/podkop-subscriptions/local-links` | Personal links, one per line. Protected from automatic pruning. |
 | `/etc/podkop-subscriptions/state.json` | Service state: `fail_count`, last status, catch-up/retry, recently removed links. |
 | `/tmp/podkop-sub-updater.log` | Log of the last manual run (`podkop-sub-run-now` or the LuCI button). |
 | `/tmp/podkop-sub-updater.status` | Machine-readable manual-run status for LuCI. |
@@ -287,7 +287,7 @@ config subscription_schedule 'main_0310'
 | `enabled` | `1` | `0` — the group is ignored entirely. |
 | `target_section` | section name | Which `/etc/config/podkop` section to write links into. Several groups may target one section; their results are merged. |
 | `source` (list) | — | Subscription URL. Multiple lines mean redundancy, not duplication. |
-| `use_local_links` | `0` | `1` — also include links from `/etc/config/podkop-local-links`. |
+| `use_local_links` | `0` | `1` — also include links from `/etc/podkop-subscriptions/local-links`. |
 | `regex` | empty | Filter applied to the proxy link. Empty disables filtering. |
 | `match_mode` | `ifnotmatch` | `ifmatch` — keep matching links only; `ifnotmatch` — exclude matching links. |
 | `on_empty` | `skip` | What to do when the filter leaves nothing from a source: `skip` — skip that source; `all` — take every link unfiltered. |
@@ -392,7 +392,7 @@ An invalid regular expression does not abort the update: the source is skipped a
 ## Local links
 
 ```sh
-vi /etc/config/podkop-local-links
+vi /etc/podkop-subscriptions/local-links
 ```
 
 One link per line:
@@ -410,6 +410,8 @@ option use_local_links '1'
 ```
 
 Local links are never pruned automatically and are never replaced by SNI/IP deduplication. They do **not** count as a network source in the statistics: they neither increase the successful-subscription counter nor mask problems with external URLs.
+
+Before 3.6.3 this file lived at `/etc/config/podkop-local-links`, which broke uci: everything under `/etc/config` is parsed as uci, and a plain list of links is not valid uci syntax, so every `uci` call logged a parse error and `reload_config` failed with `uci: Invalid argument` — meaning LuCI's Apply could stop short of resyncing cron. The installer moves the file automatically; the updater still reads the old path if the new one does not exist yet.
 
 ---
 

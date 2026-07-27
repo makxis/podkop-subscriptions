@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 3.6.3
+
+- Moved the project's non-uci files out of `/etc/config`. Everything in that
+  directory is parsed by uci, so a plain list of proxy links and a copy of
+  podkop's config made every `uci` call log `Parse error`, and `reload_config`
+  fail with `uci: Invalid argument` — which meant LuCI's Apply could stop short
+  of resynchronizing cron. New locations:
+  `/etc/config/podkop-local-links` -> `/etc/podkop-subscriptions/local-links`,
+  `/etc/config/podkop.podkop-subscriptions.bak` ->
+  `/etc/podkop-subscriptions/podkop.bak`. The installer migrates existing files
+  and also relocates the stale `/etc/config/podkop-subs` from old versions; the
+  updater still reads the legacy local-links path when the new one is absent.
 
 - Moved the post-boot catch-up out of cron. BusyBox crond does not support
   `@reboot` and rejected the whole entry with `parse error at @reboot`, logging

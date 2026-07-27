@@ -4,7 +4,7 @@
 "require ui";
 "require baseclass";
 
-const LOCAL_LINKS = "/etc/config/podkop-local-links";
+const LOCAL_LINKS = "/etc/podkop-subscriptions/local-links";
 const PODKOP_SUBSCRIPTIONS_VERSION = "3.6.2";
 const STATUS_STYLE_PLAIN_CARD_V36 = true;
 
@@ -175,7 +175,7 @@ return baseclass.extend({
       form.Flag,
       "use_local_links",
       _("Использовать локальный список ключей"),
-      _("Добавляет ключи из /etc/config/podkop-local-links. Эти ключи защищены от автоудаления.")
+      _("Добавляет ключи из /etc/podkop-subscriptions/local-links. Эти ключи защищены от автоудаления.")
     );
     o.default = "0";
     o.rmempty = false;
@@ -262,7 +262,7 @@ return baseclass.extend({
       form.Flag,
       "dedupe_sni_rotation",
       _("Схлопывать SNI-дубликаты"),
-      _("Если новый ключ из подписки отличается от существующего только параметром sni, старый вариант будет заменён новым. Название ключа не используется для сравнения. Локальные ключи из /etc/config/podkop-local-links не заменяются.")
+      _("Если новый ключ из подписки отличается от существующего только параметром sni, старый вариант будет заменён новым. Название ключа не используется для сравнения. Локальные ключи из /etc/podkop-subscriptions/local-links не заменяются.")
     );
     o.default = "0";
     o.rmempty = false;
@@ -271,7 +271,7 @@ return baseclass.extend({
       form.Flag,
       "dedupe_endpoint_host",
       _("Схлопывать IP/домен:порт-дубликаты"),
-      _("Если несколько ключей ведут на один и тот же IP/домен и один порт, будет оставлен последний вариант из подписки. Один IP/домен с разными портами не схлопывается. Transport, sni и другие параметры при сравнении не учитываются. Локальные ключи из /etc/config/podkop-local-links не заменяются.")
+      _("Если несколько ключей ведут на один и тот же IP/домен и один порт, будет оставлен последний вариант из подписки. Один IP/домен с разными портами не схлопывается. Transport, sni и другие параметры при сравнении не учитываются. Локальные ключи из /etc/podkop-subscriptions/local-links не заменяются.")
     );
     o.default = "0";
     o.rmempty = false;
@@ -350,7 +350,7 @@ return baseclass.extend({
       form.TypedSection,
       "local_links",
       _("Локальные прокси-ссылки"),
-      _("Редактирует файл /etc/config/podkop-local-links. Если файл изменён через SSH, обновите страницу.")
+      _("Редактирует файл /etc/podkop-subscriptions/local-links. Если файл изменён через SSH, обновите страницу.")
     );
 
     ss = o.subsection;

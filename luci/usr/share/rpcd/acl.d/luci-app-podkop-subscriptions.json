@@ -9,9 +9,6 @@
         "/etc/config/podkop_subscriptions": [
           "read"
         ],
-        "/etc/config/podkop-local-links": [
-          "read"
-        ],
         "/usr/bin/podkop-sub-updater.py": [
           "exec"
         ],
@@ -20,6 +17,9 @@
         ],
         "/usr/bin/podkop-sub-run-now": [
           "exec"
+        ],
+        "/etc/podkop-subscriptions/local-links": [
+          "read"
         ]
       },
       "uci": [
@@ -37,7 +37,7 @@
         "/etc/config/podkop_subscriptions": [
           "write"
         ],
-        "/etc/config/podkop-local-links": [
+        "/etc/podkop-subscriptions/local-links": [
           "write"
         ]
       },

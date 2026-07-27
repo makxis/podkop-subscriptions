@@ -232,7 +232,7 @@ wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/po
 sh /tmp/podkop-sub-uninstall.sh --purge-config
 ```
 
-Дополнительно стирает `/etc/config/podkop_subscriptions`, `/etc/config/podkop-local-links` и `/etc/podkop-subscriptions/`.
+Дополнительно стирает `/etc/config/podkop_subscriptions` и весь каталог `/etc/podkop-subscriptions/` вместе с локальными ключами и state.
 
 ---
 
@@ -242,7 +242,7 @@ sh /tmp/podkop-sub-uninstall.sh --purge-config
 |---|---|
 | `/etc/config/podkop_subscriptions` | Главный конфиг: группы подписок, источники, фильтры, лимиты, расписание. |
 | `/etc/config/podkop` | Родной конфиг Podkop. Updater читает из него секции и пишет туда итоговые ключи. |
-| `/etc/config/podkop-local-links` | Личные ключи, по одному на строку. Защищены от автоматической чистки. |
+| `/etc/podkop-subscriptions/local-links` | Личные ключи, по одному на строку. Защищены от автоматической чистки. |
 | `/etc/podkop-subscriptions/state.json` | Служебное состояние: `fail_count`, последний статус, catch-up/retry, недавно удалённые ключи. |
 | `/tmp/podkop-sub-updater.log` | Лог последнего ручного запуска (`podkop-sub-run-now` или кнопка в LuCI). |
 | `/tmp/podkop-sub-updater.status` | Машиночитаемый статус ручного запуска для LuCI. |
@@ -289,7 +289,7 @@ config subscription_schedule 'main_0310'
 | `enabled` | `1` | `0` — группа полностью игнорируется. |
 | `target_section` | имя секции | В какую секцию `/etc/config/podkop` писать ключи. Несколько групп могут писать в одну секцию — их результаты объединяются. |
 | `source` (list) | — | URL подписки. Строк может быть несколько: это резервирование, а не дублирование. |
-| `use_local_links` | `0` | `1` — добавить ключи из `/etc/config/podkop-local-links`. |
+| `use_local_links` | `0` | `1` — добавить ключи из `/etc/podkop-subscriptions/local-links`. |
 | `regex` | пусто | Фильтр по proxy-ссылке. Пусто — фильтрация выключена. |
 | `match_mode` | `ifnotmatch` | `ifmatch` — оставить только совпавшие; `ifnotmatch` — исключить совпавшие. |
 | `on_empty` | `skip` | Что делать, если после фильтра из источника ничего не осталось: `skip` — пропустить источник; `all` — взять все ссылки без фильтра. |
@@ -394,7 +394,7 @@ grep -nE "Premium|LTE|YouTube|Финляндия|YT" /etc/config/podkop
 ## Локальные ключи
 
 ```sh
-vi /etc/config/podkop-local-links
+vi /etc/podkop-subscriptions/local-links
 ```
 
 Один ключ на строку:
@@ -412,6 +412,8 @@ option use_local_links '1'
 ```
 
 Локальные ключи не удаляются автоматической чисткой и не заменяются при схлопывании SNI/IP-дубликатов. В статистике они **не** считаются сетевым источником: не увеличивают счётчик успешных подписок и не маскируют проблемы с загрузкой внешних URL.
+
+До версии 3.6.3 файл лежал в `/etc/config/podkop-local-links`. Это ломало UCI: каталог `/etc/config` разбирается парсером UCI, а простой список ссылок валидным UCI не является, поэтому каждый вызов `uci` печатал `Parse error`, а `reload_config` падал с `uci: Invalid argument` — то есть Apply в LuCI мог не доводить синхронизацию cron до конца. Установщик переносит файл на новое место автоматически; updater читает старый путь, если новый ещё не создан.
 
 ---
 
