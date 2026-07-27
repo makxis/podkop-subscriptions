@@ -119,7 +119,6 @@ backup_file() {
     fi
 }
 
-backup_file /etc/config/dnsproxy dnsproxy.config
 backup_file /etc/config/podkop podkop.config
 
 # Получаем major.minor, например 24.10 из 24.10.2.
@@ -212,6 +211,10 @@ else
     command -v dnsproxy >/dev/null 2>&1 || die "--config-only указан, но dnsproxy не установлен"
 fi
 
+# Бэкап делается после установки: на чистом роутере /etc/config/dnsproxy
+# появляется только вместе с пакетом, и до установки откатывать было бы нечего.
+backup_file /etc/config/dnsproxy dnsproxy.config
+
 collect_isp_dns() {
     out="$1"
     raw="$TMP_DIR/isp-dns.raw"
@@ -263,41 +266,41 @@ mv "$FALLBACK_FILE.unique" "$FALLBACK_FILE"
 DNSPROXY_CONFIG_TMP="$TMP_DIR/dnsproxy.config"
 cat > "$DNSPROXY_CONFIG_TMP" <<EOF
 config dnsproxy 'global'
-\tlist listen_addr '$LISTEN_ADDR'
-\tlist listen_port '$LISTEN_PORT'
-\toption refuse_any '1'
-\toption http3 '1'
-\toption ipv6_disabled '1'
-\toption enabled '1'
-\toption upstream_mode 'parallel'
+	list listen_addr '$LISTEN_ADDR'
+	list listen_port '$LISTEN_PORT'
+	option refuse_any '1'
+	option http3 '1'
+	option ipv6_disabled '1'
+	option enabled '1'
+	option upstream_mode 'parallel'
 
 config dnsproxy 'bogus_nxdomain'
 
 config dnsproxy 'cache'
-\toption cache_optimistic '1'
-\toption size '65535'
-\toption enabled '1'
-\toption min_ttl '60'
-\toption max_ttl '3600'
+	option cache_optimistic '1'
+	option size '65535'
+	option enabled '1'
+	option min_ttl '60'
+	option max_ttl '3600'
 
 config dnsproxy 'dns64'
-\toption dns64_prefix '64:ff9b::'
+	option dns64_prefix '64:ff9b::'
 
 config dnsproxy 'edns'
 
 config dnsproxy 'hosts'
-\toption enabled '0'
-\tlist hosts_files ''
+	option enabled '0'
+	list hosts_files ''
 
 config dnsproxy 'private_rdns'
-\toption enabled '0'
-\tlist upstream '127.0.0.1:53'
+	option enabled '0'
+	list upstream '127.0.0.1:53'
 
 config dnsproxy 'servers'
-\tlist bootstrap '8.8.4.4'
-\tlist bootstrap '1.0.0.1'
-\tlist bootstrap '223.5.5.5'
-\tlist bootstrap '94.140.14.140'
+	list bootstrap '8.8.4.4'
+	list bootstrap '1.0.0.1'
+	list bootstrap '223.5.5.5'
+	list bootstrap '94.140.14.140'
 EOF
 
 while IFS= read -r dns; do
