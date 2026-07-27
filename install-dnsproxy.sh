@@ -2,7 +2,7 @@
 # Автоматическая установка и настройка AdGuard dnsproxy для OpenWrt.
 #
 # Что делает:
-#   1. Определяет ветку OpenWrt и архитектуру пакетов opkg.
+#   1. Определяет ветку OpenWrt, менеджер пакетов (apk или opkg) и архитектуру.
 #   2. Устанавливает dnsproxy из штатного репозитория OpenWrt.
 #   3. Скачивает подходящий luci-app-dnsproxy из Fantastic Packages.
 #   4. Настраивает dnsproxy на 127.0.0.10:53.
@@ -14,7 +14,7 @@
 
 set -eu
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 LISTEN_ADDR="127.0.0.10"
 LISTEN_PORT="53"
@@ -131,17 +131,35 @@ OPENWRT_SERIES="$(printf '%s\n' "$DETECTED_RELEASE" | sed -n 's/^\([0-9][0-9]*\.
 
 log "OpenWrt: ${DETECTED_RELEASE:-неизвестно}; ветка пакетов: $OPENWRT_SERIES"
 
-install_packages() {
-    command -v opkg >/dev/null 2>&1 || die "Эта версия установщика рассчитана на OpenWrt с opkg"
+# OpenWrt 24.10 и старше используют opkg, 25.12 и новее — apk. Форматы пакетов
+# и индексов у них разные, поэтому дальше всё ветвится по этой переменной.
+if command -v apk >/dev/null 2>&1; then
+    PKG_MANAGER="apk"
+elif command -v opkg >/dev/null 2>&1; then
+    PKG_MANAGER="opkg"
+else
+    die "Не найден ни apk, ни opkg: неподдерживаемая система"
+fi
+log "Менеджер пакетов: $PKG_MANAGER"
 
+install_packages() {
     log "Обновляю списки пакетов"
-    opkg update || die "opkg update завершился с ошибкой"
+    case "$PKG_MANAGER" in
+        apk)  apk update || die "apk update завершился с ошибкой" ;;
+        opkg) opkg update || die "opkg update завершился с ошибкой" ;;
+    esac
 
     log "Устанавливаю dnsproxy и сертификаты"
-    opkg install ca-bundle ca-certificates dnsproxy || die "Не удалось установить пакет dnsproxy"
+    case "$PKG_MANAGER" in
+        apk)  apk add ca-bundle ca-certificates dnsproxy || die "Не удалось установить пакет dnsproxy" ;;
+        opkg) opkg install ca-bundle ca-certificates dnsproxy || die "Не удалось установить пакет dnsproxy" ;;
+    esac
 
-    if ! command -v zcat >/dev/null 2>&1 && ! command -v gzip >/dev/null 2>&1; then
-        opkg install gzip || die "Не удалось установить gzip для чтения Packages.gz"
+    # Нужно только ветке opkg: там индекс Fantastic Packages — это Packages.gz.
+    if [ "$PKG_MANAGER" = "opkg" ]; then
+        if ! command -v zcat >/dev/null 2>&1 && ! command -v gzip >/dev/null 2>&1; then
+            opkg install gzip || die "Не удалось установить gzip для чтения Packages.gz"
+        fi
     fi
 }
 
@@ -154,54 +172,101 @@ read_packages_gz() {
     fi
 }
 
-detect_package_arch() {
+arch_candidates() {
     if [ -n "$PACKAGE_ARCH_OVERRIDE" ]; then
         printf '%s\n' "$PACKAGE_ARCH_OVERRIDE"
         return 0
     fi
 
-    candidates="$(opkg print-architecture 2>/dev/null \
-        | awk '$2 != "all" && $2 != "noarch" { print $3, $2 }' \
-        | sort -nr \
-        | awk '{ print $2 }')"
+    # DISTRIB_ARCH из /etc/openwrt_release совпадает с именами каталогов
+    # Fantastic Packages и есть на обеих ветках, поэтому он идёт первым.
+    [ -n "${DISTRIB_ARCH:-}" ] && printf '%s\n' "$DISTRIB_ARCH"
 
-    [ -n "$candidates" ] || return 1
+    case "$PKG_MANAGER" in
+        apk)
+            apk --print-arch 2>/dev/null || true
+            ;;
+        opkg)
+            opkg print-architecture 2>/dev/null \
+                | awk '$2 != "all" && $2 != "noarch" { print $3, $2 }' \
+                | sort -nr \
+                | awk '{ print $2 }'
+            ;;
+    esac
+}
 
-    for arch in $candidates; do
-        index_url="$FANTASTIC_ROOT/$OPENWRT_SERIES/packages/$arch/luci/Packages.gz"
-        if wget -q -O "$TMP_DIR/Packages-$arch.gz" "$index_url"; then
+detect_package_arch() {
+    seen=""
+    for arch in $(arch_candidates); do
+        case " $seen " in *" $arch "*) continue ;; esac
+        seen="$seen $arch"
+        # index.json отдают обе ветки репозитория, поэтому проверка одна.
+        if wget -q -O "$TMP_DIR/index-$arch.json" \
+            "$FANTASTIC_ROOT/$OPENWRT_SERIES/packages/$arch/luci/index.json"; then
             printf '%s\n' "$arch"
             return 0
         fi
     done
-
     return 1
 }
 
-install_luci_package() {
-    PACKAGE_ARCH="$(detect_package_arch)" || die "Fantastic Packages не содержит LuCI-пакеты для архитектур этого роутера"
-    PACKAGES_GZ="$TMP_DIR/Packages-$PACKAGE_ARCH.gz"
-    LUCI_BASE="$FANTASTIC_ROOT/$OPENWRT_SERIES/packages/$PACKAGE_ARCH/luci"
+# index.json — плоский словарь {"имя-пакета": "версия"}.
+lookup_index_version() {
+    file="$1"
+    name="$2"
+    if command -v jsonfilter >/dev/null 2>&1; then
+        jsonfilter -i "$file" -e "@[\"$name\"]" 2>/dev/null && return 0
+    fi
+    sed -n "s/.*\"$name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -n 1
+}
 
-    if [ ! -s "$PACKAGES_GZ" ]; then
-        wget -q -O "$PACKAGES_GZ" "$LUCI_BASE/Packages.gz" \
+install_luci_package() {
+    PACKAGE_ARCH="$(detect_package_arch)" \
+        || die "Fantastic Packages не содержит LuCI-пакеты для архитектур этого роутера (ветка $OPENWRT_SERIES)"
+    LUCI_BASE="$FANTASTIC_ROOT/$OPENWRT_SERIES/packages/$PACKAGE_ARCH/luci"
+    log "Архитектура: $PACKAGE_ARCH"
+
+    if [ "$PKG_MANAGER" = "apk" ]; then
+        # У apk индекс packages.adb бинарный, поэтому имя файла собирается
+        # из версии в index.json: <имя>-<версия>.apk.
+        index_file="$TMP_DIR/index-$PACKAGE_ARCH.json"
+        [ -s "$index_file" ] || wget -q -O "$index_file" "$LUCI_BASE/index.json" \
             || die "Не удалось скачать индекс Fantastic Packages: $LUCI_BASE"
+
+        luci_version="$(lookup_index_version "$index_file" luci-app-dnsproxy)"
+        [ -n "$luci_version" ] || die "В репозитории не найден luci-app-dnsproxy"
+
+        LUCI_FILENAME="luci-app-dnsproxy-${luci_version}.apk"
+        local_file="$TMP_DIR/luci-app-dnsproxy.apk"
+    else
+        packages_gz="$TMP_DIR/Packages-$PACKAGE_ARCH.gz"
+        wget -q -O "$packages_gz" "$LUCI_BASE/Packages.gz" \
+            || die "Не удалось скачать индекс Fantastic Packages: $LUCI_BASE"
+
+        LUCI_FILENAME="$(read_packages_gz "$packages_gz" | awk '
+            $1 == "Package:" { wanted = ($2 == "luci-app-dnsproxy") }
+            wanted && $1 == "Filename:" { print $2; exit }
+        ')"
+        [ -n "$LUCI_FILENAME" ] || die "В репозитории не найден luci-app-dnsproxy"
+
+        local_file="$TMP_DIR/luci-app-dnsproxy.ipk"
     fi
 
-    LUCI_FILENAME="$(read_packages_gz "$PACKAGES_GZ" | awk '
-        $1 == "Package:" { wanted = ($2 == "luci-app-dnsproxy") }
-        wanted && $1 == "Filename:" { print $2; exit }
-    ')"
-
-    [ -n "$LUCI_FILENAME" ] || die "В репозитории не найден luci-app-dnsproxy"
-
-    log "Архитектура: $PACKAGE_ARCH"
     log "Скачиваю $LUCI_FILENAME"
-    wget -O "$TMP_DIR/luci-app-dnsproxy.ipk" "$LUCI_BASE/$LUCI_FILENAME" \
+    wget -O "$local_file" "$LUCI_BASE/$LUCI_FILENAME" \
         || die "Не удалось скачать luci-app-dnsproxy"
 
-    opkg install "$TMP_DIR/luci-app-dnsproxy.ipk" \
-        || die "Не удалось установить luci-app-dnsproxy"
+    case "$PKG_MANAGER" in
+        apk)
+            # Пакет не подписан ключом, который знает роутер, и ставится файлом,
+            # а не из подключённого репозитория — apk требует оба флага.
+            apk add --allow-untrusted --force-non-repository "$local_file" \
+                || die "Не удалось установить luci-app-dnsproxy"
+            ;;
+        opkg)
+            opkg install "$local_file" || die "Не удалось установить luci-app-dnsproxy"
+            ;;
+    esac
 }
 
 if [ "$INSTALL_PACKAGES" = "1" ]; then

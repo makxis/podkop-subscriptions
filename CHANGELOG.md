@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- `install-dnsproxy.sh` now supports apk, so it works on OpenWrt 25.12 and
+  newer. It previously hardcoded opkg and aborted immediately on apk-based
+  releases. The package manager is detected at runtime; the architecture comes
+  from `DISTRIB_ARCH` first (identical on both branches) and falls back to
+  `apk --print-arch` or `opkg print-architecture`. Fantastic Packages serves
+  `index.json` on both branches, so it is used to probe the architecture; the
+  LuCI package filename comes from `Packages.gz` for opkg and from that
+  `index.json` version for apk, since apk's own index is binary. Local `.apk`
+  files are installed with `--allow-untrusted --force-non-repository`, both of
+  which apk requires for an unsigned package installed from a file.
+
 ## 3.6.3
 
 - Moved the project's non-uci files out of `/etc/config`. Everything in that
