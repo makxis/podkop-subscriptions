@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.6.4
 
 - `install-dnsproxy.sh` now supports apk, so it works on OpenWrt 25.12 and
   newer. It previously hardcoded opkg and aborted immediately on apk-based
@@ -12,6 +12,12 @@
   `index.json` version for apk, since apk's own index is binary. Local `.apk`
   files are installed with `--allow-untrusted --force-non-repository`, both of
   which apk requires for an unsigned package installed from a file.
+  The installer carries its own version, bumped to 1.1.0, and both READMEs now
+  state it.
+- Verified the 3.6.3 fixes survive a real reboot on OpenWrt 24.10.3: cron is
+  rebuilt without `@reboot` and crond logs no parse errors, `/etc/config` stays
+  free of non-uci files, `reload_config` succeeds, and the procd `catchup`
+  instance fires once five minutes after boot and exits without respawning.
 
 ## 3.6.3
 
