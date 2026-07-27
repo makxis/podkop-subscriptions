@@ -579,6 +579,59 @@ Re-running is safe: configs are backed up to `/root` first.
 
 Works with both opkg (OpenWrt 24.10 and older) and apk (25.12 and newer); the package manager is detected automatically. The branch and architecture come from `/etc/openwrt_release` — if detection fails, set them by hand with `--release` and `--arch`.
 
+### What a query's path looks like
+
+```mermaid
+flowchart LR
+    C["LAN device"] --> D["dnsmasq<br/>router LAN address:53"]
+    D --> P["Podkop / sing-box<br/>127.0.0.42:53"]
+    P --> X["dnsproxy<br/>127.0.0.10:53"]
+    X -->|"normal path"| U["upstream<br/>encrypted DoH/DoT"]
+    X -.->|"no upstream answered"| F["fallback<br/>plain UDP"]
+    X -.->|"resolve the upstream<br/>host names"| B["bootstrap<br/>plain UDP"]
+```
+
+Podkop answers with a fake IP from `198.18.0.0/15` for the domains it routes through the proxy, so on the LAN those domains resolve to `198.18.x.x` — that is expected, not a fault.
+
+### Three server lists, and why they differ
+
+They do not live in `/etc/config/podkop-subscriptions` but in the `servers` section of `/etc/config/dnsproxy`. Each list answers a different question, and they should not be conflated.
+
+| List | When it is used | What belongs in it |
+|---|---|---|
+| `upstream` | Always — the normal path | Encrypted DoH/DoT only. This is what buys privacy |
+| `bootstrap` | To turn the `upstream` host names into IPs | Plain IPs. Without it the encrypted addresses cannot be resolved at all |
+| `fallback` | Only when no `upstream` answered | Plain IPs. This buys availability, not privacy |
+
+The split matters. `upstream` runs in `parallel` mode: every server is queried at once and the first answer wins, so one slow server costs nothing and one unreachable server simply never wins the race.
+
+`fallback` is the last line. Demanding encryption from it defeats its purpose — it exists precisely for the case where the encrypted addresses are unreachable. So it should hold whatever survives blocking: your ISP's own resolvers (the script adds them automatically; `--no-isp-dns` turns that off) and a large local operator. The cost is that those queries leave in plain text.
+
+`bootstrap` is the non-obvious failure point. If it contains only addresses that might themselves become unreachable, the upstreams fail to come up — not because they are blocked, but because nothing can resolve their host names. Append a locally reachable resolver to the **end** of the list: it is only consulted when the earlier ones stay silent, so priorities are unchanged.
+
+### Tuning the servers for your ISP
+
+The defaults are a reasonable starting point, but the speed and reachability of public resolvers vary a lot by ISP and country. Test your own by running a throwaway instance alongside the live one:
+
+```sh
+dnsproxy --listen 127.0.0.1 --port 15353 \
+         --upstream https://dns.quad9.net/dns-query \
+         --bootstrap 8.8.4.4 --timeout 5s &
+nslookup openwrt.org 127.0.0.1 -port=15353
+```
+
+Look at the share of answered queries, not just the average time: a resolver that answers a third of the time is worse than a slow but steady one. Port `15353` is arbitrary; the live dnsproxy on `127.0.0.10:53` is left untouched.
+
+Edits go through `uci` and take effect on restart:
+
+```sh
+uci -q del dnsproxy.servers.upstream
+uci add_list dnsproxy.servers.upstream='https://dns.cloudflare.com/dns-query'
+uci add_list dnsproxy.servers.upstream='https://dns.quad9.net/dns-query'
+uci commit dnsproxy
+/etc/init.d/dnsproxy restart
+```
+
 ---
 
 ## Troubleshooting
