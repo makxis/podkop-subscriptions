@@ -301,11 +301,23 @@ migrate_out_of_uci_dir() {
     fi
   fi
 
-  for stale in /etc/config/podkop.podkop-subscriptions.bak /etc/config/podkop-subs; do
-    [ -f "$stale" ] || continue
-    mv -f "$stale" "$DATA_DIR/$(basename "$stale")" && \
-      say "Moved $stale out of the uci directory"
-  done
+  # The updater's backup now lives at $DATA_DIR/podkop.bak. Rename the old copy
+  # to that name so an upgrade does not leave two backups side by side.
+  legacy_backup="/etc/config/podkop.podkop-subscriptions.bak"
+  if [ -f "$legacy_backup" ]; then
+    if [ -e "$DATA_DIR/podkop.bak" ]; then
+      rm -f "$legacy_backup"
+      say "Dropped $legacy_backup: $DATA_DIR/podkop.bak already exists"
+    else
+      mv -f "$legacy_backup" "$DATA_DIR/podkop.bak" && \
+        say "Moved $legacy_backup -> $DATA_DIR/podkop.bak"
+    fi
+  fi
+
+  if [ -f /etc/config/podkop-subs ]; then
+    mv -f /etc/config/podkop-subs "$DATA_DIR/podkop-subs" && \
+      say "Moved /etc/config/podkop-subs out of the uci directory"
+  fi
 }
 
 prepare_upgrade_from_legacy() {
