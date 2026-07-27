@@ -132,7 +132,9 @@ add_hourly_observer() {
 }
 
 add_catchup_jobs() {
-  echo "@reboot sleep 300 && /usr/bin/podkop-sub-updater.py --catch-up --subs $SUB_CFG --config /etc/config/podkop 2>&1 | logger -t podkop-sub-catchup $CATCHUP_TAG:boot" >> "$CRON_FILE"
+  # No @reboot line here: BusyBox crond does not support the @-shortcuts and
+  # rejects the whole entry with "parse error at @reboot". The boot catch-up
+  # runs from /etc/init.d/podkop_subscriptions instead.
   echo "*/30 * * * * /usr/bin/podkop-sub-updater.py --catch-up-retry --subs $SUB_CFG --config /etc/config/podkop 2>&1 | logger -t podkop-sub-catchup $CATCHUP_TAG:retry" >> "$CRON_FILE"
 }
 
