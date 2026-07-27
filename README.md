@@ -10,29 +10,38 @@ The guiding principle is **never break a working configuration**. If a subscript
 
 ## Update links right now
 
-The command you will use most. It downloads the subscriptions, filters, validates, and writes links into Podkop:
-
-```sh
-/usr/bin/podkop-sub-run-now
-```
-
-It runs in the background and returns immediately. To see how it went:
-
-```sh
-/usr/bin/podkop-sub-run-now --status
-```
-
-Live log:
-
-```sh
-tail -f /tmp/podkop-sub-updater.log
-```
-
-If you need a synchronous run (blocks until finished and returns an exit code), call the updater directly:
+The command you will use most. It downloads the subscriptions, filters, validates, and writes links into Podkop — and **prints the whole log straight to the terminal**, so you can see exactly what happens at every step:
 
 ```sh
 /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
 ```
+
+It is synchronous: it blocks until finished and returns an exit code. This is the command to use for the first setup and for investigating any problem.
+
+Typical output (the program logs in Russian):
+
+```text
+[INFO] === ЗАПУСК ОБНОВЛЕНИЯ ПОДПИСОК ===
+[INFO] Профиль запроса подписок: v2raytun/android, Android, Android 11, OnePlus MT2110; ...
+[INFO] источник 1: попытка 1/3, timeout=45s
+[INFO] источник 1: успешно загружен с попытки 1/3
+[INFO] [main]: источник 1 (base64) -> ссылок после фильтра: 96
+[INFO] [main]: Дубликатов в новых ссылках подписки отброшено: 4
+[INFO] [main]: Итого уникальных новых ссылок из внешних подписок: 92
+[INFO] [main]: для совместимости с Podkop добавлен type=tcp в ключах: 4
+[INFO] [main]: проверка совместимости Podkop/sing-box: принято 75, отброшено 0, sing-box check запусков: 2
+[INFO] [main]: limit max_links=50, current=48, new_candidates=75, potential=80
+[INFO] [main]: итог: добавлено=6, удалено=2, дубликатов в текущем конфиге=0, ключей итого=50
+[INFO] Успешно завершено: конфиг обновлён, Podkop перезапущен.
+```
+
+These lines show precisely where links are lost: fetching a source, the regex filter, deduplication, the compatibility check, or the `max_links` cap.
+
+Subscription URLs and proxy links are replaced with `<remote-url>` and `<proxy-link>` in the output, and parameters such as `sni=`, `uuid=`, `password=` become `<hidden>`. Sources are labelled `источник 1`, `источник 2`, and `локальный список`. The log is safe to share and to attach to an issue as is.
+
+### If you want a background run
+
+`/usr/bin/podkop-sub-run-now` performs the same cycle in the background, writing to `/tmp/podkop-sub-updater.log`. It exists so the **Запустить updater** button in LuCI can report a result. From a console it is rarely worth it: you have to chase the output with `tail -f`. See [All commands](#all-commands) for details.
 
 ---
 
@@ -80,10 +89,12 @@ A minimal working example is in [Configuration](#configuration).
 ### Step 3. Fetch links for the first time
 
 ```sh
-/usr/bin/podkop-sub-run-now
+/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
 ```
 
-In LuCI the same thing is done by the **Запустить updater** button at the bottom of the page. Until the first run, the page shows a first-time-setup hint instead of a status.
+Seeing the full output matters most on the first run: it immediately tells you whether the sources are reachable, whether the regex filter cuts too much, and how many links actually reached Podkop.
+
+In LuCI the same thing is done by the **Запустить updater** button at the bottom of the page, but its output goes to the log file. Until the first run, the page shows a first-time-setup hint instead of a status.
 
 ### Step 4. Check the result
 
@@ -155,8 +166,9 @@ sing-box:        1.12.17; 1.12.22
 
 | Command | What it does |
 |---|---|
-| `/usr/bin/podkop-sub-run-now` | **Update links now.** Runs the full cycle (download → filter → validate → write to Podkop) in the background, logging to `/tmp/podkop-sub-updater.log`. Silently skips if the updater is already running. |
-| `/usr/bin/podkop-sub-run-now --status` | Manual-run state: `running` / `finished` / `idle`, plus the tail of the log. |
+| `/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force` | **Update links now.** The full cycle (download → filter → validate → write to Podkop), synchronously, with the whole log on the terminal and an exit code at the end. The main tool both for first setup and for troubleshooting. |
+| `/usr/bin/podkop-sub-run-now` | The same cycle in the background, logging to `/tmp/podkop-sub-updater.log`. Needed by the LuCI button; from a console it only helps if you do not want to wait. Silently skips if the updater is already running. |
+| `/usr/bin/podkop-sub-run-now --status` | Background-run state: `running` / `finished` / `idle`, plus the tail of the log. |
 | `/usr/bin/podkop-sub-run-now --version` | Installed version. |
 | `/usr/bin/podkop-sub-updater.py --status-summary` | One-line status for LuCI: update time, sources, link count, auto-update state. |
 | `/usr/bin/podkop-sub-updater.py --fail-count` | Accumulated `fail_count` per link. Proxy links themselves are not printed, so the output is safe to share. |
@@ -184,7 +196,6 @@ sing-box:        1.12.17; 1.12.22
 | Command | What it does |
 |---|---|
 | `/usr/bin/podkop-sub-updater.py --version` | Updater version. |
-| `/usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force` | Synchronous full run that force-rewrites the section and restarts Podkop. The main debugging tool: all output goes to the terminal. |
 | `/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop` | Observation only: refreshes `fail_count` from Podkop URLTest data without touching the config. Runs hourly from cron. |
 | `/usr/bin/podkop-sub-updater.py --catch-up ...` | Update subscriptions if the last successful update is older than 24 hours. Installed in cron as `@reboot`. |
 | `/usr/bin/podkop-sub-updater.py --catch-up-retry ...` | Retry catch-up only if the previous one failed. Installed in cron every 30 minutes. |
