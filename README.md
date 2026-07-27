@@ -558,9 +558,9 @@ This way a direct request from the router and an external subscription client lo
 
 ## Optional: DNS via dnsproxy
 
-A separate, optional script (`install-dnsproxy.sh`, version **1.1.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53`, adds hardened upstream servers, and points Podkop's DNS at itself.
+A separate, optional script (`install-dnsproxy.sh`, version **1.2.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53`, adds hardened upstream servers, and points Podkop's DNS at itself.
 
-The script prints its own version on completion, as `Версия установщика: 1.1.0`.
+The script prints its own version on completion, as `Версия установщика: 1.2.0`.
 
 ```sh
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
@@ -570,7 +570,7 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 |---|---|
 | `--no-podkop` | Do not modify `/etc/config/podkop`. |
 | `--no-podkop-restart` | Configure Podkop but do not restart it. |
-| `--no-isp-dns` | Do not add the ISP DNS servers to the fallback list. |
+| `--no-isp-dns` | Do not add the ISP DNS servers to the fallback and bootstrap lists. |
 | `--config-only` | Do not install packages, only write the config. |
 | `--release 24.10` | Force the Fantastic Packages branch. |
 | `--arch x86_64` | Force the package architecture. |
@@ -607,7 +607,7 @@ The split matters. `upstream` runs in `parallel` mode: every server is queried a
 
 `fallback` is the last line. Demanding encryption from it defeats its purpose — it exists precisely for the case where the encrypted addresses are unreachable. So it should hold whatever survives blocking: your ISP's own resolvers (the script adds them automatically; `--no-isp-dns` turns that off) and a large local operator. The cost is that those queries leave in plain text.
 
-`bootstrap` is the non-obvious failure point. If it contains only addresses that might themselves become unreachable, the upstreams fail to come up — not because they are blocked, but because nothing can resolve their host names. Append a locally reachable resolver to the **end** of the list: it is only consulted when the earlier ones stay silent, so priorities are unchanged.
+`bootstrap` is the non-obvious failure point. If it contains only addresses that might themselves become unreachable, the upstreams fail to come up — not because they are blocked, but because nothing can resolve their host names. That is why the script appends the ISP resolvers to the **end** of this list as well: they are only consulted when the earlier ones stay silent, so priorities are unchanged.
 
 ### Tuning the servers for your ISP
 

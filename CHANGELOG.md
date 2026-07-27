@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Reworked the default DNS servers in `install-dnsproxy.sh` (installer 1.2.0),
+  after benchmarking 24 public resolvers from the router itself — a throwaway
+  dnsproxy instance per candidate, 10 domains times 3 rounds each, ranked by
+  p90 so that latency and stability count together.
+  - `upstream` is now Cloudflare, ControlD, Quad9 and AdGuard, all DoH.
+    Dropped `tls://unfiltered.adguard-dns.com`, which answered none of its 30
+    queries; `h3://dns.google/dns-query`, the slowest working entry at 232 ms
+    median against 67-100 ms for the rest; and `https://dns.alidns.com`.
+  - `bootstrap` now also receives the ISP resolvers, appended last. It is a
+    hidden failure point: with only remote addresses in it, the upstreams fail
+    to start because nothing can resolve their host names, even though the
+    upstreams themselves are reachable. Being last, they change no priorities.
+  - `223.5.5.5` replaced with `9.9.9.9` in both `bootstrap` and `fallback`.
+  - `fallback` otherwise unchanged, and still deliberately unencrypted: it
+    exists for the case where the encrypted upstreams cannot be reached, so it
+    keeps resolvers that survive blocking.
+  - `--no-isp-dns` now covers `bootstrap` as well as `fallback`.
+- Documented the whole DNS path and the three server lists in both READMEs,
+  with a diagram, so the design is legible before installing rather than after.
+
 ## 3.6.4
 
 - `install-dnsproxy.sh` now supports apk, so it works on OpenWrt 25.12 and
