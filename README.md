@@ -558,7 +558,9 @@ This way a direct request from the router and an external subscription client lo
 
 ## Optional: DNS via dnsproxy
 
-A separate, optional script unrelated to subscriptions themselves. It installs and configures AdGuard dnsproxy on `127.0.0.10:53`, adds hardened upstream servers, and points Podkop's DNS at itself.
+A separate, optional script (`install-dnsproxy.sh`, version **1.1.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53`, adds hardened upstream servers, and points Podkop's DNS at itself.
+
+The script prints its own version on completion, as `Версия установщика: 1.1.0`.
 
 ```sh
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
