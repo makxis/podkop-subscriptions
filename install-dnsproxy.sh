@@ -6,15 +6,15 @@
 #   2. Устанавливает dnsproxy из штатного репозитория OpenWrt.
 #   3. Скачивает подходящий luci-app-dnsproxy из Fantastic Packages.
 #   4. Настраивает dnsproxy на 127.0.0.10:53.
-#   5. Добавляет несколько независимых защищённых upstream-серверов.
-#   6. Добавляет текущие IPv4 DNS-серверы провайдера в fallback.
+#   5. Настраивает три списка серверов: upstream (шифрованные), bootstrap и fallback.
+#   6. Добавляет текущие IPv4 DNS-серверы провайдера в fallback и bootstrap.
 #   7. При наличии Podkop направляет его DNS на 127.0.0.10:53.
 #
 # Повторный запуск безопасен: конфиги предварительно сохраняются в /root.
 
 set -eu
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 LISTEN_ADDR="127.0.0.10"
 LISTEN_PORT="53"
@@ -46,7 +46,7 @@ usage() {
 Параметры:
   --no-podkop          Не изменять /etc/config/podkop.
   --no-podkop-restart  Настроить Podkop, но не перезапускать его.
-  --no-isp-dns         Не добавлять DNS-серверы провайдера в fallback.
+  --no-isp-dns         Не добавлять DNS-серверы провайдера в fallback и bootstrap.
   --config-only        Не устанавливать пакеты, только записать конфиг.
   --release 24.10      Принудительно указать ветку Fantastic Packages.
   --arch x86_64        Принудительно указать архитектуру пакетов.
@@ -316,17 +316,36 @@ if [ "$ADD_ISP_DNS" = "1" ]; then
     collect_isp_dns "$ISP_DNS_FILE"
 fi
 
+# fallback — последняя линия, работает открытым текстом. Требовать здесь
+# шифрования бессмысленно: список нужен ровно тогда, когда шифрованные
+# upstream недоступны, поэтому в нём то, что переживёт блокировки.
 FALLBACK_FILE="$TMP_DIR/fallback.list"
 cat > "$FALLBACK_FILE" <<'EOF'
 8.8.4.4
 1.0.0.1
-223.5.5.5
+9.9.9.9
 94.140.14.140
 77.88.8.8
 EOF
 cat "$ISP_DNS_FILE" >> "$FALLBACK_FILE"
 awk 'NF && !seen[$0]++ { print $0 }' "$FALLBACK_FILE" > "$FALLBACK_FILE.unique"
 mv "$FALLBACK_FILE.unique" "$FALLBACK_FILE"
+
+# bootstrap разрешает доменные имена самих upstream. Если он состоит только
+# из адресов, которые могут стать недоступны, upstream не поднимутся не
+# потому, что заблокированы, а потому что их имена некому разрешить.
+# DNS провайдера дописываются в конец: они опрашиваются, только если
+# предыдущие молчат, поэтому приоритеты не меняются.
+BOOTSTRAP_FILE="$TMP_DIR/bootstrap.list"
+cat > "$BOOTSTRAP_FILE" <<'EOF'
+8.8.4.4
+1.0.0.1
+9.9.9.9
+94.140.14.140
+EOF
+cat "$ISP_DNS_FILE" >> "$BOOTSTRAP_FILE"
+awk 'NF && !seen[$0]++ { print $0 }' "$BOOTSTRAP_FILE" > "$BOOTSTRAP_FILE.unique"
+mv "$BOOTSTRAP_FILE.unique" "$BOOTSTRAP_FILE"
 
 DNSPROXY_CONFIG_TMP="$TMP_DIR/dnsproxy.config"
 cat > "$DNSPROXY_CONFIG_TMP" <<EOF
@@ -362,23 +381,31 @@ config dnsproxy 'private_rdns'
 	list upstream '127.0.0.1:53'
 
 config dnsproxy 'servers'
-	list bootstrap '8.8.4.4'
-	list bootstrap '1.0.0.1'
-	list bootstrap '223.5.5.5'
-	list bootstrap '94.140.14.140'
 EOF
+
+while IFS= read -r dns; do
+    [ -n "$dns" ] || continue
+    printf "\tlist bootstrap '%s'\n" "$dns" >> "$DNSPROXY_CONFIG_TMP"
+done < "$BOOTSTRAP_FILE"
+
+printf '\n' >> "$DNSPROXY_CONFIG_TMP"
 
 while IFS= read -r dns; do
     [ -n "$dns" ] || continue
     printf "\tlist fallback '%s'\n" "$dns" >> "$DNSPROXY_CONFIG_TMP"
 done < "$FALLBACK_FILE"
 
+# upstream — основной путь, только шифрованные резолверы, режим parallel:
+# запрос уходит во все разом, побеждает первый ответ. Четыре независимых
+# оператора взяты намеренно — это отправная точка, а не оптимум: скорость и
+# доступность публичных резолверов сильно зависят от провайдера и страны,
+# поэтому свои стоит проверить (как — описано в README).
 cat >> "$DNSPROXY_CONFIG_TMP" <<'EOF'
 
-	list upstream 'h3://dns.google/dns-query'
 	list upstream 'https://dns.cloudflare.com/dns-query'
-	list upstream 'https://dns.alidns.com/dns-query'
-	list upstream 'tls://unfiltered.adguard-dns.com'
+	list upstream 'https://freedns.controld.com/p0'
+	list upstream 'https://dns.quad9.net/dns-query'
+	list upstream 'https://dns.adguard-dns.com/dns-query'
 
 config dnsproxy 'tls'
 	option enabled '0'
