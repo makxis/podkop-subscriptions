@@ -5,7 +5,10 @@
 "require baseclass";
 
 const LOCAL_LINKS = "/etc/podkop-subscriptions/local-links";
-const PODKOP_SUBSCRIPTIONS_VERSION = "3.6.2";
+// Fallback only, used when the view could not read the installed VERSION file.
+// That file is the source of truth, so this constant cannot silently drift out
+// of sync with releases the way the old hardcoded version did.
+const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.6.5";
 const STATUS_STYLE_PLAIN_CARD_V36 = true;
 
 function hideDuplicatedSubscriptionsTitle() {
@@ -89,7 +92,7 @@ function pollUpdaterResult(attempt, box) {
 }
 
 return baseclass.extend({
-  createSubscriptionsContent: function(section, podkopSections) {
+  createSubscriptionsContent: function(section, podkopSections, version) {
     section.uciconfig = "podkop_subscriptions";
     section.anonymous = true;
     section.addremove = false;
@@ -423,7 +426,8 @@ return baseclass.extend({
     );
     o.rawhtml = true;
     o.cfgvalue = function() {
-      return '<div style="margin-top:8px;color:#888;font-size:11px;line-height:1.3">Podkop Subscriptions v' + PODKOP_SUBSCRIPTIONS_VERSION + '</div>';
+      const v = version || PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK;
+      return '<div style="margin-top:8px;color:#888;font-size:11px;line-height:1.3">Podkop Subscriptions v' + v + '</div>';
     };
   }
 });
