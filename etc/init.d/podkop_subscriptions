@@ -3,8 +3,27 @@
 START=99
 USE_PROCD=1
 
+SUB_CFG=/etc/config/podkop_subscriptions
+PODKOP_CFG=/etc/config/podkop
+UPDATER=/usr/bin/podkop-sub-updater.py
+
+# Delay before the boot catch-up, in seconds. Gives the router time to bring up
+# WAN and sync the clock before the updater tries to reach the subscriptions.
+BOOT_CATCHUP_DELAY=300
+
 start_service() {
-    :
+    # BusyBox crond has no @reboot, so the boot catch-up cannot live in cron:
+    # it rejects the whole line with "parse error at @reboot". procd runs it
+    # here instead, once per service start, and can stop it again.
+    [ -x "$UPDATER" ] || return 0
+    [ -f "$SUB_CFG" ] || return 0
+
+    procd_open_instance catchup
+    procd_set_param command /bin/sh -c \
+        "sleep $BOOT_CATCHUP_DELAY; exec $UPDATER --catch-up --subs $SUB_CFG --config $PODKOP_CFG"
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
 }
 
 reload_service() {

@@ -81,8 +81,10 @@ Save & Apply только сохраняет настройки — ключи �
 
 ```sh
 vi /etc/config/podkop_subscriptions
-uci commit podkop_subscriptions
+uci commit podkop_subscriptions && reload_config
 ```
+
+`reload_config` здесь обязателен: без него расписание сохранится, но в cron не попадёт.
 
 Минимальный рабочий пример есть в разделе [Конфигурация](#конфигурация).
 
@@ -158,7 +160,7 @@ sing-box:        1.12.17; 1.12.22
 - ограничивает количество ключей и отсекает ключи с высоким ping;
 - поддерживает защищённый локальный список ключей;
 - работает через SSH/cron даже без LuCI;
-- автоматически пересобирает cron после любого `uci commit podkop_subscriptions`;
+- пересобирает cron автоматически после Apply в LuCI (и по `reload_config`);
 - догоняет пропущенное обновление после долгого простоя роутера;
 - защищает все пути запуска общим файловым lock.
 
@@ -201,7 +203,7 @@ sing-box:        1.12.17; 1.12.22
 |---|---|
 | `/usr/bin/podkop-sub-updater.py --version` | Версия updater. |
 | `/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop` | Только наблюдение: обновляет `fail_count` по данным Podkop URLTest, конфиг не меняет. Запускается по cron раз в час. |
-| `/usr/bin/podkop-sub-updater.py --catch-up ...` | Обновить подписки, если последнее успешное обновление старше 24 часов. Ставится в cron на `@reboot`. |
+| `/usr/bin/podkop-sub-updater.py --catch-up ...` | Обновить подписки, если последнее успешное обновление старше 24 часов. Запускается из `/etc/init.d/podkop_subscriptions` через 5 минут после загрузки роутера. |
 | `/usr/bin/podkop-sub-updater.py --catch-up-retry ...` | Повторить catch-up, только если предыдущий завершился ошибкой. Ставится в cron на каждые 30 минут. |
 | `/usr/bin/podkop-sub-cron-sync` | Пересобрать строки в `/etc/crontabs/root` по текущему конфигу и вывести получившиеся записи. В норме вызывается автоматически; вручную — только для диагностики или принудительного восстановления. |
 
@@ -245,14 +247,14 @@ sh /tmp/podkop-sub-uninstall.sh --purge-config
 | `/tmp/podkop-sub-updater.log` | Лог последнего ручного запуска (`podkop-sub-run-now` или кнопка в LuCI). |
 | `/tmp/podkop-sub-updater.status` | Машиночитаемый статус ручного запуска для LuCI. |
 | `/tmp/podkop-sub-updater.flock` | Общий lock всех путей запуска updater. |
-| `/etc/init.d/podkop_subscriptions` | procd-триггер: синхронизирует cron после `uci commit podkop_subscriptions`. |
+| `/etc/init.d/podkop_subscriptions` | procd: синхронизирует cron по событию `config.change` и запускает catch-up после загрузки роутера. |
 | `/usr/share/podkop-subscriptions/VERSION` | Установленная версия. |
 
 ---
 
 ## Конфигурация
 
-Всё настраивается в `/etc/config/podkop_subscriptions` — через LuCI или напрямую. После правки через SSH нужен `uci commit podkop_subscriptions`; расписание синхронизируется с cron автоматически.
+Всё настраивается в `/etc/config/podkop_subscriptions` — через LuCI или напрямую. После правки через SSH нужен `uci commit podkop_subscriptions && reload_config` — один только commit cron не пересобирает, подробности в разделе [Автообновление и cron](#автообновление-и-cron).
 
 Минимальный рабочий конфиг:
 
@@ -460,19 +462,30 @@ server.example.com:8443    ← оба сохраняются
 автообновление: не задано     — расписаний в конфиге нет
 ```
 
-Синхронизация выполняется двумя независимыми путями, вручную её запускать не нужно:
+Синхронизация выполняется двумя путями:
 
 - LuCI вызывает `/usr/bin/podkop-sub-cron-sync` сразу после успешного Save / Save & Apply;
-- procd-триггер `/etc/init.d/podkop_subscriptions` делает то же самое после любого `uci commit podkop_subscriptions` — из LuCI, из SSH или из стороннего скрипта.
+- procd-триггер `/etc/init.d/podkop_subscriptions` делает то же самое по системному событию `config.change`.
+
+**Важно при правке через SSH.** Событие `config.change` посылает не `uci commit`, а `reload_config` — его вызывает кнопка Apply в LuCI. Голый `uci commit podkop_subscriptions` из консоли триггер не поднимает, и cron останется со старым расписанием. Поэтому после ручной правки конфига добавьте одну команду:
+
+```sh
+uci commit podkop_subscriptions && reload_config
+```
+
+Либо синхронизируйте cron напрямую:
+
+```sh
+/usr/bin/podkop-sub-cron-sync
+```
 
 `podkop-sub-cron-sync` идемпотентен и использует атомарный `fcntl.flock` ядра, поэтому повторные и одновременные вызовы безопасны.
 
-Помимо строк из `subscription_schedule` скрипт создаёт три служебные записи:
+Помимо строк из `subscription_schedule` скрипт создаёт две служебные записи:
 
 ```text
 0 * * * *    --observe-only     # ежечасный сбор fail_count
-@reboot      --catch-up         # через 5 минут после старта роутера
-*/30 * * * * --catch-up-retry    # повтор, если catch-up не удался
+*/30 * * * * --catch-up-retry   # повтор, если catch-up не удался
 ```
 
 Проверить, что всё на месте:
@@ -488,6 +501,14 @@ Cron не выполняет задания, пропущенные во вре�
 - через 5 минут после загрузки проверяется возраст последнего успешного обновления;
 - если прошло больше 24 часов — подписки обновляются;
 - если не вышло — повтор каждые 30 минут до успеха.
+
+Запуск после загрузки живёт **не в cron**, а в `/etc/init.d/podkop_subscriptions`: BusyBox crond не поддерживает `@reboot` и отвергает такую строку целиком с `parse error at @reboot`. Вместо этого init-скрипт поднимает procd-инстанс `catchup`, который выжидает 5 минут и один раз запускает updater с `--catch-up`. Посмотреть его состояние:
+
+```sh
+ubus call service list | grep -A 6 podkop_subscriptions
+```
+
+Задержку можно изменить переменной `BOOT_CATCHUP_DELAY` в начале init-скрипта.
 
 ---
 

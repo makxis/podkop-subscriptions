@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Moved the post-boot catch-up out of cron. BusyBox crond does not support
+  `@reboot` and rejected the whole entry with `parse error at @reboot`, logging
+  it on every crontab reload, so the boot catch-up never ran on OpenWrt. It now
+  runs as a procd instance from `/etc/init.d/podkop_subscriptions`, with the
+  delay configurable via `BOOT_CATCHUP_DELAY`.
+- Fixed `install-dnsproxy.sh` writing an unparseable `/etc/config/dnsproxy`:
+  a heredoc used literal `\t` sequences for indentation, so every option line
+  began with a backslash and uci refused the file, leaving dnsproxy unable to
+  start. Also moved the dnsproxy config backup to after package installation,
+  so the rollback paths have something to restore on a fresh router.
+- Documentation: corrected the claim that any `uci commit podkop_subscriptions`
+  resynchronizes cron. The procd trigger fires on the `config.change` event,
+  which `reload_config` emits (as LuCI's Apply does); a bare `uci commit` from
+  the console does not.
+
 ## 3.6.2
 
 - Fixed LuCI schedule changes not reaching `/etc/crontabs/root`: the JS form now runs `podkop-sub-cron-sync` through the real `Map.save()` path.
