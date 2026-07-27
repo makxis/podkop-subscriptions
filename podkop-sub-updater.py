@@ -28,13 +28,30 @@ VALID_PROTOCOLS = ('vless://', 'ss://', 'trojan://', 'socks4://', 'socks4a://', 
 VALID_PTYPES = {'urltest', 'selector'}
 VALID_ON_EMPTY = {'all', 'skip'}
 VALID_MATCH_MODES = {'ifmatch', 'ifnotmatch'}
-STATE_PATH_DEFAULT = '/etc/podkop-subscriptions/state.json'
+DATA_DIR_DEFAULT = '/etc/podkop-subscriptions'
+STATE_PATH_DEFAULT = DATA_DIR_DEFAULT + '/state.json'
 SUBSCRIPTIONS_CONFIG_DEFAULT = '/etc/config/podkop_subscriptions'
-LOCAL_LINKS_PATH_DEFAULT = '/etc/config/podkop-local-links'
+LOCAL_LINKS_PATH_DEFAULT = DATA_DIR_DEFAULT + '/local-links'
+# Pre-3.6.3 location. /etc/config is parsed by uci, and a plain list of proxy
+# links is not valid uci syntax, so every uci call and every reload_config
+# reported a parse error on it. Kept readable so an upgrade cannot lose links
+# that were never migrated.
+LOCAL_LINKS_PATH_LEGACY = '/etc/config/podkop-local-links'
+
+
+def local_links_path():
+    if os.path.exists(LOCAL_LINKS_PATH_DEFAULT):
+        return LOCAL_LINKS_PATH_DEFAULT
+    if os.path.exists(LOCAL_LINKS_PATH_LEGACY):
+        return LOCAL_LINKS_PATH_LEGACY
+    return LOCAL_LINKS_PATH_DEFAULT
 
 
 def is_local_links_source(source):
-    return source in (LOCAL_LINKS_PATH_DEFAULT, 'file://' + LOCAL_LINKS_PATH_DEFAULT)
+    for path in (LOCAL_LINKS_PATH_DEFAULT, LOCAL_LINKS_PATH_LEGACY):
+        if source in (path, 'file://' + path):
+            return True
+    return False
 DELETE_AFTER_FAIL_COUNT_DEFAULT = 72
 MIN_KEEP_PER_SECTION_DEFAULT = 1
 SOURCE_TIMEOUT_DEFAULT = 45
@@ -593,8 +610,8 @@ def load_jobs_from_uci_podkop(config_path):
             continue
         sec_name = opt.get('target_section', g['name']).strip().lower()
         sources = list(lists.get('source', []))
-        if is_enabled_value(opt.get('use_local_links', '0')) and LOCAL_LINKS_PATH_DEFAULT not in sources and ('file://' + LOCAL_LINKS_PATH_DEFAULT) not in sources:
-            sources.append('file://' + LOCAL_LINKS_PATH_DEFAULT)
+        if is_enabled_value(opt.get('use_local_links', '0')) and not any(is_local_links_source(s) for s in sources):
+            sources.append('file://' + local_links_path())
         regex_pattern = opt.get('regex', '').strip()
         match_mode = opt.get('match_mode', 'ifnotmatch').strip().lower()
         ptype = opt.get('proxy_type', 'urltest').strip().lower()
@@ -811,13 +828,15 @@ def extract_links_from_payload(payload):
 
 
 
-def load_local_protected_ids(path=LOCAL_LINKS_PATH_DEFAULT):
+def load_local_protected_ids(path=None):
     """Return stable_id set for user-managed local links.
 
-    Links from /etc/config/podkop-local-links are treated as manually managed.
-    They may be added by the subscription updater, but must not be removed by
-    automatic cleanup even if fail_count reaches the deletion threshold.
+    Links from the local list are treated as manually managed. They may be
+    added by the subscription updater, but must not be removed by automatic
+    cleanup even if fail_count reaches the deletion threshold.
     """
+    if path is None:
+        path = local_links_path()
     protected = set()
     if not path or not os.path.exists(path):
         return protected
@@ -2919,8 +2938,12 @@ def main():
             log("INFO", "После сборки изменений в конфиге не обнаружено. Перезапуск не требуется.")
             return
         try:
-            backup_path = f"{args.config}.podkop-subscriptions.bak"
+            # Keep the backup out of /etc/config: uci parses every file there,
+            # and a copy of podkop's config under a .bak name is not valid uci.
+            backup_dir = os.path.dirname(args.state) or DATA_DIR_DEFAULT
+            backup_path = os.path.join(backup_dir, os.path.basename(args.config) + '.bak')
             try:
+                os.makedirs(backup_dir, exist_ok=True)
                 with open(backup_path, 'w', encoding='utf-8') as f:
                     f.write(old_content)
             except Exception as e:

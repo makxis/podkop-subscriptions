@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.6.2"
+APP_VERSION="3.6.3"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
@@ -11,7 +11,9 @@ CONFIG_MODE="ask"
 
 SUB_CFG="/etc/config/podkop_subscriptions"
 PODKOP_CFG="/etc/config/podkop"
-LOCAL_LINKS="/etc/config/podkop-local-links"
+DATA_DIR="/etc/podkop-subscriptions"
+LOCAL_LINKS="$DATA_DIR/local-links"
+LOCAL_LINKS_LEGACY="/etc/config/podkop-local-links"
 
 SCRIPT_PATH="$0"
 case "$SCRIPT_PATH" in
@@ -282,6 +284,30 @@ cleanup_old_cron_lines() {
   mv "$tmp" "$cron_file"
 }
 
+# Everything under /etc/config is parsed by uci. A plain list of proxy links
+# and a copy of podkop's config are not valid uci syntax, so uci reported a
+# parse error on them for every call, and reload_config failed outright with
+# "uci: Invalid argument". Both now live in $DATA_DIR.
+migrate_out_of_uci_dir() {
+  mkdir -p "$DATA_DIR"
+
+  if [ -f "$LOCAL_LINKS_LEGACY" ]; then
+    if [ -s "$LOCAL_LINKS" ]; then
+      warn "$LOCAL_LINKS already has content; leaving $LOCAL_LINKS_LEGACY in place for manual merge"
+    else
+      mv -f "$LOCAL_LINKS_LEGACY" "$LOCAL_LINKS" && \
+        say "Moved local links out of the uci directory: $LOCAL_LINKS_LEGACY -> $LOCAL_LINKS"
+      chmod 0600 "$LOCAL_LINKS" 2>/dev/null || true
+    fi
+  fi
+
+  for stale in /etc/config/podkop.podkop-subscriptions.bak /etc/config/podkop-subs; do
+    [ -f "$stale" ] || continue
+    mv -f "$stale" "$DATA_DIR/$(basename "$stale")" && \
+      say "Moved $stale out of the uci directory"
+  done
+}
+
 prepare_upgrade_from_legacy() {
   create_upgrade_backup
   migrate_legacy_config_from_podkop
@@ -290,7 +316,7 @@ prepare_upgrade_from_legacy() {
   cleanup_old_luci_leftovers
 
   # Preserve user local links and state:
-  #   /etc/config/podkop-local-links
+  #   /etc/podkop-subscriptions/local-links
   #   /etc/podkop-subscriptions/state.json
   mkdir -p /etc/podkop-subscriptions
 }
@@ -318,7 +344,7 @@ config subscription_group 'main'
     # list source 'https://example.com/subscription-1'
     # list source 'https://example.com/subscription-2'
 
-    # Локальный список ручных ключей: /etc/config/podkop-local-links
+    # Локальный список ручных ключей: /etc/podkop-subscriptions/local-links
     # 1 — использовать, 0 — не использовать.
     option use_local_links '0'
 
@@ -475,9 +501,12 @@ install_core() {
   fi
   chmod 0755 /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now /usr/bin/podkop-sub-clean-temp
   chmod 0755 /etc/init.d/podkop_subscriptions
+  # Backup first, migrate second: create_upgrade_backup still archives the
+  # legacy paths, so an interrupted migration can be recovered from it.
+  prepare_upgrade_from_legacy
+  migrate_out_of_uci_dir
   touch "$LOCAL_LINKS"
   chmod 0600 "$LOCAL_LINKS" || true
-  prepare_upgrade_from_legacy
   write_default_config
   /etc/init.d/podkop_subscriptions enable >/dev/null 2>&1 || true
   /etc/init.d/podkop_subscriptions restart >/dev/null 2>&1 || /etc/init.d/podkop_subscriptions start >/dev/null 2>&1 || true
