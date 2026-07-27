@@ -560,7 +560,9 @@ X-App-Version:   5.23.74
 
 ## Дополнительно: DNS через dnsproxy
 
-Отдельный необязательный скрипт, к подпискам прямого отношения не имеющий. Ставит и настраивает AdGuard dnsproxy на `127.0.0.10:53`, добавляет защищённые upstream-серверы, а DNS Podkop направляет на себя.
+Отдельный необязательный скрипт (`install-dnsproxy.sh`, версия **1.1.0**), к подпискам прямого отношения не имеющий. У него своя нумерация, не связанная с версией Podkop Subscriptions. Ставит и настраивает AdGuard dnsproxy на `127.0.0.10:53`, добавляет защищённые upstream-серверы, а DNS Podkop направляет на себя.
+
+Установленную версию печатает сам скрипт в конце работы, строкой `Версия установщика: 1.1.0`.
 
 ```sh
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
