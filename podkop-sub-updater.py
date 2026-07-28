@@ -16,7 +16,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.6.5"
+APP_VERSION_FALLBACK = "3.6.6"
 
 
 def app_version():
