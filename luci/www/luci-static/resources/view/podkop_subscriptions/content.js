@@ -8,7 +8,7 @@ const LOCAL_LINKS = "/etc/podkop-subscriptions/local-links";
 // Fallback only, used when the view could not read the installed VERSION file.
 // That file is the source of truth, so this constant cannot silently drift out
 // of sync with releases the way the old hardcoded version did.
-const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.6.5";
+const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.6.6";
 const STATUS_STYLE_PLAIN_CARD_V36 = true;
 
 function hideDuplicatedSubscriptionsTitle() {
@@ -44,9 +44,22 @@ function execOutputText(res) {
   return out;
 }
 
+// Log follow tuning. Every fs.exec is an rpcd call wrapped in an XHR that LuCI
+// aborts after L.env.rpctimeout (20s by default), and the updater restarts
+// podkop halfway through, which stalls ubus and the browser connection for a
+// while. So a failed poll is expected noise, not the end of the run: retry
+// slower instead of giving up, and keep each poll cheap by asking only for the
+// bytes appended since the previous one.
+const TAIL_POLL_MS = 1500;
+const TAIL_ERROR_POLL_MS = 4000;
+const TAIL_MAX_ERRORS = 30;
+const TAIL_MAX_CHARS = 400000;
+const TAIL_MAX_DURATION_MS = 45 * 60 * 1000;
+const TAIL_GRACE_POLLS = 4;
+
 function makeLogBox(text) {
   const box = E("pre", {
-    style: "white-space: pre-wrap; max-height: 620px; overflow: auto"
+    style: "white-space: pre-wrap; max-height: 620px; overflow: auto; font-family: monospace"
   }, text || "");
   ui.addNotification(null, box);
   return box;
@@ -56,13 +69,14 @@ function setLogBox(box, text) {
   if (!box)
     return;
 
-  box.textContent = text || _("Нет вывода updater");
-  box.scrollTop = box.scrollHeight;
-}
+  // Stick to the bottom only while the user is already there, so scrolling up
+  // to read something does not fight with the incoming output.
+  const stick = (box.scrollHeight - box.scrollTop - box.clientHeight) < 24;
 
-function notifyOutput(title, res) {
-  const out = execOutputText(res);
-  return makeLogBox(out || title);
+  box.textContent = text || _("Нет вывода updater");
+
+  if (stick)
+    box.scrollTop = box.scrollHeight;
 }
 
 function delayMs(ms) {
@@ -71,23 +85,151 @@ function delayMs(ms) {
   });
 }
 
-function pollUpdaterResult(attempt, box) {
-  return fs.exec("/usr/bin/podkop-sub-run-now", ["--status"]).then(function(res) {
-    const out = execOutputText(res);
-    setLogBox(box, out);
+// podkop-sub-run-now --tail answers with KEY=VALUE headers, a BEGIN line, and
+// then the raw log bytes, which may contain anything at all.
+function parseTailChunk(res) {
+  const raw = (res && res.stdout) || "";
+  const marker = "BEGIN\n";
+  const idx = raw.indexOf("\n" + marker);
 
-    if (out.indexOf("STATE=running") !== -1 && attempt < 240)
-      return delayMs(3000).then(function() {
-        return pollUpdaterResult(attempt + 1, box);
+  let head, body;
+
+  if (raw.indexOf(marker) === 0) {
+    head = "";
+    body = raw.slice(marker.length);
+  } else if (idx !== -1) {
+    head = raw.slice(0, idx + 1);
+    body = raw.slice(idx + 1 + marker.length);
+  } else {
+    head = raw;
+    body = "";
+  }
+
+  const info = {
+    offset: null,
+    state: null,
+    reset: false,
+    skipped: false,
+    exit: null,
+    body: body
+  };
+
+  head.split("\n").forEach(function(line) {
+    const eq = line.indexOf("=");
+    if (eq < 1)
+      return;
+
+    const key = line.slice(0, eq);
+    const value = line.slice(eq + 1);
+
+    if (key === "OFFSET") {
+      const n = parseInt(value, 10);
+      info.offset = isNaN(n) ? null : n;
+    } else if (key === "STATE") {
+      info.state = value;
+    } else if (key === "RESET") {
+      info.reset = true;
+    } else if (key === "SKIPPED") {
+      info.skipped = true;
+    } else if (key === "EXIT") {
+      info.exit = value;
+    }
+  });
+
+  return info;
+}
+
+function renderLog(state) {
+  return state.header + state.text;
+}
+
+function newFollowState() {
+  return {
+    offset: 0,
+    header: "",
+    text: "",
+    errors: 0,
+    grace: 0,
+    sawRunning: false,
+    skippedNoted: false,
+    startError: null,
+    started: Date.now()
+  };
+}
+
+function followUpdaterLog(box, state) {
+  return new Promise(function(resolve) {
+    function finish(extra) {
+      if (extra)
+        state.text += extra;
+
+      setLogBox(box, renderLog(state));
+      resolve(renderLog(state));
+    }
+
+    function step() {
+      if (Date.now() - state.started > TAIL_MAX_DURATION_MS)
+        return finish("\n" + _("[слежение за логом остановлено по таймауту]") + "\n");
+
+      fs.exec("/usr/bin/podkop-sub-run-now", ["--tail", String(state.offset)]).then(function(res) {
+        const info = parseTailChunk(res);
+
+        state.errors = 0;
+
+        // The log is truncated when a run starts, so everything collected so
+        // far belongs to a previous run and has to go.
+        if (info.reset) {
+          state.text = "";
+          state.skippedNoted = false;
+        }
+
+        if (info.skipped && !state.skippedNoted) {
+          state.text += _("[начало лога пропущено, показан только хвост]") + "\n";
+          state.skippedNoted = true;
+        }
+
+        if (info.offset !== null)
+          state.offset = info.offset;
+
+        if (info.body)
+          state.text += info.body;
+
+        if (state.text.length > TAIL_MAX_CHARS)
+          state.text = state.text.slice(state.text.length - TAIL_MAX_CHARS);
+
+        setLogBox(box, renderLog(state) || _("Ожидание вывода updater..."));
+
+        if (info.state === "running") {
+          state.sawRunning = true;
+          return delayMs(TAIL_POLL_MS).then(step);
+        }
+
+        // "idle" means no log at all, and a "finished" seen before the run was
+        // ever observed running may still be the previous run's leftovers.
+        // Give the launcher a few polls to catch up before drawing conclusions.
+        const unsure = (info.state === "idle") || (state.startError && !state.sawRunning);
+
+        if (unsure && state.grace < TAIL_GRACE_POLLS) {
+          state.grace++;
+          return delayMs(TAIL_POLL_MS).then(step);
+        }
+
+        if (info.state === "idle")
+          return finish("\n" + _("Updater не запускался: лог пуст.") + "\n");
+
+        const code = (info.exit === null || info.exit === "") ? "?" : info.exit;
+        return finish("\n[" + _("updater завершён") + ", exit=" + code + "]\n");
+      }).catch(function(err) {
+        state.errors++;
+
+        if (state.errors > TAIL_MAX_ERRORS)
+          return finish("\n" + _("Слежение за логом прервано") + ": " + String(err) + "\n");
+
+        delayMs(TAIL_ERROR_POLL_MS).then(step);
       });
+    }
 
-    return out;
-  }).catch(function(err) {
-    const msg = String(err);
-    if (box)
-      setLogBox(box, msg);
-    else
-      ui.addNotification(null, E("pre", { style: "white-space: pre-wrap" }, msg), "danger");
+    step();
   });
 }
 
@@ -404,18 +546,30 @@ return baseclass.extend({
       form.Button,
       "_run_now",
       _("Запустить обновление сейчас"),
-      _("Сначала нажмите Save & Apply. Кнопка запускает updater в фоне, затем LuCI покажет результат последнего запуска.")
+      _("Сначала нажмите Save & Apply. Кнопка запускает updater в фоне, а лог показывается вживую, по мере появления строк.")
     );
     o.inputtitle = _("Запустить updater");
     o.inputstyle = "reload";
     o.onclick = function() {
+      const box = makeLogBox(_("Запуск updater..."));
+      const state = newFollowState();
+
       return fs.exec("/usr/bin/podkop-sub-run-now", []).then(function(res) {
-        const box = notifyOutput("Updater started", res);
-        return delayMs(1000).then(function() {
-          return pollUpdaterResult(0, box);
-        });
+        const out = execOutputText(res).trim();
+        if (out)
+          state.header = out + "\n\n";
       }).catch(function(err) {
-        ui.addNotification(null, E("pre", { style: "white-space: pre-wrap" }, String(err)), "danger");
+        // The launcher forks and returns immediately, so a failure here is
+        // almost always the router being too busy to answer within the XHR
+        // timeout rather than the updater failing to start. Record it and let
+        // the log itself say what really happened.
+        state.startError = String(err);
+        state.header = _("Запрос на запуск не получил ответа") + ": " + state.startError + "\n\n";
+      }).then(function() {
+        setLogBox(box, renderLog(state) || _("Запуск updater..."));
+        return delayMs(400);
+      }).then(function() {
+        return followUpdaterLog(box, state);
       });
     };
 

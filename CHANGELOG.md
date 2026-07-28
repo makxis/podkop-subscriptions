@@ -1,5 +1,43 @@
 # Changelog
 
+## 3.6.6
+
+- The manual updater run in LuCI now streams its log live instead of replacing
+  the whole output every few seconds. `podkop-sub-run-now` gained a `--tail
+  <offset>` mode that answers with `OFFSET`/`STATE` headers, a `BEGIN` line and
+  only the bytes appended since the caller's offset, so the view appends to a
+  `<pre>` roughly once per 1.5 s and reads like a terminal. It replaces a poll
+  that shipped `tail -n 260` every three seconds — the whole tail, re-rendered
+  from scratch, forking `sh` and `tail` on a router already saturated by the
+  update itself.
+  - `OFFSET` counts bytes actually handed out, not the file size sampled at the
+    start of the call. Against a growing log the two differ, and the difference
+    is duplicated or dropped output.
+  - While the run is live only complete lines are sent. A chunk cut mid-line
+    can also fall inside a UTF-8 sequence, which would leave rpcd marshalling
+    invalid UTF-8 into its JSON reply; the trailing partial line is flushed
+    once the run is over and nothing more is coming.
+  - `RESET=1` tells the view that the log was truncated and a new run owns the
+    file, `SKIPPED=1` that following started from an already large log and only
+    the last 256 KB was sent, `EXIT=N` reports the exit code on completion.
+  - `tail -c +N` is probed at runtime, since not every BusyBox build has it,
+    with `dd` as the fallback.
+- Fixed the manual run reporting `Error: XHR request timed out` at the top of
+  the page. Every `fs.exec` is an rpcd call inside an XHR that LuCI aborts
+  after `rpctimeout` (20 s by default), and the updater restarts podkop halfway
+  through, which stalls ubus and the browser connection well past that. A
+  failed poll is therefore expected noise, not the end of the run: the view now
+  retries from the same offset after 4 s, up to 30 consecutive failures, rather
+  than tearing down the loop on the first one and leaving the run invisible
+  even though it finished normally. A timeout on the launch call is treated the
+  same way — the script forks and returns immediately, so a slow answer means a
+  busy router, and the state of the log decides what actually happened.
+- The background run now exports `PYTHONUNBUFFERED=1`. The log is a file, so
+  python was block-buffering `print()` in 4 KB chunks and the live tail would
+  have arrived in bursts instead of line by line.
+- The log box keeps its scroll position when the user scrolls up to read
+  something, and follows the tail again only from the bottom.
+
 ## 3.6.5
 
 - Reworked the default DNS servers in `install-dnsproxy.sh` (installer 1.2.0),

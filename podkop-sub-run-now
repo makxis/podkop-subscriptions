@@ -8,9 +8,107 @@ LOCK="/tmp/podkop-sub-updater.lock"
 LOG="/tmp/podkop-sub-updater.log"
 STATUS="/tmp/podkop-sub-updater.status"
 
+# When the caller starts following from scratch and the log is already large,
+# only the last chunk is sent. LuCI wants the live tail, not the whole history.
+TAIL_MAX_FIRST=262144
+
+log_size() {
+  [ -f "$LOG" ] || { echo 0; return; }
+  wc -c < "$LOG" 2>/dev/null | tr -cd '0-9'
+}
+
+updater_state() {
+  if [ -d "$LOCK" ]; then
+    echo "running"
+  elif [ -f "$LOG" ]; then
+    echo "finished"
+  else
+    echo "idle"
+  fi
+}
+
+# BusyBox tail understands "-c +N" (start at byte N), but not every build does,
+# so the slow dd path stays available as a fallback.
+tail_from_byte() {
+  offset="$1"
+  count="$2"
+
+  if [ "$(printf 'ab' | tail -c '+2' 2>/dev/null)" = "b" ]; then
+    tail -c "+$((offset + 1))" "$LOG" 2>/dev/null | head -c "$count"
+  else
+    dd if="$LOG" bs=1 skip="$offset" count="$count" 2>/dev/null
+  fi
+}
+
 case "$1" in
   --version)
     echo "podkop-subscriptions $VERSION"
+    exit 0
+    ;;
+  --tail)
+    # Incremental log follow for LuCI: the caller passes the byte offset it has
+    # already consumed and gets back only what was appended since then.
+    offset="${2:-0}"
+    case "$offset" in
+      ''|*[!0-9]*) offset=0 ;;
+    esac
+
+    size="$(log_size)"
+    [ -n "$size" ] || size=0
+
+    reset=0
+    skipped=0
+
+    # The log is truncated at the start of every run, so a shrinking file means
+    # the caller is following a log that no longer exists.
+    if [ "$size" -lt "$offset" ]; then
+      offset=0
+      reset=1
+    fi
+
+    if [ "$offset" -eq 0 ] && [ "$size" -gt "$TAIL_MAX_FIRST" ]; then
+      offset=$((size - TAIL_MAX_FIRST))
+      skipped=1
+    fi
+
+    state="$(updater_state)"
+
+    chunk=$((size - offset))
+    emitted=0
+    tmp=""
+
+    if [ "$chunk" -gt 0 ]; then
+      tmp="/tmp/podkop-sub-updater.chunk.$$"
+      trap 'rm -f "$tmp"' EXIT INT TERM
+      tail_from_byte "$offset" "$chunk" > "$tmp" 2>/dev/null
+
+      emitted="$(wc -c < "$tmp" 2>/dev/null | tr -cd '0-9')"
+      [ -n "$emitted" ] || emitted=0
+
+      # While the run is live, hand out whole lines only. A chunk cut mid-line
+      # can also land inside a UTF-8 sequence, and rpcd would then have to put
+      # invalid UTF-8 into its JSON reply. Nothing more is coming once the run
+      # is over, so a trailing partial line is flushed as is.
+      if [ "$state" = "running" ] && [ "$emitted" -gt 0 ] &&
+         [ -n "$(tail -c 1 "$tmp" 2>/dev/null)" ]; then
+        partial="$(tail -n 1 "$tmp" 2>/dev/null | wc -c | tr -cd '0-9')"
+        [ -n "$partial" ] || partial=0
+        [ "$partial" -le "$emitted" ] && emitted=$((emitted - partial))
+      fi
+    fi
+
+    echo "OFFSET=$((offset + emitted))"
+    echo "STATE=$state"
+    [ "$reset" = 1 ] && echo "RESET=1"
+    [ "$skipped" = 1 ] && echo "SKIPPED=1"
+    if [ "$state" = "finished" ] && [ -f "$STATUS" ]; then
+      exit_code="$(sed -n 's/^Exit: *//p' "$STATUS" 2>/dev/null | head -n 1)"
+      [ -n "$exit_code" ] && echo "EXIT=$exit_code"
+    fi
+    echo "BEGIN"
+
+    [ "$emitted" -gt 0 ] && head -c "$emitted" "$tmp"
+    [ -n "$tmp" ] && rm -f "$tmp"
     exit 0
     ;;
   --status)
@@ -53,6 +151,11 @@ if mkdir "$LOCK" 2>/dev/null; then
   (
     rc="0"
     trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
+    # The log is a file, so python would block-buffer print() in 4K chunks and
+    # the LuCI tail would arrive in bursts instead of line by line.
+    PYTHONUNBUFFERED=1
+    export PYTHONUNBUFFERED
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Manual updater started, podkop-subscriptions $VERSION"
     /usr/bin/podkop-sub-updater.py --subs /etc/config/podkop_subscriptions --config /etc/config/podkop --force
