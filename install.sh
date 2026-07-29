@@ -577,6 +577,54 @@ PY
 }
 
 
+# LuCI loads a view as <base_url>/view/<path>.js?v=<luci-base version>, and it
+# takes that query string from the <script> tag of luci.js itself. The version
+# therefore does not change when this app is upgraded, so the browser keeps
+# executing the script it cached before the upgrade. That already cost a
+# debugging session: current files on the router, stale code in the browser.
+#
+# So the view files are installed under names carrying our own version, and
+# menu.d plus the internal require are rewritten to match. The URL itself
+# changes and the cache stops mattering. A short checksum of the content is
+# appended to the version because during development the same version number is
+# reinstalled many times, and without it such a reinstall would keep the old URL.
+panel_asset_tag() {
+  ver="$(printf '%s' "$APP_VERSION" | sed 's/[^A-Za-z0-9]/_/g')"
+  sum="$(cat "$1" "$2" 2>/dev/null | md5sum 2>/dev/null | cut -c1-8)"
+
+  if [ -n "$sum" ]; then
+    printf 'v%s_%s' "$ver" "$sum"
+  else
+    printf 'v%s' "$ver"
+  fi
+}
+
+set_panel_menu_path() {
+  menu_file="/usr/share/luci/menu.d/luci-app-podkop-subscriptions.json"
+  [ -f "$menu_file" ] || return 0
+
+  python3 - "$menu_file" "$1" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+tag = sys.argv[2]
+
+with open(path, 'r', encoding='utf-8', errors='replace') as f:
+    data = json.load(f)
+
+entry = data.get('admin/services/podkop-subscriptions')
+action = entry.get('action') if isinstance(entry, dict) else None
+
+if isinstance(action, dict) and action.get('type') == 'view':
+    action['path'] = 'podkop_subscriptions/subscriptions-%s' % tag
+
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+PY
+}
+
 hide_panel_menu_entry() {
   menu_file="/usr/share/luci/menu.d/luci-app-podkop-subscriptions.json"
   [ -f "$menu_file" ] || return 0
@@ -616,9 +664,35 @@ install_panel() {
 
   detach_old_embedded_panel
 
-  install_file "luci/www/luci-static/resources/view/podkop_subscriptions/content.js" /www/luci-static/resources/view/podkop_subscriptions/content.js
-  install_file "luci/www/luci-static/resources/view/podkop_subscriptions/subscriptions.js" /www/luci-static/resources/view/podkop_subscriptions/subscriptions.js
+  view_dir="/www/luci-static/resources/view/podkop_subscriptions"
+  stage="/tmp/podkop-sub-panel.$$"
+  rm -rf "$stage"
+  mkdir -p "$stage" "$view_dir"
+
+  install_file "luci/www/luci-static/resources/view/podkop_subscriptions/content.js" "$stage/content.js"
+  install_file "luci/www/luci-static/resources/view/podkop_subscriptions/subscriptions.js" "$stage/subscriptions.js"
+
+  view_tag="$(panel_asset_tag "$stage/content.js" "$stage/subscriptions.js")"
+
+  # content.js is required from subscriptions.js, so it needs a versioned name
+  # too: otherwise a fresh subscriptions.js would pull the cached content.js.
+  sed "s|view\.podkop_subscriptions\.content|view.podkop_subscriptions.content-$view_tag|g" \
+    "$stage/subscriptions.js" > "$view_dir/subscriptions-$view_tag.js"
+  cp -f "$stage/content.js" "$view_dir/content-$view_tag.js"
+  rm -rf "$stage"
+
+  # Files from previous versions are dead weight: the page is always entered
+  # through the path in menu.d, and that path points at the current tag.
+  for old in "$view_dir"/content-*.js "$view_dir"/subscriptions-*.js; do
+    [ -f "$old" ] || continue
+    [ "$old" = "$view_dir/content-$view_tag.js" ] && continue
+    [ "$old" = "$view_dir/subscriptions-$view_tag.js" ] && continue
+    rm -f "$old"
+  done
+  rm -f "$view_dir/content.js" "$view_dir/subscriptions.js"
+
   install_file "luci/usr/share/luci/menu.d/luci-app-podkop-subscriptions.json" /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json
+  set_panel_menu_path "$view_tag"
   if [ "$PANEL_MODE" = "hidden" ]; then
     hide_panel_menu_entry
   fi
