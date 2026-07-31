@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- The LuCI view is installed under a versioned file name, so a browser cannot
+  keep executing the previously cached copy. LuCI derives the `?v=` on every
+  module URL from the version of luci-base itself, and that does not change
+  when this app is upgraded. `install.sh` now writes `content-<tag>.js` and
+  `subscriptions-<tag>.js`, rewrites the require between them and the path in
+  `menu.d`, and drops the files of earlier versions. The tag is the app version
+  plus a short checksum of the content, because the same version is reinstalled
+  many times during development and the version alone would keep the old URL.
+- `install-dnsproxy.sh` (installer 1.3.0) no longer lets the optional web
+  interface abort the installation. `luci-app-dnsproxy` was installed right
+  after dnsproxy itself, before `/etc/config/dnsproxy` was written, so a
+  missing architecture directory in Fantastic Packages left the router with the
+  package installed and nothing configured.
+  - The LuCI step now runs last, after DNS is configured, verified and Podkop
+    is pointed at it, and every failure inside it is a warning rather than a
+    fatal error. `--no-luci` skips it entirely.
+  - x86 targets additionally try the `x86_64` directory of Fantastic Packages.
+    `x86/legacy` builds package for `i386_pentium-mmx`, no directory of that
+    name exists there, and `luci-app-dnsproxy` is architecture independent
+    (`_all.ipk`) anyway. `PACKAGE_ARCH_OVERRIDE` is renamed to
+    `LUCI_REPOSITORY_ARCH_OVERRIDE`: `--arch` only ever selected the directory
+    the LuCI package is taken from, never the architecture of dnsproxy.
+  - `index.json` is read as `@.packages["<name>"]`. The index keeps versions
+    inside a `packages` object, not at the top level, and the result of
+    `jsonfilter` is now tested for content: it exits successfully on a miss.
+  - The package lists are not refreshed when dnsproxy is already installed, and
+    a failed refresh is a warning instead of a fatal error. A re-run used to
+    stop at `opkg update завершился с ошибкой` over a single unreachable feed.
+
 ## 3.6.6
 
 - The manual updater run in LuCI now streams its log live instead of replacing
