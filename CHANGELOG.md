@@ -36,6 +36,23 @@
     restores the previous behaviour. The address is written without a port:
     a udp resolver is queried on 53 anyway, and Podkop's diagnostics report an
     error when the field carries one.
+  - The run now ends with a verification of the final state, and rolls
+    everything back when it fails. DNS is the one thing whose breakage takes
+    away the means of fixing anything else, so a half-applied install is not an
+    acceptable outcome: dnsproxy must answer on its own address, and ordinary
+    name resolution on the router must still work — the latter only when it
+    worked before the run, so that a WAN that is already down does not look
+    like damage.
+    - The rollback is a generated `rollback.sh`, written into the backup
+      directory before the first change, with every value already substituted:
+      the previous dnsproxy config, Podkop's previous `dns_type`/`dns_server`,
+      and whether dnsproxy was installed and enabled to begin with. It cannot
+      trip over the state that broke the installation, and it stays runnable by
+      hand long afterwards. Values taken from uci are shell-quoted, so a quote
+      inside one cannot turn the rollback into a syntax error.
+    - The two earlier failure paths, a dnsproxy that does not start and one
+      that does not answer, now go through the same rollback instead of
+      restoring the config inline.
   - The package lists are not refreshed when dnsproxy is already installed, and
     a failed refresh is a warning instead of a fatal error. A re-run used to
     stop at `opkg update завершился с ошибкой` over a single unreachable feed.
