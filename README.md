@@ -579,6 +579,14 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 
 Re-running is safe: configs are backed up to `/root` first. When dnsproxy is already installed the package lists are left alone, so a single unreachable feed can no longer abort a re-run.
 
+The run ends with a verification: dnsproxy has to answer on its own address, and ordinary name resolution on the router has to still work. If that fails, the installation is rolled back in full and the script says plainly that it did not work out. The rollback is a ready-made `rollback.sh`, written into the backup directory **before** anything is changed, with every value baked in: the previous dnsproxy config, Podkop's previous DNS settings, and whether dnsproxy was installed and enabled at all. It therefore does not depend on how far the installation got, and it can be run by hand at any later point:
+
+```sh
+sh /root/dnsproxy-backup-*/rollback.sh
+```
+
+The "name resolution works" check is only enforced when it worked before the installation, so a WAN that is already down cannot look like damage done by the script.
+
 Works with both opkg (OpenWrt 24.10 and older) and apk (25.12 and newer); the package manager is detected automatically. The branch and architecture come from `/etc/openwrt_release` — if detection fails, set them by hand with `--release` and `--arch`.
 
 The web interface is installed last, once DNS is configured, verified and Podkop is switched over. A failure there is only a warning: DNS works without the panel. That matters on x86, where `x86/legacy` builds use the `i386_pentium-mmx` package architecture, Fantastic Packages has no directory under that name, and the whole install used to stop right there. The `x86_64` directory is now tried as well for x86 targets — `luci-app-dnsproxy` is built as `_all.ipk` and does not depend on the architecture.

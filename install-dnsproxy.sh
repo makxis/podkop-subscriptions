@@ -138,6 +138,31 @@ backup_file() {
 
 backup_file /etc/config/podkop podkop.config
 
+# Состояние до вмешательства. Снимается до первого изменения, потому что откат,
+# собранный по факту поломки, обычно опирается ровно на то, что уже сломано.
+DNSPROXY_WAS_INSTALLED=0
+if command -v dnsproxy >/dev/null 2>&1; then
+    DNSPROXY_WAS_INSTALLED=1
+fi
+
+DNSPROXY_WAS_ENABLED=0
+if [ -x /etc/init.d/dnsproxy ] && /etc/init.d/dnsproxy enabled 2>/dev/null; then
+    DNSPROXY_WAS_ENABLED=1
+fi
+
+PODKOP_DNS_TYPE_OLD="$(uci -q get podkop.settings.dns_type 2>/dev/null || true)"
+PODKOP_DNS_SERVER_OLD="$(uci -q get podkop.settings.dns_server 2>/dev/null || true)"
+
+# Проверять в конце «работает ли DNS роутера» имеет смысл, только если он
+# работал в начале. Иначе упавший WAN выглядел бы как поломка от установки, и
+# скрипт откатывал бы совершенно исправную настройку.
+BASELINE_DNS_OK=0
+if nslookup openwrt.org >/dev/null 2>&1; then
+    BASELINE_DNS_OK=1
+else
+    warn "Разрешение имён на роутере не работает ещё до установки"
+fi
+
 # Получаем major.minor, например 24.10 из 24.10.2.
 # shellcheck disable=SC1091
 . /etc/openwrt_release
@@ -354,6 +379,102 @@ fi
 # появляется только вместе с пакетом, и до установки откатывать было бы нечего.
 backup_file /etc/config/dnsproxy dnsproxy.config
 
+# Откат — отдельный скрипт рядом с копиями конфигов, со всеми значениями,
+# подставленными заранее. Он не зависит ни от переменных этого запуска, ни от
+# того, докуда установка успела дойти, поэтому не может споткнуться на том же,
+# на чём споткнулась установка. И запустить его можно хоть через неделю руками.
+# Значения из uci подставляются в скрипт отката как есть, поэтому кавычатся:
+# одна одинарная кавычка в значении иначе превратила бы откат в синтаксическую
+# ошибку — ровно в тот момент, когда он единственное, что осталось.
+shquote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+write_rollback_kit() {
+    podkop_touched="$1"
+
+    cat > "$BACKUP_DIR/rollback.sh" <<EOF
+#!/bin/sh
+# Откат установки dnsproxy, установщик $SCRIPT_VERSION.
+# Создан автоматически, запускать от root: sh $BACKUP_DIR/rollback.sh
+set -u
+
+BACKUP_DIR=$(shquote "$BACKUP_DIR")
+PODKOP_TOUCHED=$(shquote "$podkop_touched")
+PODKOP_DNS_TYPE_OLD=$(shquote "$PODKOP_DNS_TYPE_OLD")
+PODKOP_DNS_SERVER_OLD=$(shquote "$PODKOP_DNS_SERVER_OLD")
+DNSPROXY_WAS_INSTALLED=$(shquote "$DNSPROXY_WAS_INSTALLED")
+DNSPROXY_WAS_ENABLED=$(shquote "$DNSPROXY_WAS_ENABLED")
+EOF
+
+    cat >> "$BACKUP_DIR/rollback.sh" <<'EOF'
+
+say() {
+    printf '%s\n' "[dnsproxy-rollback] $*"
+}
+
+if [ -f "$BACKUP_DIR/dnsproxy.config" ]; then
+    cp "$BACKUP_DIR/dnsproxy.config" /etc/config/dnsproxy
+    say "Конфиг dnsproxy восстановлен из бэкапа"
+else
+    rm -f /etc/config/dnsproxy
+    say "Конфига dnsproxy до установки не было, удалён"
+fi
+
+if [ "$PODKOP_TOUCHED" = "1" ]; then
+    if [ -n "$PODKOP_DNS_TYPE_OLD" ]; then
+        uci set podkop.settings.dns_type="$PODKOP_DNS_TYPE_OLD"
+    else
+        uci -q delete podkop.settings.dns_type 2>/dev/null || true
+    fi
+
+    if [ -n "$PODKOP_DNS_SERVER_OLD" ]; then
+        uci set podkop.settings.dns_server="$PODKOP_DNS_SERVER_OLD"
+    else
+        uci -q delete podkop.settings.dns_server 2>/dev/null || true
+    fi
+
+    uci commit podkop
+    say "DNS-настройки Podkop возвращены к прежним значениям"
+
+    if [ -x /etc/init.d/podkop ]; then
+        /etc/init.d/podkop restart >/dev/null 2>&1 || true
+    fi
+fi
+
+if [ -x /etc/init.d/dnsproxy ]; then
+    if [ "$DNSPROXY_WAS_INSTALLED" = "1" ] && [ -f /etc/config/dnsproxy ]; then
+        /etc/init.d/dnsproxy restart >/dev/null 2>&1 || true
+        if [ "$DNSPROXY_WAS_ENABLED" != "1" ]; then
+            /etc/init.d/dnsproxy disable >/dev/null 2>&1 || true
+        fi
+    else
+        # Пакета здесь до установки не было: оставлять запущенным нечего,
+        # а без конфига он всё равно не поднимется.
+        /etc/init.d/dnsproxy stop >/dev/null 2>&1 || true
+        /etc/init.d/dnsproxy disable >/dev/null 2>&1 || true
+        say "dnsproxy остановлен и выключен из автозапуска"
+    fi
+fi
+
+if nslookup openwrt.org >/dev/null 2>&1; then
+    say "Разрешение имён на роутере работает"
+else
+    say "ВНИМАНИЕ: имена не разрешаются и после отката, проверьте DNS вручную"
+fi
+
+say "Откат завершён"
+EOF
+
+    chmod 0700 "$BACKUP_DIR/rollback.sh"
+}
+
+rollback() {
+    warn "Откатываю изменения: $BACKUP_DIR/rollback.sh"
+    sh "$BACKUP_DIR/rollback.sh" || warn "Откат завершился с ошибкой, разбирайтесь через $BACKUP_DIR"
+}
+
+write_rollback_kit 0
 
 collect_isp_dns() {
     out="$1"
@@ -498,12 +619,9 @@ sed 's/^/  - /' "$FALLBACK_FILE"
 
 /etc/init.d/dnsproxy enable >/dev/null 2>&1 || true
 if ! /etc/init.d/dnsproxy restart; then
-    warn "dnsproxy не запустился; восстанавливаю прежний конфиг"
-    if [ -f "$BACKUP_DIR/dnsproxy.config" ]; then
-        cp "$BACKUP_DIR/dnsproxy.config" /etc/config/dnsproxy
-        /etc/init.d/dnsproxy restart >/dev/null 2>&1 || true
-    fi
-    die "Не удалось запустить dnsproxy"
+    warn "dnsproxy не запустился"
+    rollback
+    die "Не удалось запустить dnsproxy. Ничего не изменилось, всё вернул как было"
 fi
 
 sleep 2
@@ -512,12 +630,8 @@ if ! nslookup openwrt.org "$LISTEN_ADDR" >/dev/null 2>&1; then
     log "Последние сообщения dnsproxy:"
     logread -e dnsproxy 2>/dev/null | tail -n 30 || true
 
-    if [ -f "$BACKUP_DIR/dnsproxy.config" ]; then
-        warn "Восстанавливаю прежний конфиг dnsproxy"
-        cp "$BACKUP_DIR/dnsproxy.config" /etc/config/dnsproxy
-        /etc/init.d/dnsproxy restart >/dev/null 2>&1 || true
-    fi
-    die "Настройка отменена: dnsproxy не прошёл проверку"
+    rollback
+    die "dnsproxy не прошёл проверку. Ничего не изменилось, всё вернул как было"
 fi
 
 log "dnsproxy отвечает на $LISTEN_ADDR:$LISTEN_PORT"
@@ -538,6 +652,9 @@ if [ "$PODKOP_PRESENT" = "1" ] && [ "$CONFIGURE_PODKOP" = "1" ]; then
     uci set podkop.settings.dns_type='udp'
     uci set podkop.settings.dns_server="$LISTEN_ADDR"
     uci commit podkop
+
+    # С этого момента откат обязан возвращать и настройки Podkop.
+    write_rollback_kit 1
 
     if [ "$RESTART_PODKOP" = "1" ] && [ -x /etc/init.d/podkop ]; then
         /etc/init.d/podkop restart || warn "Podkop настроен, но автоматический restart завершился ошибкой"
@@ -565,9 +682,50 @@ rm -rf /tmp/luci-modulecache 2>/dev/null || true
 /etc/init.d/rpcd restart >/dev/null 2>&1 || true
 /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
 
+# Итоговая проверка. Промежуточные проверки уже были, но между ними и этим
+# местом успели произойти установка LuCI-пакета и перезапуски сервисов, а с
+# --configure-podkop ещё и перезапуск Podkop. DNS — та вещь, сломав которую
+# теряешь возможность чинить остальное, поэтому подтверждается конечное
+# состояние, а не то, что было в середине.
+verify_final() {
+    tries=0
+    while [ "$tries" -lt 3 ]; do
+        if nslookup openwrt.org "$LISTEN_ADDR" >/dev/null 2>&1; then
+            break
+        fi
+        tries=$((tries + 1))
+        sleep 2
+    done
+
+    if [ "$tries" -ge 3 ]; then
+        warn "dnsproxy не отвечает на $LISTEN_ADDR"
+        return 1
+    fi
+
+    # Главная проверка: не пострадало ли обычное разрешение имён на роутере.
+    # Спрашивается только с тех, у кого оно работало до установки.
+    if [ "$BASELINE_DNS_OK" = "1" ] && ! nslookup openwrt.org >/dev/null 2>&1; then
+        warn "Разрешение имён на роутере перестало работать"
+        return 1
+    fi
+
+    return 0
+}
+
+log "Проверяю, что всё получилось"
+if ! verify_final; then
+    log "Последние сообщения dnsproxy:"
+    logread -e dnsproxy 2>/dev/null | tail -n 30 || true
+    warn "Проверка не прошла — установка не подтвердилась"
+    rollback
+    die "Не вышло, извините. Всё вернул как было, роутер в прежнем состоянии"
+fi
+
+log "Проверка пройдена"
 log "Готово"
 log "Версия установщика: $SCRIPT_VERSION"
 log "Резервные копии: $BACKUP_DIR"
+log "Откат: sh $BACKUP_DIR/rollback.sh"
 if [ "$LUCI_INSTALLED" = "1" ]; then
     log "LuCI: Сервисы -> DNS Proxy"
 fi
@@ -597,7 +755,10 @@ if [ "$PODKOP_PRESENT" = "1" ] && [ "$CONFIGURE_PODKOP" != "1" ]; then
   uci commit podkop
   /etc/init.d/podkop restart
 
-Если что-то пойдёт не так, прежний конфиг Podkop лежит в
-$BACKUP_DIR/podkop.config
+Если после этого что-то сломается: прежний конфиг Podkop лежит в
+$BACKUP_DIR/podkop.config, а вернуть роутер к состоянию до установки целиком
+можно так:
+
+  sh $BACKUP_DIR/rollback.sh
 EOF
 fi
