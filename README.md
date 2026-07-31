@@ -558,7 +558,7 @@ This way a direct request from the router and an external subscription client lo
 
 ## Optional: DNS via dnsproxy
 
-A separate, optional script (`install-dnsproxy.sh`, version **1.3.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53`, adds hardened upstream servers, and points Podkop's DNS at itself.
+A separate, optional script (`install-dnsproxy.sh`, version **1.3.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53` and adds hardened upstream servers. Podkop's config is left alone: on completion the script prints a short set of steps for pointing Podkop's DNS at dnsproxy by hand. Podkop's DNS server field takes the address without a port, `127.0.0.10`: a udp resolver is queried on 53 anyway, and Podkop's diagnostics report an error when the field carries one.
 
 The script prints its own version on completion, as `Версия установщика: 1.3.0`.
 
@@ -568,8 +568,9 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 
 | Flag | What it does |
 |---|---|
-| `--no-podkop` | Do not modify `/etc/config/podkop`. |
-| `--no-podkop-restart` | Configure Podkop but do not restart it. |
+| `--configure-podkop` | Point Podkop's DNS at dnsproxy automatically. By default `/etc/config/podkop` is not modified. |
+| `--no-podkop` | Leave Podkop alone. This is the default; the flag is kept for compatibility. |
+| `--no-podkop-restart` | With `--configure-podkop`: configure Podkop but do not restart it. |
 | `--no-isp-dns` | Do not add the ISP DNS servers to the fallback and bootstrap lists. |
 | `--config-only` | Do not install packages, only write the config. |
 | `--no-luci` | Do not install `luci-app-dnsproxy`. |

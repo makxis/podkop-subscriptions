@@ -8,7 +8,8 @@
 #   4. Настраивает dnsproxy на 127.0.0.10:53.
 #   5. Настраивает три списка серверов: upstream (шифрованные), bootstrap и fallback.
 #   6. Добавляет текущие IPv4 DNS-серверы провайдера в fallback и bootstrap.
-#   7. При наличии Podkop направляет его DNS на 127.0.0.10:53.
+#   7. Печатает инструкцию, как направить Podkop на 127.0.0.10.
+#      Сам конфиг Podkop не изменяется, если не указан --configure-podkop.
 #
 # Повторный запуск безопасен: конфиги предварительно сохраняются в /root.
 
@@ -18,7 +19,7 @@ SCRIPT_VERSION="1.3.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 LISTEN_ADDR="127.0.0.10"
 LISTEN_PORT="53"
-CONFIGURE_PODKOP=1
+CONFIGURE_PODKOP=0
 RESTART_PODKOP=1
 ADD_ISP_DNS=1
 INSTALL_PACKAGES=1
@@ -45,8 +46,13 @@ usage() {
   sh install-dnsproxy.sh [параметры]
 
 Параметры:
-  --no-podkop          Не изменять /etc/config/podkop.
-  --no-podkop-restart  Настроить Podkop, но не перезапускать его.
+  --configure-podkop   Направить DNS Podkop на dnsproxy автоматически.
+                       По умолчанию /etc/config/podkop не изменяется, а в конце
+                       печатается инструкция, что выставить руками.
+  --no-podkop          Ничего не делать с Podkop. Поведение по умолчанию,
+                       параметр оставлен для совместимости.
+  --no-podkop-restart  С --configure-podkop: настроить Podkop, но не
+                       перезапускать его.
   --no-isp-dns         Не добавлять DNS-серверы провайдера в fallback и bootstrap.
   --config-only        Не устанавливать пакеты, только записать конфиг.
   --no-luci            Не устанавливать luci-app-dnsproxy.
@@ -59,6 +65,10 @@ EOF
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --configure-podkop)
+            CONFIGURE_PODKOP=1
+            shift
+            ;;
         --no-podkop)
             CONFIGURE_PODKOP=0
             shift
@@ -512,19 +522,28 @@ fi
 
 log "dnsproxy отвечает на $LISTEN_ADDR:$LISTEN_PORT"
 
-if [ "$CONFIGURE_PODKOP" = "1" ] && [ -f /etc/config/podkop ] && uci -q get podkop.settings >/dev/null 2>&1; then
-    log "Направляю Podkop на $LISTEN_ADDR:$LISTEN_PORT"
+# Podkop — чужой сервис, и по умолчанию скрипт его не трогает: dnsproxy живёт
+# на своём адресе и никому не мешает, а переключение DNS — решение владельца
+# роутера. Плюс так не возникает скрытой связи: снести dnsproxy, забыв вернуть
+# dns_server, значит оставить Podkop с мёртвым резолвером.
+PODKOP_PRESENT=0
+if [ -f /etc/config/podkop ] && uci -q get podkop.settings >/dev/null 2>&1; then
+    PODKOP_PRESENT=1
+fi
+
+if [ "$PODKOP_PRESENT" = "1" ] && [ "$CONFIGURE_PODKOP" = "1" ]; then
+    # Порт в dns_server не указывается: udp-резолвер и так опрашивается по 53,
+    # а с портом диагностика Podkop сообщает об ошибке.
+    log "Направляю Podkop на $LISTEN_ADDR"
     uci set podkop.settings.dns_type='udp'
-    uci set podkop.settings.dns_server="$LISTEN_ADDR:$LISTEN_PORT"
+    uci set podkop.settings.dns_server="$LISTEN_ADDR"
     uci commit podkop
 
     if [ "$RESTART_PODKOP" = "1" ] && [ -x /etc/init.d/podkop ]; then
         /etc/init.d/podkop restart || warn "Podkop настроен, но автоматический restart завершился ошибкой"
     fi
-else
-    if [ "$CONFIGURE_PODKOP" = "1" ]; then
-        log "Podkop не найден — его конфиг не изменялся"
-    fi
+elif [ "$PODKOP_PRESENT" = "0" ] && [ "$CONFIGURE_PODKOP" = "1" ]; then
+    log "Podkop не найден — его конфиг не изменялся"
 fi
 
 # Веб-интерфейс ставится последним, когда DNS уже настроен и проверен, а Podkop
@@ -552,4 +571,33 @@ log "Резервные копии: $BACKUP_DIR"
 if [ "$LUCI_INSTALLED" = "1" ]; then
     log "LuCI: Сервисы -> DNS Proxy"
 fi
-log "DNS для Podkop: $LISTEN_ADDR:$LISTEN_PORT"
+log "dnsproxy слушает: $LISTEN_ADDR:$LISTEN_PORT"
+
+# Инструкция печатается последней, чтобы остаться на экране: сам по себе
+# dnsproxy работает вхолостую, пока в него никто не ходит.
+if [ "$PODKOP_PRESENT" = "1" ] && [ "$CONFIGURE_PODKOP" != "1" ]; then
+    cat <<EOF
+
+Осталось направить Podkop на dnsproxy. Скрипт этого не делает — вы делаете это
+сами, один раз:
+
+  1. Скопируйте адрес: $LISTEN_ADDR
+  2. Откройте LuCI -> Сервисы -> Podkop, основные настройки
+  3. Тип DNS: udp
+  4. В поле DNS-сервера вставьте скопированный адрес, без порта:
+     udp-резолвер и так опрашивается по 53, а с портом диагностика Podkop
+     сообщает об ошибке
+  5. Нажмите Save & Apply и дождитесь перезапуска Podkop, это несколько секунд
+  6. Проверьте, что сайты открываются и прокси работает
+
+То же самое из консоли:
+
+  uci set podkop.settings.dns_type='udp'
+  uci set podkop.settings.dns_server='$LISTEN_ADDR'
+  uci commit podkop
+  /etc/init.d/podkop restart
+
+Если что-то пойдёт не так, прежний конфиг Podkop лежит в
+$BACKUP_DIR/podkop.config
+EOF
+fi
