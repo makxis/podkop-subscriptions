@@ -14,7 +14,7 @@
 
 set -eu
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 LISTEN_ADDR="127.0.0.10"
 LISTEN_PORT="53"
@@ -22,8 +22,9 @@ CONFIGURE_PODKOP=1
 RESTART_PODKOP=1
 ADD_ISP_DNS=1
 INSTALL_PACKAGES=1
+INSTALL_LUCI=1
 OPENWRT_SERIES_OVERRIDE=""
-PACKAGE_ARCH_OVERRIDE=""
+LUCI_REPOSITORY_ARCH_OVERRIDE=""
 
 log() {
     printf '%s\n' "[dnsproxy-installer] $*"
@@ -48,8 +49,10 @@ usage() {
   --no-podkop-restart  Настроить Podkop, но не перезапускать его.
   --no-isp-dns         Не добавлять DNS-серверы провайдера в fallback и bootstrap.
   --config-only        Не устанавливать пакеты, только записать конфиг.
+  --no-luci            Не устанавливать luci-app-dnsproxy.
   --release 24.10      Принудительно указать ветку Fantastic Packages.
-  --arch x86_64        Принудительно указать архитектуру пакетов.
+  --arch x86_64        Каталог архитектуры Fantastic Packages, откуда брать
+                       luci-app-dnsproxy. На сам dnsproxy не влияет.
   --help               Показать эту справку.
 EOF
 }
@@ -72,6 +75,10 @@ while [ "$#" -gt 0 ]; do
             INSTALL_PACKAGES=0
             shift
             ;;
+        --no-luci)
+            INSTALL_LUCI=0
+            shift
+            ;;
         --release)
             [ "$#" -ge 2 ] || die "После --release нужна версия, например 24.10"
             OPENWRT_SERIES_OVERRIDE="$2"
@@ -79,7 +86,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --arch)
             [ "$#" -ge 2 ] || die "После --arch нужна архитектура, например x86_64"
-            PACKAGE_ARCH_OVERRIDE="$2"
+            LUCI_REPOSITORY_ARCH_OVERRIDE="$2"
             shift 2
             ;;
         --help|-h)
@@ -143,10 +150,18 @@ fi
 log "Менеджер пакетов: $PKG_MANAGER"
 
 install_packages() {
+    # Повторный запуск не должен зависеть от доступности репозиториев. Списки
+    # пакетов нужны только чтобы поставить dnsproxy; если он уже стоит, обновление
+    # ничего не даёт, а один недоступный фид роняет весь скрипт на ровном месте.
+    if command -v dnsproxy >/dev/null 2>&1; then
+        log "dnsproxy уже установлен — списки пакетов не обновляю"
+        return 0
+    fi
+
     log "Обновляю списки пакетов"
     case "$PKG_MANAGER" in
-        apk)  apk update || die "apk update завершился с ошибкой" ;;
-        opkg) opkg update || die "opkg update завершился с ошибкой" ;;
+        apk)  apk update || warn "apk update завершился с ошибкой; ставлю с тем, что есть" ;;
+        opkg) opkg update || warn "opkg update завершился с ошибкой; ставлю с тем, что есть" ;;
     esac
 
     log "Устанавливаю dnsproxy и сертификаты"
@@ -154,13 +169,6 @@ install_packages() {
         apk)  apk add ca-bundle ca-certificates dnsproxy || die "Не удалось установить пакет dnsproxy" ;;
         opkg) opkg install ca-bundle ca-certificates dnsproxy || die "Не удалось установить пакет dnsproxy" ;;
     esac
-
-    # Нужно только ветке opkg: там индекс Fantastic Packages — это Packages.gz.
-    if [ "$PKG_MANAGER" = "opkg" ]; then
-        if ! command -v zcat >/dev/null 2>&1 && ! command -v gzip >/dev/null 2>&1; then
-            opkg install gzip || die "Не удалось установить gzip для чтения Packages.gz"
-        fi
-    fi
 }
 
 read_packages_gz() {
@@ -173,14 +181,23 @@ read_packages_gz() {
 }
 
 arch_candidates() {
-    if [ -n "$PACKAGE_ARCH_OVERRIDE" ]; then
-        printf '%s\n' "$PACKAGE_ARCH_OVERRIDE"
+    if [ -n "$LUCI_REPOSITORY_ARCH_OVERRIDE" ]; then
+        printf '%s\n' "$LUCI_REPOSITORY_ARCH_OVERRIDE"
         return 0
     fi
 
     # DISTRIB_ARCH из /etc/openwrt_release совпадает с именами каталогов
     # Fantastic Packages и есть на обеих ветках, поэтому он идёт первым.
     [ -n "${DISTRIB_ARCH:-}" ] && printf '%s\n' "$DISTRIB_ARCH"
+
+    # x86/legacy собирается под i386_pentium-mmx, и каталога с таким именем в
+    # Fantastic Packages нет. Но luci-app-dnsproxy лежит там как *_all.ipk, то
+    # есть не зависит от архитектуры, поэтому для x86 годится каталог x86_64.
+    case "${DISTRIB_TARGET:-}" in
+        x86/*)
+            printf '%s\n' "x86_64"
+            ;;
+    esac
 
     case "$PKG_MANAGER" in
         apk)
@@ -210,68 +227,115 @@ detect_package_arch() {
     return 1
 }
 
-# index.json — плоский словарь {"имя-пакета": "версия"}.
+# index.json выглядит так:
+#   {"version": 2, "architecture": "x86_64",
+#    "packages": {"luci-app-dnsproxy": "26.057.52546~67a7f3f"}}
+# то есть версии лежат внутри packages, а не в корне.
 lookup_index_version() {
     file="$1"
     name="$2"
+    value=""
+
     if command -v jsonfilter >/dev/null 2>&1; then
-        jsonfilter -i "$file" -e "@[\"$name\"]" 2>/dev/null && return 0
+        value="$(jsonfilter -i "$file" -e "@.packages[\"$name\"]" 2>/dev/null || true)"
+
+        # Проверяется именно результат: jsonfilter завершается успешно и когда
+        # ничего не нашёл, поэтому по коду возврата судить нельзя.
+        if [ -n "$value" ]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
     fi
+
     sed -n "s/.*\"$name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -n 1
 }
 
+# Веб-интерфейс — необязательная надстройка над уже работающим DNS, поэтому
+# внутри нет ни одного die: любая неудача здесь возвращает 1, а вызывающий код
+# ограничивается предупреждением. Раньше отсутствие каталога архитектуры в
+# Fantastic Packages обрывало скрипт после установки dnsproxy, но до записи
+# конфига, и роутер оставался с пакетом без настройки.
 install_luci_package() {
-    PACKAGE_ARCH="$(detect_package_arch)" \
-        || die "Fantastic Packages не содержит LuCI-пакеты для архитектур этого роутера (ветка $OPENWRT_SERIES)"
+    if ! PACKAGE_ARCH="$(detect_package_arch)"; then
+        warn "Fantastic Packages не содержит LuCI-пакеты для архитектур этого роутера (ветка $OPENWRT_SERIES)"
+        return 1
+    fi
     LUCI_BASE="$FANTASTIC_ROOT/$OPENWRT_SERIES/packages/$PACKAGE_ARCH/luci"
-    log "Архитектура: $PACKAGE_ARCH"
+    log "Каталог LuCI-пакетов: $PACKAGE_ARCH"
 
     if [ "$PKG_MANAGER" = "apk" ]; then
         # У apk индекс packages.adb бинарный, поэтому имя файла собирается
         # из версии в index.json: <имя>-<версия>.apk.
         index_file="$TMP_DIR/index-$PACKAGE_ARCH.json"
-        [ -s "$index_file" ] || wget -q -O "$index_file" "$LUCI_BASE/index.json" \
-            || die "Не удалось скачать индекс Fantastic Packages: $LUCI_BASE"
+        if [ ! -s "$index_file" ]; then
+            if ! wget -q -O "$index_file" "$LUCI_BASE/index.json"; then
+                warn "Не удалось скачать индекс Fantastic Packages: $LUCI_BASE"
+                return 1
+            fi
+        fi
 
         luci_version="$(lookup_index_version "$index_file" luci-app-dnsproxy)"
-        [ -n "$luci_version" ] || die "В репозитории не найден luci-app-dnsproxy"
+        if [ -z "$luci_version" ]; then
+            warn "В репозитории не найден luci-app-dnsproxy"
+            return 1
+        fi
 
         LUCI_FILENAME="luci-app-dnsproxy-${luci_version}.apk"
         local_file="$TMP_DIR/luci-app-dnsproxy.apk"
     else
+        # Индекс Fantastic Packages для opkg — это Packages.gz, и распаковать
+        # его нечем на образах без gzip.
+        if ! command -v zcat >/dev/null 2>&1 && ! command -v gzip >/dev/null 2>&1; then
+            if ! opkg install gzip; then
+                warn "Не удалось установить gzip для чтения Packages.gz"
+                return 1
+            fi
+        fi
+
         packages_gz="$TMP_DIR/Packages-$PACKAGE_ARCH.gz"
-        wget -q -O "$packages_gz" "$LUCI_BASE/Packages.gz" \
-            || die "Не удалось скачать индекс Fantastic Packages: $LUCI_BASE"
+        if ! wget -q -O "$packages_gz" "$LUCI_BASE/Packages.gz"; then
+            warn "Не удалось скачать индекс Fantastic Packages: $LUCI_BASE"
+            return 1
+        fi
 
         LUCI_FILENAME="$(read_packages_gz "$packages_gz" | awk '
             $1 == "Package:" { wanted = ($2 == "luci-app-dnsproxy") }
             wanted && $1 == "Filename:" { print $2; exit }
         ')"
-        [ -n "$LUCI_FILENAME" ] || die "В репозитории не найден luci-app-dnsproxy"
+        if [ -z "$LUCI_FILENAME" ]; then
+            warn "В репозитории не найден luci-app-dnsproxy"
+            return 1
+        fi
 
         local_file="$TMP_DIR/luci-app-dnsproxy.ipk"
     fi
 
     log "Скачиваю $LUCI_FILENAME"
-    wget -O "$local_file" "$LUCI_BASE/$LUCI_FILENAME" \
-        || die "Не удалось скачать luci-app-dnsproxy"
+    if ! wget -O "$local_file" "$LUCI_BASE/$LUCI_FILENAME"; then
+        warn "Не удалось скачать luci-app-dnsproxy"
+        return 1
+    fi
 
     case "$PKG_MANAGER" in
         apk)
             # Пакет не подписан ключом, который знает роутер, и ставится файлом,
             # а не из подключённого репозитория — apk требует оба флага.
-            apk add --allow-untrusted --force-non-repository "$local_file" \
-                || die "Не удалось установить luci-app-dnsproxy"
+            if ! apk add --allow-untrusted --force-non-repository "$local_file"; then
+                warn "Не удалось установить luci-app-dnsproxy"
+                return 1
+            fi
             ;;
         opkg)
-            opkg install "$local_file" || die "Не удалось установить luci-app-dnsproxy"
+            if ! opkg install "$local_file"; then
+                warn "Не удалось установить luci-app-dnsproxy"
+                return 1
+            fi
             ;;
     esac
 }
 
 if [ "$INSTALL_PACKAGES" = "1" ]; then
     install_packages
-    install_luci_package
 else
     command -v dnsproxy >/dev/null 2>&1 || die "--config-only указан, но dnsproxy не установлен"
 fi
@@ -279,6 +343,7 @@ fi
 # Бэкап делается после установки: на чистом роутере /etc/config/dnsproxy
 # появляется только вместе с пакетом, и до установки откатывать было бы нечего.
 backup_file /etc/config/dnsproxy dnsproxy.config
+
 
 collect_isp_dns() {
     out="$1"
@@ -462,6 +527,20 @@ else
     fi
 fi
 
+# Веб-интерфейс ставится последним, когда DNS уже настроен и проверен, а Podkop
+# переключён. Так неудача с ним не может оставить роутер в промежуточном
+# состоянии: он либо появится, либо нет, и это ни на что не повлияет.
+LUCI_INSTALLED=0
+if [ "$INSTALL_PACKAGES" = "1" ] && [ "$INSTALL_LUCI" = "1" ]; then
+    log "Устанавливаю luci-app-dnsproxy"
+    if install_luci_package; then
+        LUCI_INSTALLED=1
+    else
+        warn "Не удалось установить luci-app-dnsproxy"
+        warn "DNS настроен и продолжит работать без веб-интерфейса"
+    fi
+fi
+
 rm -f /tmp/luci-indexcache* 2>/dev/null || true
 rm -rf /tmp/luci-modulecache 2>/dev/null || true
 /etc/init.d/rpcd restart >/dev/null 2>&1 || true
@@ -470,5 +549,7 @@ rm -rf /tmp/luci-modulecache 2>/dev/null || true
 log "Готово"
 log "Версия установщика: $SCRIPT_VERSION"
 log "Резервные копии: $BACKUP_DIR"
-log "LuCI: Сервисы -> DNS Proxy"
+if [ "$LUCI_INSTALLED" = "1" ]; then
+    log "LuCI: Сервисы -> DNS Proxy"
+fi
 log "DNS для Podkop: $LISTEN_ADDR:$LISTEN_PORT"

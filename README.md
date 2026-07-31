@@ -558,9 +558,9 @@ This way a direct request from the router and an external subscription client lo
 
 ## Optional: DNS via dnsproxy
 
-A separate, optional script (`install-dnsproxy.sh`, version **1.2.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53`, adds hardened upstream servers, and points Podkop's DNS at itself.
+A separate, optional script (`install-dnsproxy.sh`, version **1.3.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53`, adds hardened upstream servers, and points Podkop's DNS at itself.
 
-The script prints its own version on completion, as `Версия установщика: 1.2.0`.
+The script prints its own version on completion, as `Версия установщика: 1.3.0`.
 
 ```sh
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
@@ -572,12 +572,15 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 | `--no-podkop-restart` | Configure Podkop but do not restart it. |
 | `--no-isp-dns` | Do not add the ISP DNS servers to the fallback and bootstrap lists. |
 | `--config-only` | Do not install packages, only write the config. |
+| `--no-luci` | Do not install `luci-app-dnsproxy`. |
 | `--release 24.10` | Force the Fantastic Packages branch. |
-| `--arch x86_64` | Force the package architecture. |
+| `--arch x86_64` | The Fantastic Packages architecture directory to take `luci-app-dnsproxy` from. It does not affect dnsproxy itself. |
 
-Re-running is safe: configs are backed up to `/root` first.
+Re-running is safe: configs are backed up to `/root` first. When dnsproxy is already installed the package lists are left alone, so a single unreachable feed can no longer abort a re-run.
 
 Works with both opkg (OpenWrt 24.10 and older) and apk (25.12 and newer); the package manager is detected automatically. The branch and architecture come from `/etc/openwrt_release` — if detection fails, set them by hand with `--release` and `--arch`.
+
+The web interface is installed last, once DNS is configured, verified and Podkop is switched over. A failure there is only a warning: DNS works without the panel. That matters on x86, where `x86/legacy` builds use the `i386_pentium-mmx` package architecture, Fantastic Packages has no directory under that name, and the whole install used to stop right there. The `x86_64` directory is now tried as well for x86 targets — `luci-app-dnsproxy` is built as `_all.ipk` and does not depend on the architecture.
 
 ### What a query's path looks like
 
