@@ -27,6 +27,15 @@
   - `index.json` is read as `@.packages["<name>"]`. The index keeps versions
     inside a `packages` object, not at the top level, and the result of
     `jsonfilter` is now tested for content: it exits successfully on a miss.
+  - Podkop is no longer reconfigured by default. dnsproxy listens on its own
+    loopback address and collides with nothing, so which resolver Podkop uses
+    stays the owner's decision, and no hidden coupling is created: removing
+    dnsproxy without restoring `dns_server` would otherwise leave Podkop
+    pointed at a dead resolver. The run ends with the steps to set `udp` and
+    `127.0.0.10` by hand, in LuCI or over uci, and `--configure-podkop`
+    restores the previous behaviour. The address is written without a port:
+    a udp resolver is queried on 53 anyway, and Podkop's diagnostics report an
+    error when the field carries one.
   - The package lists are not refreshed when dnsproxy is already installed, and
     a failed refresh is a warning instead of a fatal error. A re-run used to
     stop at `opkg update завершился с ошибкой` over a single unreachable feed.
