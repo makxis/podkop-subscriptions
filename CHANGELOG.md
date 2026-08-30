@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- `install-dnsproxy.sh` (installer 1.4.0) gains `--test-servers`, which runs
+  the upstream servers from `servers.txt` through a new `test-doh.sh` and
+  prints a latency table. `test-doh.sh` is a dependency-free rewrite of the
+  existing `test-doh.py`: pure POSIX sh, using only `dnsproxy` and `nslookup`,
+  both already required to install dnsproxy in the first place. That matters
+  because `test-doh.py` needs `python3`, which a router only gets from the
+  Podkop Subscriptions Python component — someone who installs just
+  `install-dnsproxy.sh` and nothing else previously had no dependency-free way
+  to compare upstream servers. `test-doh.sh` tests servers one at a time
+  rather than `test-doh.py`'s 5-way worker pool: full parallelism needs
+  `wait -n`-style job tracking that behaves inconsistently across busybox
+  versions, and a sequential run of a few dozen servers is a one-off task, not
+  something that needs to be fast.
+  - Each query is capped at 1000ms (`--timeout-ms`), enforced by a background
+    `sleep`-based watchdog rather than the `timeout` command: a real OpenWrt
+    router had neither `timeout` nor fractional `sleep` (`sleep 0.1` errors
+    out), so both the earlier design (wrap `nslookup` in `timeout`) and a
+    finer-grained poll loop were dropped in favor of racing the query against
+    a whole-second `sleep` and killing whichever loses. A server that misses
+    the deadline now scores FAIL on that query instead of GOOD-but-slow,
+    which cut a 32-server run from several minutes down to about 80 seconds
+    on hardware where two servers were answering in 4-5s.
+  - Results are recorded with 0x1F (unit separator) as the field delimiter,
+    not a tab. Tab counts as IFS whitespace, so `read` collapsed consecutive
+    delimiters around the empty latency fields of FAIL/DEAD rows and shifted
+    the rest of that row's columns left — caught by an actual DEAD row on
+    real hardware, not by review.
+  - After the table, if run in a terminal and at least one server scored 3/3,
+    `test-doh.sh` offers to replace dnsproxy's current upstream with the four
+    fastest (`y`/`д` accepts, anything else is a no-op). It backs up
+    `/etc/config/dnsproxy` to `/root` first, writes the new list with `uci`,
+    restarts dnsproxy, and rolls back automatically if a lookup for
+    `openwrt.org` fails afterward.
 - The LuCI view is installed under a versioned file name, so a browser cannot
   keep executing the previously cached copy. LuCI derives the `?v=` on every
   module URL from the version of luci-base itself, and that does not change
