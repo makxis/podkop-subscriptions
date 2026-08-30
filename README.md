@@ -579,14 +579,13 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 | `--test-servers` | After installation, run the upstream servers from `servers.txt` through `test-doh.sh` and print a latency table. |
 | `--servers-list PATH` | With `--test-servers`: use this list instead of `servers.txt` next to the script. |
 
-There are two independent server test scripts, both reading `servers.txt`. `test-doh.sh` (POSIX sh, no dependency beyond `dnsproxy` and `nslookup`) is what `--test-servers` runs, and it also works standalone on a router that never got the Python subscriptions component installed — only `install-dnsproxy.sh` needs to have run first. `test-doh.py` tests the same list with a 5-way worker pool, so it finishes faster, but it needs `python3`.
+`test-doh.sh` tests the servers from `servers.txt` on its own, without `--test-servers`:
 
 ```sh
-sh test-doh.sh                  # sequential, no python3 required
-python3 test-doh.py             # parallel, needs python3
+sh test-doh.sh
 ```
 
-Each query is capped at 1000ms (`--timeout-ms`), so slow upstream servers don't stretch out the whole run — a server that misses the deadline is scored FAIL on that query instead of GOOD-but-slow. When `test-doh.sh` runs in a terminal and at least one server scored 3/3, it ends by asking whether to replace dnsproxy's current upstream with the four fastest — `y` applies it, anything else leaves the config untouched. Before writing, the current `/etc/config/dnsproxy` is backed up to `/root`; after restarting dnsproxy it's verified with a lookup for `openwrt.org`, and a failed lookup rolls the change back automatically.
+It needs nothing beyond `dnsproxy` and `nslookup`, both already required to install dnsproxy in the first place — it works standalone on a router that never got the Python subscriptions component installed, as long as `install-dnsproxy.sh` has run. Each query is capped at 1000ms (`--timeout-ms`), so slow upstream servers don't stretch out the whole run — a server that misses the deadline is scored FAIL on that query instead of GOOD-but-slow. When `test-doh.sh` runs in a terminal and at least one server scored 3/3, it ends by asking whether to replace dnsproxy's current upstream with the four fastest — `y` applies it, anything else leaves the config untouched. Before writing, the current `/etc/config/dnsproxy` is backed up to `/root`; after restarting dnsproxy it's verified with a lookup for `openwrt.org`, and a failed lookup rolls the change back automatically.
 
 Re-running is safe: configs are backed up to `/root` first. When dnsproxy is already installed the package lists are left alone, so a single unreachable feed can no longer abort a re-run.
 

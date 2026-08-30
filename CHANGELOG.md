@@ -2,16 +2,14 @@
 
 ## Unreleased
 
-- `install-dnsproxy.sh` (installer 1.4.0) gains `--test-servers`, which runs
-  the upstream servers from `servers.txt` through a new `test-doh.sh` and
-  prints a latency table. `test-doh.sh` is a dependency-free rewrite of the
-  existing `test-doh.py`: pure POSIX sh, using only `dnsproxy` and `nslookup`,
-  both already required to install dnsproxy in the first place. That matters
-  because `test-doh.py` needs `python3`, which a router only gets from the
-  Podkop Subscriptions Python component — someone who installs just
-  `install-dnsproxy.sh` and nothing else previously had no dependency-free way
-  to compare upstream servers. `test-doh.sh` tests servers one at a time
-  rather than `test-doh.py`'s 5-way worker pool: full parallelism needs
+- Added `test-doh.sh`, a dependency-free tester for the upstream servers in
+  `servers.txt`: pure POSIX sh, using only `dnsproxy` and `nslookup`, both
+  already required to install dnsproxy in the first place. It works standalone
+  on a router that only has `install-dnsproxy.sh` run on it — no `python3`,
+  no other component of Podkop Subscriptions needed. `install-dnsproxy.sh`
+  (installer 1.3.0 -> 1.4.0) gains `--test-servers` to run it automatically
+  after installation and print a latency table. Servers are tested one at a
+  time rather than through a worker pool: full parallelism needs
   `wait -n`-style job tracking that behaves inconsistently across busybox
   versions, and a sequential run of a few dozen servers is a one-off task, not
   something that needs to be fast.
