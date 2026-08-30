@@ -558,9 +558,9 @@ This way a direct request from the router and an external subscription client lo
 
 ## Optional: DNS via dnsproxy
 
-A separate, optional script (`install-dnsproxy.sh`, version **1.3.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53` and adds hardened upstream servers. Podkop's config is left alone: on completion the script prints a short set of steps for pointing Podkop's DNS at dnsproxy by hand. Podkop's DNS server field takes the address without a port, `127.0.0.10`: a udp resolver is queried on 53 anyway, and Podkop's diagnostics report an error when the field carries one.
+A separate, optional script (`install-dnsproxy.sh`, version **1.4.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53` and adds hardened upstream servers. Podkop's config is left alone: on completion the script prints a short set of steps for pointing Podkop's DNS at dnsproxy by hand. Podkop's DNS server field takes the address without a port, `127.0.0.10`: a udp resolver is queried on 53 anyway, and Podkop's diagnostics report an error when the field carries one.
 
-The script prints its own version on completion, as `Версия установщика: 1.3.0`.
+The script prints its own version on completion, as `Версия установщика: 1.4.0`.
 
 ```sh
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
@@ -576,6 +576,17 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 | `--no-luci` | Do not install `luci-app-dnsproxy`. |
 | `--release 24.10` | Force the Fantastic Packages branch. |
 | `--arch x86_64` | The Fantastic Packages architecture directory to take `luci-app-dnsproxy` from. It does not affect dnsproxy itself. |
+| `--test-servers` | After installation, run the upstream servers from `servers.txt` through `test-doh.sh` and print a latency table. |
+| `--servers-list PATH` | With `--test-servers`: use this list instead of `servers.txt` next to the script. |
+
+There are two independent server test scripts, both reading `servers.txt`. `test-doh.sh` (POSIX sh, no dependency beyond `dnsproxy` and `nslookup`) is what `--test-servers` runs, and it also works standalone on a router that never got the Python subscriptions component installed — only `install-dnsproxy.sh` needs to have run first. `test-doh.py` tests the same list with a 5-way worker pool, so it finishes faster, but it needs `python3`.
+
+```sh
+sh test-doh.sh                  # sequential, no python3 required
+python3 test-doh.py             # parallel, needs python3
+```
+
+Each query is capped at 1000ms (`--timeout-ms`), so slow upstream servers don't stretch out the whole run — a server that misses the deadline is scored FAIL on that query instead of GOOD-but-slow. When `test-doh.sh` runs in a terminal and at least one server scored 3/3, it ends by asking whether to replace dnsproxy's current upstream with the four fastest — `y` applies it, anything else leaves the config untouched. Before writing, the current `/etc/config/dnsproxy` is backed up to `/root`; after restarting dnsproxy it's verified with a lookup for `openwrt.org`, and a failed lookup rolls the change back automatically.
 
 Re-running is safe: configs are backed up to `/root` first. When dnsproxy is already installed the package lists are left alone, so a single unreachable feed can no longer abort a re-run.
 

@@ -15,8 +15,11 @@
 
 set -eu
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.4.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
+REPO="${REPO:-makxis/podkop-subscriptions}"
+BRANCH="${BRANCH:-main}"
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
 LISTEN_ADDR="127.0.0.10"
 LISTEN_PORT="53"
 CONFIGURE_PODKOP=0
@@ -24,8 +27,16 @@ RESTART_PODKOP=1
 ADD_ISP_DNS=1
 INSTALL_PACKAGES=1
 INSTALL_LUCI=1
+TEST_SERVERS=0
+SERVERS_LIST_OVERRIDE=""
 OPENWRT_SERIES_OVERRIDE=""
 LUCI_REPOSITORY_ARCH_OVERRIDE=""
+
+SCRIPT_PATH="$0"
+case "$SCRIPT_PATH" in
+    */*) SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)" ;;
+    *) SCRIPT_DIR="$(pwd)" ;;
+esac
 
 log() {
     printf '%s\n' "[dnsproxy-installer] $*"
@@ -59,6 +70,11 @@ usage() {
   --release 24.10      Принудительно указать ветку Fantastic Packages.
   --arch x86_64        Каталог архитектуры Fantastic Packages, откуда брать
                        luci-app-dnsproxy. На сам dnsproxy не влияет.
+  --test-servers       После установки прогнать upstream-сервера из
+                       servers.txt через test-doh.sh (без Python) и
+                       напечатать таблицу с задержками.
+  --servers-list PATH  С --test-servers: свой список серверов вместо
+                       servers.txt рядом со скриптом.
   --help               Показать эту справку.
 EOF
 }
@@ -88,6 +104,15 @@ while [ "$#" -gt 0 ]; do
         --no-luci)
             INSTALL_LUCI=0
             shift
+            ;;
+        --test-servers)
+            TEST_SERVERS=1
+            shift
+            ;;
+        --servers-list)
+            [ "$#" -ge 2 ] || die "После --servers-list нужен путь, например /root/servers.txt"
+            SERVERS_LIST_OVERRIDE="$2"
+            shift 2
             ;;
         --release)
             [ "$#" -ge 2 ] || die "После --release нужна версия, например 24.10"
@@ -730,6 +755,42 @@ if [ "$LUCI_INSTALLED" = "1" ]; then
     log "LuCI: Сервисы -> DNS Proxy"
 fi
 log "dnsproxy слушает: $LISTEN_ADDR:$LISTEN_PORT"
+
+# Тест серверов выполняется до финальной инструкции по Podkop, а не после:
+# у него собственная многострочная таблица, и инструкция обязана остаться
+# последней на экране (см. комментарий ниже).
+if [ "$TEST_SERVERS" = "1" ]; then
+    log ""
+    log "Тестирую upstream-сервера из списка..."
+
+    if [ -f "$SCRIPT_DIR/test-doh.sh" ]; then
+        TEST_DOH_PATH="$SCRIPT_DIR/test-doh.sh"
+    else
+        TEST_DOH_PATH="$TMP_DIR/test-doh.sh"
+        if ! wget -q -O "$TEST_DOH_PATH" "$RAW_BASE/test-doh.sh"; then
+            warn "Не удалось скачать test-doh.sh, тест пропущен"
+            TEST_DOH_PATH=""
+        fi
+    fi
+
+    if [ -n "$TEST_DOH_PATH" ]; then
+        if [ -n "$SERVERS_LIST_OVERRIDE" ]; then
+            SERVERS_LIST_PATH="$SERVERS_LIST_OVERRIDE"
+        elif [ -f "$SCRIPT_DIR/servers.txt" ]; then
+            SERVERS_LIST_PATH="$SCRIPT_DIR/servers.txt"
+        else
+            SERVERS_LIST_PATH="$TMP_DIR/servers.txt"
+            if ! wget -q -O "$SERVERS_LIST_PATH" "$RAW_BASE/servers.txt"; then
+                warn "Не удалось скачать servers.txt, тест пропущен"
+                SERVERS_LIST_PATH=""
+            fi
+        fi
+
+        if [ -n "${SERVERS_LIST_PATH:-}" ]; then
+            sh "$TEST_DOH_PATH" "$SERVERS_LIST_PATH" || warn "Тест серверов завершился с ошибкой"
+        fi
+    fi
+fi
 
 # Инструкция печатается последней, чтобы остаться на экране: сам по себе
 # dnsproxy работает вхолостую, пока в него никто не ходит.

@@ -1,0 +1,49 @@
+# Список DoH-серверов для проверки. Одна строка = один сервер.
+# Файл подхватывается автоматически, если лежит рядом со скриптом.
+# Можно писать просто имя хоста или полный URL до endpoint.
+# Строки с # игнорируются.
+
+# --- крупные глобальные ---
+https://dns.google/dns-query
+https://cloudflare-dns.com/dns-query
+https://mozilla.cloudflare-dns.com/dns-query
+https://security.cloudflare-dns.com/dns-query
+https://dns.quad9.net/dns-query
+https://dns10.quad9.net/dns-query
+https://dns11.quad9.net/dns-query
+https://doh.opendns.com/dns-query
+
+# --- AdGuard ---
+https://dns.adguard-dns.com/dns-query
+https://family.adguard-dns.com/dns-query
+
+# --- европейские ---
+https://protective.joindns4.eu/dns-query
+https://unfiltered.joindns4.eu/dns-query
+https://dns.digitale-gesellschaft.ch/dns-query
+https://doh.libredns.gr/dns-query
+https://doh.dns.sb/dns-query
+https://anycast.uncensoreddns.org/dns-query
+https://wikimedia-dns.org/dns-query
+
+# --- азиатские (полезны для замеров из РФ: реже попадают в блок-листы) ---
+https://dns.alidns.com/dns-query
+https://doh.pub/dns-query
+
+# --- крупный/устойчивый, нероссийский ---
+https://freedns.controld.com/p0
+https://private.canadianshield.cira.ca/dns-query
+https://blank.dnsforge.de/dns-query
+https://dns12.quad9.net/dns-query
+https://doh.umbrella.com/dns-query
+
+
+# --- хорошие независимые/национальные/академические операторы ---
+https://odvr.nic.cz/doh
+https://dnspub.restena.lu/dns-query
+https://doh.applied-privacy.net/query
+https://doh.ffmuc.net/dns-query
+https://dns.nextdns.io
+https://ordns.he.net/dns-query
+https://public.dns.iij.jp/dns-query
+https://dns.switch.ch/dns-query
