@@ -28,7 +28,7 @@
     the rest of that row's columns left — caught by an actual DEAD row on
     real hardware, not by review.
   - After the table, if run in a terminal and at least one server scored 3/3,
-    `test-doh.sh` offers to replace dnsproxy's current upstream with the four
+    `test-doh.sh` offers to replace dnsproxy's current upstream with the five
     fastest (`y`/`д` accepts, anything else is a no-op). It backs up
     `/etc/config/dnsproxy` to `/root` first, writes the new list with `uci`,
     restarts dnsproxy, and rolls back automatically if a lookup for
