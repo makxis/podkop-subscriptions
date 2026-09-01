@@ -566,6 +566,12 @@ The script prints its own version on completion, as `Версия установ
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
 ```
 
+Install and test the upstream servers in the same command:
+
+```sh
+wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh --test-servers
+```
+
 | Flag | What it does |
 |---|---|
 | `--configure-podkop` | Point Podkop's DNS at dnsproxy automatically. By default `/etc/config/podkop` is not modified. |

@@ -568,6 +568,12 @@ X-App-Version:   5.23.74
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
 ```
 
+Установка и сразу тест upstream-серверов одной командой:
+
+```sh
+wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh --test-servers
+```
+
 | Флаг | Что делает |
 |---|---|
 | `--configure-podkop` | Направить DNS Podkop на dnsproxy автоматически. По умолчанию `/etc/config/podkop` не изменяется. |
