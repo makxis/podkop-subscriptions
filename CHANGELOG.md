@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `install-dnsproxy.sh` (1.4.0 -> 1.5.0) no longer just refuses to start when
+  `/tmp/install-dnsproxy.lock` exists. It now checks whether the PID that
+  holds it is still alive: a stale lock left by a run that never got to its
+  cleanup trap is removed automatically, and a genuinely running instance
+  gets a prompt (in an interactive terminal) to either kill it and start over
+  or leave it alone and follow its log to completion instead — this is aimed
+  at the unstable-SSH case, where a dropped connection used to leave the
+  reconnecting user unable to tell whether the old run was still going
+  without manually cross-checking `ps`, timestamps and `/tmp/test-doh-*.log`.
+  Without a terminal (e.g. a second unattended invocation) it defaults to
+  following rather than killing. All installer output is now also appended
+  to `/tmp/install-dnsproxy.log`, which is what a second invocation tails.
 - Added `test-doh.sh`, a dependency-free tester for the upstream servers in
   `servers.txt`: pure POSIX sh, using only `dnsproxy` and `nslookup`, both
   already required to install dnsproxy in the first place. It works standalone

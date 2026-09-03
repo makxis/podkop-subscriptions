@@ -15,13 +15,16 @@
 
 set -eu
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
 LISTEN_ADDR="127.0.0.10"
 LISTEN_PORT="53"
+LOCK_DIR="/tmp/install-dnsproxy.lock"
+LOCK_PID_FILE="$LOCK_DIR/pid"
+LOG_FILE="/tmp/install-dnsproxy.log"
 CONFIGURE_PODKOP=0
 RESTART_PODKOP=1
 ADD_ISP_DNS=1
@@ -39,15 +42,15 @@ case "$SCRIPT_PATH" in
 esac
 
 log() {
-    printf '%s\n' "[dnsproxy-installer] $*"
+    printf '%s\n' "[dnsproxy-installer] $*" | tee -a "$LOG_FILE"
 }
 
 warn() {
-    printf '%s\n' "[dnsproxy-installer] WARNING: $*" >&2
+    printf '%s\n' "[dnsproxy-installer] WARNING: $*" | tee -a "$LOG_FILE" >&2
 }
 
 die() {
-    printf '%s\n' "[dnsproxy-installer] ERROR: $*" >&2
+    printf '%s\n' "[dnsproxy-installer] ERROR: $*" | tee -a "$LOG_FILE" >&2
     exit 1
 }
 
@@ -139,13 +142,76 @@ done
 command -v uci >/dev/null 2>&1 || die "Не найдена команда uci"
 command -v wget >/dev/null 2>&1 || die "Не найдена команда wget"
 
-LOCK_DIR="/tmp/install-dnsproxy.lock"
 TMP_DIR="/tmp/install-dnsproxy.$$"
 BACKUP_DIR="/root/dnsproxy-backup-$(date +%Y%m%d-%H%M%S)"
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    die "Установщик уже запущен: $LOCK_DIR"
-fi
+# При конфликте лока не просто падаем: если старый процесс жив, в интерактивном
+# терминале спрашиваем, убить его или присоединиться и просто досмотреть лог
+# (полезно после обрыва SSH и переподключения — раньше в этом случае приходилось
+# вручную лезть в ps/логи, чтобы понять, жив ли ещё старый запуск). Без терминала
+# (например, второй запуск из cron/CI) по умолчанию присоединяемся, а не убиваем
+# чужой процесс без спроса. Лок без живого владельца (процесс упал, не оставив
+# lock через trap) подчищается автоматически.
+acquire_lock() {
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "$$" > "$LOCK_PID_FILE"
+        : > "$LOG_FILE"
+        return 0
+    fi
+
+    old_pid="$(cat "$LOCK_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+        if [ -t 0 ] && [ -t 1 ]; then
+            printf '[dnsproxy-installer] Установщик уже выполняется (PID %s).\n' "$old_pid"
+            printf '[dnsproxy-installer] Убить его и начать заново? [y/N] (N — присоединиться и досмотреть лог до завершения): '
+            read -r ans || ans=""
+        else
+            ans=""
+        fi
+        case "$ans" in
+            y|Y|yes|YES|Yes|д|Д|да|Да|ДА)
+                kill "$old_pid" 2>/dev/null || true
+                waited=0
+                while kill -0 "$old_pid" 2>/dev/null && [ "$waited" -lt 10 ]; do
+                    sleep 1
+                    waited=$((waited + 1))
+                done
+                if kill -0 "$old_pid" 2>/dev/null; then
+                    kill -9 "$old_pid" 2>/dev/null || true
+                    sleep 1
+                fi
+                kill -0 "$old_pid" 2>/dev/null && die "Не удалось остановить PID $old_pid"
+                rm -rf "$LOCK_DIR"
+                acquire_lock
+                return $?
+                ;;
+            *)
+                printf '[dnsproxy-installer] Присоединяюсь к PID %s, лог: %s\n' "$old_pid" "$LOG_FILE"
+                [ -f "$LOG_FILE" ] || : > "$LOG_FILE"
+                tail -f "$LOG_FILE" &
+                tail_pid=$!
+                while kill -0 "$old_pid" 2>/dev/null; do
+                    sleep 1
+                done
+                sleep 1
+                kill "$tail_pid" 2>/dev/null || true
+                wait "$tail_pid" 2>/dev/null || true
+                printf '[dnsproxy-installer] PID %s завершился.\n' "$old_pid"
+                exit 0
+                ;;
+        esac
+        return 0
+    fi
+
+    # Лок остался от процесса, которого уже нет (упал без отработки trap) —
+    # это не конфликт, а мусор, можно смело подчистить и продолжить.
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || die "Не удалось создать $LOCK_DIR"
+    echo "$$" > "$LOCK_PID_FILE"
+    : > "$LOG_FILE"
+}
+
+acquire_lock
 mkdir -p "$TMP_DIR" "$BACKUP_DIR"
 
 cleanup() {

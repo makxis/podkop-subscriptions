@@ -558,9 +558,9 @@ This way a direct request from the router and an external subscription client lo
 
 ## Optional: DNS via dnsproxy
 
-A separate, optional script (`install-dnsproxy.sh`, version **1.4.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53` and adds hardened upstream servers. Podkop's config is left alone: on completion the script prints a short set of steps for pointing Podkop's DNS at dnsproxy by hand. Podkop's DNS server field takes the address without a port, `127.0.0.10`: a udp resolver is queried on 53 anyway, and Podkop's diagnostics report an error when the field carries one.
+A separate, optional script (`install-dnsproxy.sh`, version **1.5.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53` and adds hardened upstream servers. Podkop's config is left alone: on completion the script prints a short set of steps for pointing Podkop's DNS at dnsproxy by hand. Podkop's DNS server field takes the address without a port, `127.0.0.10`: a udp resolver is queried on 53 anyway, and Podkop's diagnostics report an error when the field carries one.
 
-The script prints its own version on completion, as `Версия установщика: 1.4.0`.
+The script prints its own version on completion, as `Версия установщика: 1.5.0`.
 
 ```sh
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
@@ -594,6 +594,8 @@ sh test-doh.sh
 It needs nothing beyond `dnsproxy` and `nslookup`, both already required to install dnsproxy in the first place — it works standalone on a router that never got the Python subscriptions component installed, as long as `install-dnsproxy.sh` has run. Each query is capped at 1000ms (`--timeout-ms`), so slow upstream servers don't stretch out the whole run — a server that misses the deadline is scored FAIL on that query instead of GOOD-but-slow. When `test-doh.sh` runs in a terminal and at least one server scored 3/3, it ends by asking whether to replace dnsproxy's current upstream with the five fastest — `y` applies it, anything else leaves the config untouched. Before writing, the current `/etc/config/dnsproxy` is backed up to `/root`; after restarting dnsproxy it's verified with a lookup for `openwrt.org`, and a failed lookup rolls the change back automatically.
 
 Re-running is safe: configs are backed up to `/root` first. When dnsproxy is already installed the package lists are left alone, so a single unreachable feed can no longer abort a re-run.
+
+Only one instance runs at a time, guarded by `/tmp/install-dnsproxy.lock`. Running the script again while a previous run is still going (say, after reconnecting following a dropped SSH session) does not just fail: in a terminal it asks whether to kill the earlier run or leave it alone and follow its output — from `/tmp/install-dnsproxy.log`, which every run appends to — until it finishes. Without a terminal it follows rather than kills. A lock left behind by a run that died without reaching its cleanup (crash, `kill -9`) is detected and cleared automatically.
 
 The run ends with a verification: dnsproxy has to answer on its own address, and ordinary name resolution on the router has to still work. If that fails, the installation is rolled back in full and the script says plainly that it did not work out. The rollback is a ready-made `rollback.sh`, written into the backup directory **before** anything is changed, with every value baked in: the previous dnsproxy config, Podkop's previous DNS settings, and whether dnsproxy was installed and enabled at all. It therefore does not depend on how far the installation got, and it can be run by hand at any later point:
 
