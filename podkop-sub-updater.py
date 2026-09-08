@@ -3,6 +3,7 @@ import os
 import sys
 import subprocess
 import base64
+import binascii
 import re
 import syslog
 import argparse
@@ -38,9 +39,25 @@ SUBSCRIPTION_DEVICE_OS = 'Android'
 SUBSCRIPTION_VER_OS = 'Android 11'
 SUBSCRIPTION_DEVICE_MODEL = 'OnePlus MT2110'
 SUBSCRIPTION_APP_VERSION = '5.23.74'
-# Must match the external subscription proxy profile exactly.
+# Fallback only. Every router is expected to generate its own X-HWID on first
+# run and keep it in UCI from then on; see resolve_fingerprint(). A single HWID
+# shared by several routers is exactly what a real client never does, and a
+# panel may treat it as a cloned device. This value stays as the last resort
+# for configs that predate the fingerprint section.
 SUBSCRIPTION_HWID = '<HWID-REDACTED>'
 USER_AGENT = SUBSCRIPTION_USER_AGENT
+# Header names and their order are part of the fingerprint: panels look at
+# X-HWID vs x-hwid and at the sequence, so this is a list of pairs and never
+# a dict.
+DEFAULT_FINGERPRINT_HEADERS = [
+    ('User-Agent', SUBSCRIPTION_USER_AGENT),
+    ('X-HWID', '{hwid}'),
+    ('X-Device-OS', SUBSCRIPTION_DEVICE_OS),
+    ('X-Ver-OS', SUBSCRIPTION_VER_OS),
+    ('X-Device-Model', SUBSCRIPTION_DEVICE_MODEL),
+    ('X-App-Version', SUBSCRIPTION_APP_VERSION),
+]
+HWID_BYTES = 8
 VALID_PROTOCOLS = ('vless://', 'ss://', 'trojan://', 'socks4://', 'socks4a://', 'socks5://', 'hy2://', 'hysteria2://')
 VALID_PTYPES = {'urltest', 'selector'}
 VALID_ON_EMPTY = {'all', 'skip'}
@@ -638,6 +655,9 @@ def load_jobs_from_uci_podkop(config_path):
         force_cleanup = is_enabled_value(opt.get('force_cleanup', '0'))
         dedupe_sni_rotation = is_enabled_value(opt.get('dedupe_sni_rotation', '0'))
         dedupe_endpoint_host = is_enabled_value(opt.get('dedupe_endpoint_host', '0'))
+        # Empty means the built-in profile, so configs that predate the
+        # fingerprint section keep working as before.
+        fingerprint_name = opt.get('fingerprint', '').strip()
         if not sec_name:
             log("WARN", f"subscription_group '{g['name']}': не задана целевая секция Podkop. Пропуск.")
             continue
@@ -683,6 +703,7 @@ def load_jobs_from_uci_podkop(config_path):
                 'regex': regex_pattern,
                 'match_mode': match_mode,
                 'on_empty': on_empty,
+                'fingerprint': fingerprint_name,
                 'line_num': g['line_num']
             })
     return jobs
@@ -754,23 +775,133 @@ def source_display_label(source, label=None):
     return 'источник'
 
 
-def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=None):
-    if source in cache:
-        return cache[source]
+def generate_hwid():
+    """Personal X-HWID for this router: 16 uppercase hex, like the real apps use.
+
+    Deliberately random rather than derived from machine-id or a serial: the
+    panel has no business knowing the router's hardware identity, and a random
+    value is just as stable once it is stored.
+    """
+    return binascii.hexlify(os.urandom(HWID_BYTES)).decode('ascii').upper()
+
+
+def parse_header_line(line):
+    """'Name: value' -> ('Name', 'value'), preserving case. None if unusable."""
+    if ':' not in line:
+        return None
+    name, _, value = line.partition(':')
+    name = name.strip()
+    value = value.strip()
+    if not name or not value:
+        return None
+    # Hop-by-hop headers cannot be replayed onto another connection, and Host
+    # is set by wget itself from the URL.
+    if name.lower() in ('host', 'connection', 'content-length', 'transfer-encoding',
+                        'keep-alive', 'proxy-connection', 'upgrade', 'te', 'trailer', 'expect'):
+        return None
+    # wget -qO- reads the body as text; a compressed answer would arrive as
+    # binary garbage, so encodings are not negotiated here even when the
+    # captured profile asked for them.
+    if name.lower() == 'accept-encoding':
+        return None
+    return (name, value)
+
+
+def load_fingerprints(config_path):
+    """Read 'config fingerprint' sections. Returns {name: {...}}."""
+    result = {}
+    try:
+        sections = parse_uci_sections(config_path)
+    except Exception:
+        return result
+    for s in sections:
+        if s['type'] != 'fingerprint':
+            continue
+        opt = s['options']
+        if opt.get('enabled', '1') == '0':
+            continue
+        headers = []
+        for line in s['lists'].get('header', []):
+            pair = parse_header_line(line)
+            if pair:
+                headers.append(pair)
+        result[s['name']] = {
+            'headers': headers,
+            'hwid': opt.get('hwid', '').strip(),
+        }
+    return result
+
+
+def persist_hwid(config_path, section, hwid):
+    """Write a freshly generated HWID back, so it never changes again."""
+    if os.path.basename(config_path) != 'podkop_subscriptions' or not config_path.startswith('/etc/config'):
+        log("WARN", f"HWID сгенерирован, но не сохранён: {config_path} не является UCI-конфигом. "
+                    "При следующем запуске он будет другим.")
+        return False
+    try:
+        subprocess.run(['uci', 'set', f'podkop_subscriptions.{section}.hwid={hwid}'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(['uci', 'commit', 'podkop_subscriptions'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return True
+    except Exception as exc:
+        log("WARN", f"Не удалось сохранить HWID в UCI: {type(exc).__name__}")
+        return False
+
+
+def resolve_fingerprint(fingerprints, name, config_path):
+    """Header pairs for a subscription request, with X-HWID substituted.
+
+    An empty name means the built-in profile, so configs written before the
+    fingerprint section keep working untouched.
+    """
+    profile = fingerprints.get(name) if name else None
+    if profile is None:
+        if name:
+            log("WARN", f"Отпечаток '{name}' не найден, беру встроенный профиль")
+        profile = fingerprints.get('default') or {'headers': [], 'hwid': ''}
+
+    hwid = profile.get('hwid', '').strip()
+    if not hwid:
+        hwid = generate_hwid()
+        section = name or 'default'
+        if persist_hwid(config_path, section, hwid):
+            log("INFO", f"Сгенерирован персональный X-HWID для этого роутера (профиль '{section}')")
+        profile['hwid'] = hwid
+
+    headers = profile.get('headers') or DEFAULT_FINGERPRINT_HEADERS
+    resolved = []
+    for hname, hvalue in headers:
+        resolved.append((hname, hwid if hvalue == '{hwid}' else hvalue))
+    if not any(n.lower() == 'x-hwid' for n, _ in resolved):
+        resolved.append(('X-HWID', hwid))
+    return resolved
+
+
+def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=None, header_pairs=None):
+    cache_key = (source, tuple(header_pairs) if header_pairs else None)
+    if cache_key in cache:
+        return cache[cache_key]
 
     retries = SOURCE_RETRIES_DEFAULT
     timeout = SOURCE_TIMEOUT_DEFAULT
 
     if is_url_source(source):
-        # Always use a fixed Android-like profile for outbound subscription requests.
-        # The real OpenWrt model/kernel is intentionally not sent to subscription servers.
-        cmd = ['wget', '-qO-', f'--user-agent={SUBSCRIPTION_USER_AGENT}']
-        cmd.extend(['--header', f'User-Agent: {SUBSCRIPTION_USER_AGENT}'])
-        cmd.extend(['--header', f'X-HWID: {hwid}'])
-        cmd.extend(['--header', f'X-Device-OS: {SUBSCRIPTION_DEVICE_OS}'])
-        cmd.extend(['--header', f'X-Ver-OS: {SUBSCRIPTION_VER_OS}'])
-        cmd.extend(['--header', f'X-Device-Model: {SUBSCRIPTION_DEVICE_MODEL}'])
-        cmd.extend(['--header', f'X-App-Version: {SUBSCRIPTION_APP_VERSION}'])
+        # The request must look like a real app client, so headers go out in the
+        # order and letter case they were captured with. The real OpenWrt model
+        # and kernel are never sent to subscription servers.
+        pairs = header_pairs or [
+            (name, hwid if value == '{hwid}' else value)
+            for name, value in DEFAULT_FINGERPRINT_HEADERS
+        ]
+        ua = next((v for n, v in pairs if n.lower() == 'user-agent'), SUBSCRIPTION_USER_AGENT)
+        # --user-agent instead of a second --header: passing both made wget send
+        # User-Agent twice, which no real client does.
+        cmd = ['wget', '-qO-', f'--user-agent={ua}']
+        for name, value in pairs:
+            if name.lower() == 'user-agent':
+                continue
+            cmd.extend(['--header', f'{name}: {value}'])
         cmd.append(source)
 
         last_error = 'неизвестная ошибка'
@@ -789,7 +920,7 @@ def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=Non
                 if result.returncode == 0 and result.stdout and result.stdout.strip():
                     if attempt > 1:
                         log('INFO', f"{source_display_label(source, label)}: успешно загружен с попытки {attempt}/{retries}")
-                    cache[source] = result.stdout
+                    cache[cache_key] = result.stdout
                     return result.stdout
 
                 last_error = result.stderr.strip() or 'Пустой ответ'
@@ -815,7 +946,7 @@ def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=Non
         payload = f.read()
     if not payload.strip():
         raise RuntimeError(f"локальный файл пустой: {path}")
-    cache[source] = payload
+    cache[cache_key] = payload
     return payload
 
 
@@ -1491,8 +1622,10 @@ def validate_jobs_links_for_podkop(jobs):
         if stats.get('input') and not valid:
             job['validation_failed'] = True
 
-def fetch_links(jobs, hwid, device_model, kernel_ver):
+def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_path=''):
     payload_cache = {}
+    fingerprints = fingerprints if fingerprints is not None else {}
+    header_cache = {}
     for sec, job in jobs.items():
         log("DEBUG", f"--- Обработка секции: [{sec}] ---")
         section_links = []
@@ -1517,8 +1650,15 @@ def fetch_links(jobs, hwid, device_model, kernel_ver):
                 label = f'источник {external_idx}'
 
             st = {'label': label, 'raw': 0, 'filtered': 0, 'format': '', 'status': 'unknown', 'local': bool(is_local)}
+            fp_name = entry.get('fingerprint', '')
+            if fp_name not in header_cache:
+                # Resolved once per profile: it may generate and persist an HWID,
+                # and that must not happen again for every single source.
+                header_cache[fp_name] = resolve_fingerprint(fingerprints, fp_name, config_path)
+            header_pairs = header_cache[fp_name]
             try:
-                payload = read_source_payload(source, hwid, device_model, kernel_ver, payload_cache, label)
+                payload = read_source_payload(source, hwid, device_model, kernel_ver, payload_cache, label,
+                                              header_pairs=header_pairs)
             except subprocess.TimeoutExpired:
                 st['status'] = 'download_failed'
                 if not is_local:
@@ -2865,8 +3005,13 @@ def main():
         device_model = SUBSCRIPTION_DEVICE_MODEL
         kernel_ver = SUBSCRIPTION_VER_OS
         hwid = SUBSCRIPTION_HWID
-        log("INFO", f"Профиль запроса подписок: {SUBSCRIPTION_USER_AGENT}, {SUBSCRIPTION_DEVICE_OS}, {SUBSCRIPTION_VER_OS}, {SUBSCRIPTION_DEVICE_MODEL}; используется фиксированный X-HWID, реальная модель роутера не отправляется")
-        log("INFO", "X-HWID фиксированный для совместимости с основным профилем подписки")
+        fingerprints = load_fingerprints(args.subs)
+        if fingerprints:
+            log("INFO", f"Профили отпечатка из конфига: {', '.join(sorted(fingerprints))}")
+        else:
+            log("INFO", f"Профиль запроса подписок встроенный: {SUBSCRIPTION_USER_AGENT}, {SUBSCRIPTION_DEVICE_OS}, {SUBSCRIPTION_VER_OS}, {SUBSCRIPTION_DEVICE_MODEL}")
+        # Значение X-HWID в лог не пишется: по нему панель опознаёт устройство.
+        log("INFO", "Реальная модель и ядро роутера подписочным серверам не отправляются")
         jobs = load_jobs(args.subs)
         if not jobs:
             state = load_state(args.state)
@@ -2893,7 +3038,7 @@ def main():
         imported, updated = import_current_links_to_state(state, current_sections)
         if imported or updated:
             log("INFO", f"State синхронизирован с текущим Podkop config: новых={imported}, обновлено={updated}")
-        fetch_links(jobs, hwid, device_model, kernel_ver)
+        fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints, args.subs)
         validate_jobs_links_for_podkop(jobs)
         protected_local_ids = load_local_protected_ids()
 
