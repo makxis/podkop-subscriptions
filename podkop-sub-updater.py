@@ -1012,6 +1012,37 @@ def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=Non
     return payload
 
 
+PLACEHOLDER_HOSTS = {'0.0.0.0', '127.0.0.1', '::', '[::]', 'localhost'}
+
+
+def is_placeholder_link(link):
+    """Узел-заглушка, а не рабочий сервер.
+
+    Панели сообщают об отказе не кодом ответа, а фиктивным узлом на 0.0.0.0:1,
+    у которого в имени и лежит причина: «Вы достигли максимального числа
+    устройств для вашей подписки». Без этой проверки такие записи попадали бы
+    в конфиг Podkop как обычные ключи и вытесняли рабочие.
+    """
+    m = re.search(r'://[^@]*@\[?([^\]/?#]+?)\]?:(\d+)', link)
+    if not m:
+        return False
+    host, port = m.group(1).lower(), m.group(2)
+    return host in PLACEHOLDER_HOSTS or port == '1'
+
+
+def link_title(link):
+    if '#' not in link:
+        return ''
+    return unquote_percent(link.split('#', 1)[1]).strip()
+
+
+def split_placeholders(links):
+    real, fake = [], []
+    for link in links:
+        (fake if is_placeholder_link(link) else real).append(link)
+    return real, fake
+
+
 def looks_like_blocked_body(text):
     """Заглушка вместо подписки.
 
@@ -2043,6 +2074,85 @@ def validate_jobs_links_for_podkop(jobs):
         if stats.get('input') and not valid:
             job['validation_failed'] = True
 
+def fingerprint_order(fingerprints, preferred):
+    """Порядок перебора профилей отпечатка.
+
+    Первым идёт выбранный у группы, затем остальные в порядке их следования в
+    конфиге. Пустой список профилей означает встроенный набор, то есть прежнее
+    поведение.
+    """
+    if not fingerprints:
+        return ['']
+    names = list(fingerprints)
+    if preferred and preferred in fingerprints:
+        return [preferred] + [n for n in names if n != preferred]
+    if 'default' in names:
+        return ['default'] + [n for n in names if n != 'default']
+    return names
+
+
+def fetch_source_trying_fingerprints(source, order, fingerprints, config_path,
+                                     header_cache, payload_cache, label,
+                                     hwid, device_model, kernel_ver):
+    """Загружает источник, перебирая профили отпечатка до первого удачного.
+
+    Разные панели ждут разных клиентов: одна отдаёт список только v2raytun,
+    другая только Happ, а третьей всё равно. Вместо того чтобы заставлять
+    сопоставлять их руками, пробуем профили по очереди. Неудачей считается не
+    только ошибка загрузки, но и заглушка либо ноль ссылок: панель, которая не
+    признала клиента, обычно отвечает именно так, а не кодом ошибки.
+
+    Возвращает (payload, ссылки, формат, имя профиля).
+    """
+    last_error = None
+    last_result = ('', [], 'empty', order[0] if order else '')
+
+    for index, name in enumerate(order, start=1):
+        if name not in header_cache:
+            header_cache[name] = resolve_fingerprint(fingerprints, name, config_path)
+        try:
+            payload = read_source_payload(source, hwid, device_model, kernel_ver,
+                                          payload_cache, label,
+                                          header_pairs=header_cache[name])
+        except Exception as exc:  # noqa: BLE001 — причина уходит выше как есть
+            last_error = exc
+            if index < len(order):
+                log("WARN", f"{label}: профиль '{name}' не сработал ({type(exc).__name__}), "
+                            f"пробую следующий")
+            continue
+
+        links, fmt = extract_links_from_payload(payload)
+        links, fake = split_placeholders(links)
+        if fake and not links:
+            # Панель ответила только заглушками: клиента она не признала.
+            # Текст в имени узла — самое внятное объяснение, какое она даёт.
+            fmt = 'placeholder'
+            for title in [link_title(x) for x in fake][:2]:
+                if title:
+                    log("WARN", f"{label}: панель ответила отказом: {title}")
+        elif fake:
+            log("INFO", f"{label}: отброшено узлов-заглушек: {len(fake)}")
+
+        if links:
+            if index > 1:
+                log("INFO", f"{label}: подошёл профиль отпечатка '{name}'")
+            return payload, links, fmt, name
+
+        last_result = (payload, links, fmt, name)
+        if index < len(order):
+            if fmt == 'blocked':
+                reason = 'заглушка вместо подписки'
+            elif fmt == 'placeholder':
+                reason = 'панель не признала этот отпечаток'
+            else:
+                reason = f'ссылок нет ({fmt})'
+            log("WARN", f"{label}: профиль '{name}' — {reason}, пробую следующий")
+
+    if last_error is not None and not last_result[0]:
+        raise last_error
+    return last_result
+
+
 def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_path=''):
     payload_cache = {}
     fingerprints = fingerprints if fingerprints is not None else {}
@@ -2071,15 +2181,18 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
                 label = f'источник {external_idx}'
 
             st = {'label': label, 'raw': 0, 'filtered': 0, 'format': '', 'status': 'unknown', 'local': bool(is_local)}
-            fp_name = entry.get('fingerprint', '')
-            if fp_name not in header_cache:
-                # Resolved once per profile: it may generate and persist an HWID,
-                # and that must not happen again for every single source.
-                header_cache[fp_name] = resolve_fingerprint(fingerprints, fp_name, config_path)
-            header_pairs = header_cache[fp_name]
+            # Профили резолвятся с кешем: резолв может сгенерировать и записать
+            # HWID, и делать это заново на каждый источник нельзя.
+            if is_local:
+                order = [entry.get('fingerprint', '')]
+            else:
+                order = fingerprint_order(fingerprints, entry.get('fingerprint', ''))
+            payload = ''
+            links_ready = None
             try:
-                payload = read_source_payload(source, hwid, device_model, kernel_ver, payload_cache, label,
-                                              header_pairs=header_pairs)
+                payload, links_ready, fmt_ready, used_fp = fetch_source_trying_fingerprints(
+                    source, order, fingerprints, config_path, header_cache,
+                    payload_cache, label, hwid, device_model, kernel_ver)
             except subprocess.TimeoutExpired:
                 st['status'] = 'download_failed'
                 if not is_local:
@@ -2099,7 +2212,10 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
                     log("DEBUG", f"[{sec}]: локальный список не прочитан: {e}")
                 continue
 
-            links_raw, payload_type = extract_links_from_payload(payload)
+            if links_ready is not None:
+                links_raw, payload_type = links_ready, fmt_ready
+            else:
+                links_raw, payload_type = extract_links_from_payload(payload)
             st['format'] = payload_type
             st['raw'] = len(links_raw)
             if not is_local:
