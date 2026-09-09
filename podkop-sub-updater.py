@@ -352,6 +352,24 @@ def merge_min_positive(current, value):
     return min(current, value)
 
 
+PERCENT_SAFE = set(
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~'
+)
+
+
+def percent_encode(s):
+    """Парный к unquote_percent кодировщик, тоже без urllib.
+
+    Нужен при сборке ссылки из JSON-подписки: имена узлов почти всегда с
+    эмодзи и кириллицей, а пароли и uuid могут содержать что угодно.
+    """
+    out = []
+    for byte in str(s or '').encode('utf-8', 'surrogatepass'):
+        ch = chr(byte)
+        out.append(ch if ch in PERCENT_SAFE else f'%{byte:02X}')
+    return ''.join(out)
+
+
 def unquote_percent(s):
     """Small percent-decoder without urllib dependency.
 
@@ -994,29 +1012,303 @@ def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=Non
     return payload
 
 
+def looks_like_blocked_body(text):
+    """Заглушка вместо подписки.
+
+    Панели за антиботом отдают такие страницы с кодом 200, поэтому по коду
+    ответа их не отличить, и без этой проверки они молча превращались в
+    «0 ссылок». Чаще всего это признак того, что отпечаток протух.
+    """
+    head = text[:1500]
+    if '403.html' in head:
+        return True
+    if 'DDoS-Mitigation' in head and 'iframe' in head:
+        return True
+    if '<html' in head.lower() and '403' in head:
+        return True
+    return False
+
+
+def _clash_query(params):
+    parts = []
+    for key, value in params.items():
+        if value is None or value == '' or value is False:
+            continue
+        parts.append(f"{key}={percent_encode(str(value))}")
+    return '&'.join(parts)
+
+
+def clash_proxy_to_uri(proxy):
+    """Объект Clash/Mihomo -> URI. Возвращает None, если тип не поддержан.
+
+    Такие объекты приходят не только из YAML: sub-store с ?target=JSON отдаёт
+    ровно их, массивом. Поэтому разбор возможен без python3-yaml, на одном
+    стандартном json.
+    """
+    if not isinstance(proxy, dict):
+        return None
+
+    ptype = str(proxy.get('type') or '').strip().lower()
+    server = str(proxy.get('server') or '').strip()
+    port = proxy.get('port')
+    name = str(proxy.get('name') or server)
+    if not server or not port:
+        return None
+
+    tls_on = bool(proxy.get('tls'))
+    network = str(proxy.get('network') or 'tcp').strip().lower()
+    ws = proxy.get('ws-opts') or {}
+    grpc = proxy.get('grpc-opts') or {}
+    reality = proxy.get('reality-opts') or {}
+
+    if ptype == 'vless':
+        uuid = str(proxy.get('uuid') or '').strip()
+        if not uuid:
+            return None
+        if reality:
+            security = 'reality'
+        elif tls_on:
+            security = 'tls'
+        else:
+            security = 'none'
+        params = {
+            'encryption': proxy.get('encryption') or 'none',
+            'type': network,
+            'security': security,
+            'flow': proxy.get('flow'),
+            'sni': proxy.get('sni'),
+            'fp': proxy.get('client-fingerprint'),
+            'pbk': reality.get('public-key'),
+            'sid': reality.get('short-id'),
+            'path': ws.get('path'),
+            'host': (ws.get('headers') or {}).get('Host'),
+            'serviceName': grpc.get('grpc-service-name'),
+            # sub-store кладёт режим grpc в служебный ключ с подчёркиванием.
+            'mode': grpc.get('_grpc-type') or grpc.get('grpc-type'),
+        }
+        return f"vless://{percent_encode(uuid)}@{server}:{port}?{_clash_query(params)}#{percent_encode(name)}"
+
+    if ptype == 'trojan':
+        password = str(proxy.get('password') or '').strip()
+        if not password:
+            return None
+        params = {
+            'type': network,
+            'security': 'tls' if tls_on or proxy.get('sni') else 'none',
+            'sni': proxy.get('sni'),
+            'fp': proxy.get('client-fingerprint'),
+            'path': ws.get('path'),
+            'host': (ws.get('headers') or {}).get('Host'),
+            'serviceName': grpc.get('grpc-service-name'),
+        }
+        return f"trojan://{percent_encode(password)}@{server}:{port}?{_clash_query(params)}#{percent_encode(name)}"
+
+    if ptype in ('hysteria2', 'hy2'):
+        password = str(proxy.get('password') or proxy.get('auth') or '').strip()
+        if not password:
+            return None
+        params = {
+            'sni': proxy.get('sni'),
+            'insecure': '1' if proxy.get('skip-cert-verify') else None,
+        }
+        query = _clash_query(params)
+        tail = f"?{query}" if query else ''
+        return f"hysteria2://{percent_encode(password)}@{server}:{port}{tail}#{percent_encode(name)}"
+
+    if ptype == 'ss':
+        method = str(proxy.get('cipher') or '').strip()
+        password = str(proxy.get('password') or '').strip()
+        if not method or not password:
+            return None
+        userinfo = base64.urlsafe_b64encode(f"{method}:{password}".encode()).decode().rstrip('=')
+        return f"ss://{userinfo}@{server}:{port}#{percent_encode(name)}"
+
+    return None
+
+
+def _find_proxy_outbound(config):
+    known = ('vless', 'vmess', 'trojan', 'shadowsocks', 'ss', 'hysteria', 'hysteria2', 'hy2', 'tuic')
+    for outbound in config.get('outbounds') or []:
+        if not isinstance(outbound, dict):
+            continue
+        tag = str(outbound.get('tag') or '').lower()
+        protocol = str(outbound.get('protocol') or outbound.get('type') or '').lower()
+        if tag == 'proxy' or tag.startswith('proxy') or protocol in known:
+            return outbound
+    return None
+
+
+def xray_outbound_to_uri(config, outbound):
+    """Полный конфиг Xray/V2Ray -> URI.
+
+    Такие массивы конфигов отдают панели Remnawave: один элемент на узел, где
+    сам узел лежит в outbound с тегом proxy, а имя в remarks соседнего уровня.
+    """
+    protocol = str(outbound.get('protocol') or '').lower()
+    stream = outbound.get('streamSettings') or {}
+    tls = stream.get('tlsSettings') or {}
+    reality = stream.get('realitySettings') or {}
+    ws = stream.get('wsSettings') or {}
+    grpc = stream.get('grpcSettings') or {}
+    xhttp = stream.get('xhttpSettings') or {}
+    httpupgrade = stream.get('httpupgradeSettings') or {}
+    tcp = stream.get('tcpSettings') or {}
+
+    network = str(stream.get('network') or 'tcp')
+    security = str(stream.get('security') or 'none')
+    alpn = tls.get('alpn')
+
+    common = {
+        'type': network,
+        'security': security,
+        'sni': reality.get('serverName') or tls.get('serverName') or None,
+        'fp': reality.get('fingerprint') or tls.get('fingerprint') or None,
+        'pbk': reality.get('publicKey'),
+        'sid': reality.get('shortId'),
+        'spx': reality.get('spiderX'),
+        'alpn': ','.join(alpn) if isinstance(alpn, list) else alpn,
+        'path': xhttp.get('path') or ws.get('path') or httpupgrade.get('path') or None,
+        'host': xhttp.get('host') or (ws.get('headers') or {}).get('Host') or ws.get('host') or None,
+        'mode': xhttp.get('mode'),
+        'serviceName': grpc.get('serviceName'),
+        'headerType': (tcp.get('header') or {}).get('type'),
+    }
+
+    if protocol == 'vless':
+        vnext = ((outbound.get('settings') or {}).get('vnext') or [None])[0]
+        if not vnext:
+            return None
+        user = (vnext.get('users') or [None])[0]
+        if not user or not user.get('id'):
+            return None
+        name = config.get('remarks') or outbound.get('tag') or vnext.get('address')
+        params = dict(common)
+        params['encryption'] = user.get('encryption') or 'none'
+        params['flow'] = user.get('flow') or None
+        return (f"vless://{percent_encode(user['id'])}@{vnext.get('address')}:{vnext.get('port')}"
+                f"?{_clash_query(params)}#{percent_encode(name)}")
+
+    if protocol in ('trojan', 'shadowsocks'):
+        server = ((outbound.get('settings') or {}).get('servers') or [None])[0]
+        if not server:
+            return None
+        name = config.get('remarks') or outbound.get('tag') or server.get('address')
+        if protocol == 'trojan':
+            if not server.get('password'):
+                return None
+            return (f"trojan://{percent_encode(server['password'])}@{server.get('address')}:{server.get('port')}"
+                    f"?{_clash_query(common)}#{percent_encode(name)}")
+        method = server.get('method')
+        password = server.get('password')
+        if not method or not password:
+            return None
+        userinfo = base64.urlsafe_b64encode(f"{method}:{password}".encode()).decode().rstrip('=')
+        return f"ss://{userinfo}@{server.get('address')}:{server.get('port')}#{percent_encode(name)}"
+
+    return None
+
+
+def links_from_json(text):
+    """Ссылки из JSON-подписки. Возвращает (ссылки, сколько не сконвертировалось)."""
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None, 0
+
+    if isinstance(data, dict):
+        # Clash-конфиг целиком либо обёртка вокруг списка. Конфиг Xray с
+        # outbounds здесь не разворачиваем: имя узла лежит в remarks рядом с
+        # ними, и, развернув, мы бы его потеряли.
+        if isinstance(data.get('outbounds'), list):
+            data = [data]
+        else:
+            for key in ('proxies', 'servers'):
+                if isinstance(data.get(key), list):
+                    data = data[key]
+                    break
+            else:
+                data = [data]
+
+    if not isinstance(data, list):
+        return None, 0
+
+    links = []
+    skipped = 0
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        uri = None
+        if isinstance(item.get('outbounds'), list):
+            outbound = _find_proxy_outbound(item)
+            if outbound is not None:
+                uri = xray_outbound_to_uri(item, outbound)
+        else:
+            uri = clash_proxy_to_uri(item)
+        if uri and uri.startswith(VALID_PROTOCOLS):
+            links.append(uri)
+        elif item.get('type') or item.get('protocol') or item.get('outbounds'):
+            skipped += 1
+    return links, skipped
+
+
+def _looks_like_base64(text):
+    """Строгая проверка перед декодированием.
+
+    Прежняя версия пыталась декодировать что угодно, что не содержало прямых
+    ссылок, и потому могла принять за base64 обычный текст или JSON.
+    """
+    compact = ''.join(text.split())
+    if not compact or '://' in compact:
+        return False
+    if len(compact) < 8 or len(compact) % 4 == 1:
+        return False
+    return bool(re.match(r'^[A-Za-z0-9+/=_-]+$', compact))
+
+
+def _decode_base64_loose(text):
+    compact = ''.join(text.split()).replace('-', '+').replace('_', '/')
+    compact += '=' * (-len(compact) % 4)
+    return base64.b64decode(compact).decode('utf-8', 'replace')
+
+
+def _plain_links(text):
+    return [ln.strip() for ln in text.splitlines() if ln.strip().startswith(VALID_PROTOCOLS)]
+
+
 def extract_links_from_payload(payload):
     text = payload.strip()
-    plain_links = []
-    for ln in text.splitlines():
-        ln = ln.strip()
-        if ln.startswith(VALID_PROTOCOLS):
-            plain_links.append(ln)
-    if plain_links:
-        return plain_links, 'plain'
-    compact = ''.join(text.split())
-    compact += '=' * (-len(compact) % 4)
-    try:
-        decoded_text = base64.b64decode(compact).decode('utf-8')
-    except Exception:
-        return [], 'invalid'
-    b64_links = []
-    for ln in decoded_text.splitlines():
-        ln = ln.strip()
-        if ln.startswith(VALID_PROTOCOLS):
-            b64_links.append(ln)
-    if b64_links:
-        return b64_links, 'base64'
-    return [], 'empty'
+    if not text:
+        return [], 'empty'
+
+    if looks_like_blocked_body(text):
+        return [], 'blocked'
+
+    # Порядок важен: base64 -> прямые ссылки -> JSON. Подписка, являющаяся
+    # base64 от JSON, при обратном порядке разбирается как «неизвестный формат».
+    if _looks_like_base64(text):
+        try:
+            decoded = _decode_base64_loose(text)
+        except Exception:
+            decoded = ''
+        if decoded:
+            links = _plain_links(decoded)
+            if links:
+                return links, 'base64'
+            json_links, _ = links_from_json(decoded)
+            if json_links:
+                return json_links, 'base64+json'
+
+    links = _plain_links(text)
+    if links:
+        return links, 'plain'
+
+    json_links, skipped = links_from_json(text)
+    if json_links:
+        if skipped:
+            log('WARN', f"JSON-подписка: {skipped} узлов не сконвертировано (неподдержанный тип)")
+        return json_links, 'json'
+
+    return [], 'invalid' if not json_links and skipped else 'empty'
 
 
 

@@ -452,7 +452,24 @@ return baseclass.extend({
       form.DynamicList,
       "header",
       _("Заголовки"),
-      _("По одному в строке, в формате «Имя: значение». Порядок строк сохраняется как есть. Строка «X-HWID: {hwid}» подставит значение из поля ниже.")
+      _("По одному в строке, в формате «Имя: значение». Порядок строк сохраняется как есть. Строка «X-HWID: {hwid}» подставит значение из поля ниже. Host и Accept-Encoding можно оставить, updater их отбросит сам." ) +
+        "<br><br>" +
+        _("Встроенный набор, если захочется вернуть как было:") +
+        "<pre style=\"margin:4px 0;padding:6px;background:#f7f7f7;border-left:3px solid #999;white-space:pre-wrap\">" +
+        "User-agent: v2raytun/android\n" +
+        "X-HWID: {hwid}\n" +
+        "X-Device-OS: Android\n" +
+        "X-Ver-OS: Android 11\n" +
+        "X-Device-Model: OnePlus MT2110\n" +
+        "X-App-Version: 5.25.81</pre>" +
+        _("Набор Happ, если панель ждёт именно этот клиент:") +
+        "<pre style=\"margin:4px 0;padding:6px;background:#f7f7f7;border-left:3px solid #999;white-space:pre-wrap\">" +
+        "User-agent: Happ/3.24.1/Android/17815953510421845578\n" +
+        "X-Device-Locale: ru\n" +
+        "X-HWID: {hwid}\n" +
+        "X-Device-OS: Android\n" +
+        "X-Ver-OS: 11\n" +
+        "X-Device-model: MT2110</pre>"
     );
     o.placeholder = "X-Device-OS: Android";
     o.rmempty = true;
