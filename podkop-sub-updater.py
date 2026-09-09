@@ -676,6 +676,7 @@ def load_jobs_from_uci_podkop(config_path):
         # Empty means the built-in profile, so configs that predate the
         # fingerprint section keep working as before.
         fingerprint_name = opt.get('fingerprint', '').strip()
+        expand_ips = is_enabled_value(opt.get('expand_domain_ips', '0'))
         if not sec_name:
             log("WARN", f"subscription_group '{g['name']}': не задана целевая секция Podkop. Пропуск.")
             continue
@@ -722,6 +723,7 @@ def load_jobs_from_uci_podkop(config_path):
                 'match_mode': match_mode,
                 'on_empty': on_empty,
                 'fingerprint': fingerprint_name,
+                'expand_ips': expand_ips,
                 'line_num': g['line_num']
             })
     return jobs
@@ -1526,6 +1528,76 @@ def load_local_protected_ids(path=None):
         log("WARN", f"Не удалось прочитать локальные ключи для защиты от удаления: локальный список: {e}")
     return protected
 
+def resolve_ipv4(host, timeout=4):
+    """A-записи домена. Пустой список при любой неудаче — резолв не критичен."""
+    import socket
+    old = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(timeout)
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    except Exception:
+        return []
+    finally:
+        socket.setdefaulttimeout(old)
+    return sorted({info[4][0] for info in infos})
+
+
+def _is_ip_literal(host):
+    return bool(re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host or '')) or ':' in (host or '')
+
+
+def expand_domain_ips(links, sec):
+    """Добавляет к доменной ссылке по копии на каждый её A-адрес.
+
+    Смысл в том, чтобы URLTest выбирал конкретный быстрый сервер, а не тот,
+    который в этот раз вернул DNS. Исходная ссылка с доменом остаётся: она
+    продолжит работать, даже когда адреса сменятся.
+
+    Разворачиваем только при двух и более адресах: для одного это лишь дубль.
+    К имени дописывается последний октет, иначе записи неотличимы в интерфейсе.
+    """
+    result = list(links)
+    seen = set(links)
+    added = 0
+    resolved_cache = {}
+
+    for link in links:
+        m = re.match(r'^(\w+)://([^@]*@)?\[?([^\]/?#:]+)\]?:(\d+)', link)
+        if not m:
+            continue
+        host = m.group(3)
+        if _is_ip_literal(host):
+            continue
+        if host not in resolved_cache:
+            resolved_cache[host] = resolve_ipv4(host)
+        ips = resolved_cache[host]
+        if len(ips) < 2:
+            continue
+
+        head, sep, name = link.partition('#')
+        # Последний октет различает адреса далеко не всегда: у 1.0.0.1 и
+        # 1.1.1.1 он одинаковый, и записи стали бы неотличимы в интерфейсе.
+        octets = [ip.rsplit('.', 1)[-1] for ip in ips]
+        short_enough = len(set(octets)) == len(octets)
+        for ip in ips:
+            octet = ip.rsplit('.', 1)[-1] if short_enough else ip
+            # Заменяем только хост, оставляя всё остальное нетронутым: sni,
+            # host и прочие параметры должны остаться от домена, иначе TLS
+            # сломается.
+            new_head = head[:m.start(3)] + ip + head[m.end(3):]
+            new_name = f"{name}-{octet}" if name else octet
+            new_link = f"{new_head}{sep or '#'}{new_name}"
+            if new_link in seen:
+                continue
+            seen.add(new_link)
+            result.append(new_link)
+            added += 1
+
+    if added:
+        log("INFO", f"[{sec}]: разворачивание доменов в IP добавило ссылок: {added}")
+    return result
+
+
 def filter_links(links_raw, regex_pattern, match_mode, on_empty, sec, source_label):
     if not regex_pattern:
         return links_raw
@@ -2316,6 +2388,10 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
                 continue
 
             filtered_links = filter_links(links_raw, entry['regex'], entry['match_mode'], entry['on_empty'], sec, label)
+            # После фильтра, а не до: разворачивать то, что всё равно отсеется
+            # regex-ом, значит впустую ходить в DNS.
+            if entry.get('expand_ips') and filtered_links:
+                filtered_links = expand_domain_ips(filtered_links, sec)
             st['filtered'] = len(filtered_links)
             if not is_local:
                 job['filtered_links_count'] += len(filtered_links)

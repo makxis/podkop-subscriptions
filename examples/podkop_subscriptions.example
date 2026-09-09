@@ -24,6 +24,10 @@ config subscription_group 'main'
     # Пусто или отсутствует — встроенный профиль, как было до появления секции.
     option fingerprint 'default'
     list source 'https://example.com/subscription'
+    # Домен узла с несколькими A-записями превращается в набор ключей по
+    # одному на адрес, плюс исходный доменный. Нужно, чтобы URLTest выбирал
+    # конкретный быстрый сервер, а не тот, что вернул DNS.
+    option expand_domain_ips '0'
     option use_local_links '1'
     option regex ''
     option match_mode 'ifnotmatch'
