@@ -148,7 +148,11 @@ sing-box:        1.12.17; 1.12.22
 
 ## Features
 
-- downloads plain-text and base64 subscriptions;
+- downloads subscriptions as plain text, base64 and JSON (Clash/Mihomo objects and Xray configs);
+- fetches them with the fingerprint of a real mobile client, configurable in LuCI;
+- tries several fingerprint profiles until a panel serves the list;
+- recognises the stubs and placeholder nodes panels use to signal refusal;
+- can expand a node's domain into separate keys, one per IP address;
 - supports `vless://`, `trojan://`, `ss://`, `socks4://`, `socks4a://`, `socks5://`, `hy2://`, `hysteria2://`;
 - validates links with a Python checker and `sing-box check` **before** writing to Podkop;
 - never overwrites a working section when no valid links remain;
@@ -297,6 +301,8 @@ config subscription_schedule 'main_0310'
 | `force_cleanup` | `0` | `1` — prune links with `fail_count >= 2` and over-latency links even when `max_links` is not reached. |
 | `dedupe_sni_rotation` | `0` | `1` — treat links differing only by `sni` as one. |
 | `dedupe_endpoint_host` | `0` | `1` — collapse links sharing the same `IP/domain:port`. |
+| `expand_domain_ips` | `0` | `1` — a domain resolving to several addresses also yields one key per IP. The domain key stays. See [Expanding domains into IPs](#expanding-domains-into-ips). |
+| `fingerprint` | empty | Name of the fingerprint profile for this group. Empty means `default`. See [Client fingerprint](#client-fingerprint). |
 
 When several groups write into one section, numeric limits take the smallest value set, and the flags (`force_cleanup`, both `dedupe_*`) turn on if enabled in at least one group.
 
@@ -311,6 +317,119 @@ When several groups write into one section, numeric limits take the smallest val
 | `force` | `1` — append `--force`: rewrite the section and restart Podkop even without changes. |
 
 You can define several schedules — for example, a night and a daytime one.
+
+---
+
+## Client fingerprint
+
+Subscription panels (Remnawave, Marzban, 3x-ui and the like) serve different
+content to different clients, telling them apart by request headers:
+`User-Agent`, `X-HWID`, `X-Device-Model`, `X-App-Version`. An ordinary HTTP
+client gets a truncated list, a stub page, or a refusal.
+
+So the updater fetches subscriptions with a header set captured from a real
+mobile client. The set lives in the config and is editable in LuCI:
+
+```
+config fingerprint 'default'
+    option enabled '1'
+    list header 'User-agent: v2raytun/android'
+    list header 'X-HWID: {hwid}'
+    list header 'X-Device-OS: Android'
+    list header 'X-Ver-OS: Android 11'
+    list header 'X-Device-Model: OnePlus MT2110'
+    list header 'X-App-Version: 5.25.81'
+```
+
+Line order and header-name case are preserved exactly: panels look at both, so
+the set goes out the way it was captured. `Host` and `Accept-Encoding` can be
+left in, the updater drops them itself.
+
+The `default` profile applies to every subscription group. A group can pick a
+different one with the `fingerprint` option.
+
+### X-HWID
+
+`X-HWID` is an ordinary line of the block. A value of `{hwid}` means "generate
+a personal identifier on the first update and write it here": 16 hex characters
+from `/dev/urandom`. It never changes afterwards — to a panel, a changed
+`X-HWID` looks like a new device.
+
+If the config has no `fingerprint` section at all, one is created on the first
+run with the built-in set and an HWID of its own.
+
+**Device limits.** Many panels cap the number of devices per subscription and
+bind them by `X-HWID`. Every router with its own identifier takes a slot. If
+that gets in the way, copy the generated value from the first router to the
+others so they appear as a single device.
+
+### Several profiles
+
+There can be more than one profile: one panel expects v2raytun, another Happ.
+No manual mapping is needed — the updater tries them in turn until the
+subscription reads. The group's own choice goes first, then the rest in config
+order.
+
+Failure is not only a download error. A panel that will not serve this client
+usually answers 200: either with an anti-bot stub page, or with a fake node on
+`0.0.0.0:1` whose name carries the reason, such as "Вы достигли максимального
+числа устройств для вашей подписки". Both are recognised, the reason is logged,
+and the placeholder keys never reach the Podkop config.
+
+### What sends the request
+
+When `curl` is available it is used: it sends headers byte for byte and in the
+given order. This adds no dependency, since Podkop itself requires `curl`.
+
+OpenWrt's stock `wget` (which is `uclient-fetch`) stays as a fallback, but it
+always rewrites `User-Agent` with its own capitalisation and puts it last, so
+the fingerprint is only approximate. The log warns when that path is taken.
+
+Compression is never requested: OpenWrt builds libcurl without zlib.
+
+---
+
+## Subscription formats
+
+Detected automatically, in this order: base64 → direct links → JSON.
+
+| Format | Typical source |
+|---|---|
+| direct links, one per line | most panels |
+| base64 of such a list | the same, usual packaging |
+| JSON with Clash/Mihomo objects | Sub-Store with `?target=JSON` |
+| JSON with full Xray configs | Remnawave: an array of configs, node name in `remarks` |
+
+Parsing JSON needs no `python3-yaml`: Clash objects arrive as plain JSON. The
+link-building rules are ported from Sub-Store (`producers/uri.js`), the very
+code a panel runs for `?target=URI`, and checked against it: the same
+collection in both formats yields identical links.
+
+If a source can hand out ready-made links, prefer asking it for those — fewer
+conversions, fewer ways to drift.
+
+---
+
+## Expanding domains into IPs
+
+A subscription often points at a node by domain while several servers sit
+behind it. Which one you get is up to DNS, and that is not necessarily the
+fastest.
+
+The `expand_domain_ips` option (**Разворачивать домены в IP** in LuCI) adds one
+key per IP for any domain resolving to two or more addresses. The domain key
+stays, so the entry keeps working when the addresses change. Podkop's URLTest
+then measures the servers individually and picks the best.
+
+Only the host is substituted. `sni`, `host` and the remaining parameters keep
+pointing at the domain, otherwise TLS and the ws transport break. The name gains
+the address's last octet as a suffix, or the whole address when the octets
+collide.
+
+Domains with a single address are left alone. Expansion runs after the regex
+filter, so links that get dropped never cost a DNS lookup.
+
+The number of keys grows noticeably, so the `max_links` cap fills up sooner.
 
 ---
 

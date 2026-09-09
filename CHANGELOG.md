@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- The request fingerprint is no longer hardcoded. A `config fingerprint`
+  section holds the headers as an ordered list of `Name: value` lines, which is
+  what preserves the letter case and order panels actually check, and the LuCI
+  page edits it as a single block so a captured profile can be pasted whole.
+  A group picks a profile with `option fingerprint`; empty means `default`.
+  - `X-HWID` is an ordinary line of that block. `{hwid}` in it, or no `X-HWID`
+    line at all, means one gets generated from `/dev/urandom` on the first run
+    and written back, staying stable from then on: to a panel a changed HWID
+    looks like a new device. A config without a fingerprint section gets one
+    created on first run.
+  - **The old hardcoded `SUBSCRIPTION_HWID` was a real device identifier**, so
+    every installation announced itself as the same phone. It is gone, and the
+    value was purged from the repository history.
+  - Several profiles are tried in turn until a subscription reads, so panels
+    wanting different clients need no manual mapping.
+- Subscriptions are fetched with `curl` when it is present, because OpenWrt's
+  stock `wget` is `uclient-fetch` and always rewrites `User-Agent` with its own
+  capitalisation and position, which defeats the point of a captured
+  fingerprint. This adds no dependency: Podkop itself requires `curl`. The wget
+  path remains as a fallback and says so in the log. `User-Agent` used to be
+  sent twice, via both `--user-agent` and `--header`; now once.
+- JSON subscriptions are understood: Clash/Mihomo objects, as Sub-Store returns
+  them with `?target=JSON`, and arrays of complete Xray configs as Remnawave
+  panels return them. No `python3-yaml` is needed for either. The conversion
+  rules are ported from Sub-Store's own `producers/uri.js` and verified against
+  it — the same collection fetched as JSON and as URI produces identical links,
+  matching on every query parameter.
+- Refusals are recognised instead of being counted as empty subscriptions:
+  anti-bot stub pages served under a 200, and placeholder nodes on `0.0.0.0:1`
+  whose names carry the reason ("Вы достигли максимального числа устройств для
+  вашей подписки"). Those keys no longer reach the Podkop config, and the
+  panel's own wording goes to the log.
+- Base64 detection is strict now — length, alphabet including the url-safe one,
+  and a sanity check on the decoded text — instead of trying to decode anything
+  that had no direct links in it.
+- New per-group option `expand_domain_ips`: a domain resolving to two or more
+  addresses also yields one key per IP, with the domain key kept. URLTest can
+  then pick the fastest server rather than whatever DNS returned. Only the host
+  is replaced, so `sni` and `host` keep pointing at the domain.
 - `install-dnsproxy.sh` (1.4.0 -> 1.5.0) no longer just refuses to start when
   `/tmp/install-dnsproxy.lock` exists. It now checks whether the PID that
   holds it is still alive: a stale lock left by a run that never got to its
