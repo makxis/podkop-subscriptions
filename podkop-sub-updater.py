@@ -995,7 +995,11 @@ def build_fetch_command(source, pairs, timeout):
     тянуть обязательную зависимость на роутеры, где его нет.
     """
     if have_curl():
-        cmd = ['curl', '-sS', '-L',
+        # --fail-with-body: тело нужно, чтобы распознать заглушку под кодом 200,
+        # но при 4xx/5xx curl должен именно упасть и сказать код в stderr. Без
+        # этого сервер, отвечающий 502 с пустым телом, выглядел неотличимо от
+        # таймаута и от честно пустой подписки — во всех случаях «Пустой ответ».
+        cmd = ['curl', '-sS', '-L', '--fail-with-body',
                '--max-time', str(timeout), '--connect-timeout', '15']
         for name, value in pairs:
             # Сжатие не запрашиваем вовсе. libcurl в OpenWrt собран без zlib,
