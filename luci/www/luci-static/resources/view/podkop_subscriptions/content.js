@@ -423,6 +423,51 @@ return baseclass.extend({
 
     o = section.option(
       form.SectionValue,
+      "_fingerprint",
+      form.TypedSection,
+      "fingerprint",
+      _("Отпечаток клиента"),
+      _("Заголовки, с которыми роутер запрашивает подписку. Панель по ним решает, что перед ней настоящее приложение, поэтому важны и регистр имён, и порядок строк. Профиль с именем default применяется ко всем группам подписок; если его нет, используется встроенный набор. Host и Accept-Encoding можно не убирать, updater их отбросит сам.")
+    );
+
+    o.uciconfig = "podkop_subscriptions";
+
+    ss = o.subsection;
+    ss.uciconfig = "podkop_subscriptions";
+    ss.anonymous = false;
+    ss.addremove = true;
+    ss.sortable = false;
+    ss.nodescriptions = false;
+
+    o = ss.option(
+      form.Flag,
+      "enabled",
+      _("Включено"),
+      _("Отключённый профиль updater не использует.")
+    );
+    o.default = "1";
+    o.rmempty = false;
+
+    o = ss.option(
+      form.DynamicList,
+      "header",
+      _("Заголовки"),
+      _("По одному в строке, в формате «Имя: значение». Порядок строк сохраняется как есть. Строка «X-HWID: {hwid}» подставит значение из поля ниже.")
+    );
+    o.placeholder = "X-Device-OS: Android";
+    o.rmempty = true;
+
+    o = ss.option(
+      form.Value,
+      "hwid",
+      _("X-HWID"),
+      _("Идентификатор устройства. Пустое поле означает, что при следующем обновлении будет сгенерирован персональный и записан сюда. Менять его после этого не нужно: для панели смена X-HWID выглядит как новое устройство, а лимит устройств на подписку есть у многих панелей. Если лимит мешает, скопируйте сюда значение с первого настроенного роутера.")
+    );
+    o.placeholder = _("будет сгенерирован при первом обновлении");
+    o.rmempty = true;
+
+    o = section.option(
+      form.SectionValue,
       "_subscription_schedules",
       form.TypedSection,
       "subscription_schedule",

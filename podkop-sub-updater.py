@@ -855,16 +855,23 @@ def resolve_fingerprint(fingerprints, name, config_path):
     An empty name means the built-in profile, so configs written before the
     fingerprint section keep working untouched.
     """
-    profile = fingerprints.get(name) if name else None
+    section = name if name and name in fingerprints else 'default'
+    profile = fingerprints.get(section)
     if profile is None:
         if name:
             log("WARN", f"Отпечаток '{name}' не найден, беру встроенный профиль")
-        profile = fingerprints.get('default') or {'headers': [], 'hwid': ''}
+        # Конфиг без секции fingerprint вообще: ведём себя ровно как раньше.
+        # Генерировать HWID здесь нельзя — записать его будет некуда, и он
+        # менялся бы на каждом запуске, а для панели это каждый раз новое
+        # устройство.
+        return [
+            (hname, SUBSCRIPTION_HWID if hvalue == '{hwid}' else hvalue)
+            for hname, hvalue in DEFAULT_FINGERPRINT_HEADERS
+        ]
 
     hwid = profile.get('hwid', '').strip()
     if not hwid:
         hwid = generate_hwid()
-        section = name or 'default'
         if persist_hwid(config_path, section, hwid):
             log("INFO", f"Сгенерирован персональный X-HWID для этого роутера (профиль '{section}')")
         profile['hwid'] = hwid
@@ -876,6 +883,51 @@ def resolve_fingerprint(fingerprints, name, config_path):
     if not any(n.lower() == 'x-hwid' for n, _ in resolved):
         resolved.append(('X-HWID', hwid))
     return resolved
+
+
+def have_curl():
+    return os.path.exists('/usr/bin/curl') or os.path.exists('/bin/curl')
+
+
+def build_fetch_command(source, pairs, timeout):
+    """Команда загрузки подписки с заголовками профиля.
+
+    curl предпочтительнее, и не из вкусовщины: он отправляет заголовки ровно в
+    том виде и порядке, как переданы. Штатный для OpenWrt uclient-fetch так не
+    умеет — он всегда ставит User-Agent последним и своим написанием, независимо
+    от того, передан тот через --user-agent или через --header. Для панели,
+    которая опознаёт клиента по отпечатку, это отличие от настоящего приложения.
+    Поэтому при наличии curl ходим им, а на uclient-fetch откатываемся, чтобы не
+    тянуть обязательную зависимость на роутеры, где его нет.
+    """
+    if have_curl():
+        cmd = ['curl', '-sS', '-L',
+               '--max-time', str(timeout), '--connect-timeout', '15']
+        for name, value in pairs:
+            # Сжатие не запрашиваем вовсе. libcurl в OpenWrt собран без zlib,
+            # там даже --compressed не существует ("the installed libcurl
+            # version does not support this"), а просить gzip, не умея его
+            # распаковать, значит получить в разбор двоичный мусор.
+            if name.lower() == 'accept-encoding':
+                continue
+            cmd.extend(['-H', f'{name}: {value}'])
+        # curl добавляет свой Accept: */*, которого у приложения может не быть.
+        # Пустое значение убирает заголовок целиком, а не шлёт его пустым.
+        if not any(n.lower() == 'accept' for n, _ in pairs):
+            cmd.extend(['-H', 'Accept:'])
+        cmd.append(source)
+        return cmd
+
+    ua = next((v for n, v in pairs if n.lower() == 'user-agent'), SUBSCRIPTION_USER_AGENT)
+    # --user-agent вместо второго --header: с обоими сразу заголовок уходил
+    # дважды, чего настоящий клиент не делает.
+    cmd = ['wget', '-qO-', f'--user-agent={ua}']
+    for name, value in pairs:
+        if name.lower() == 'user-agent':
+            continue
+        cmd.extend(['--header', f'{name}: {value}'])
+    cmd.append(source)
+    return cmd
 
 
 def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=None, header_pairs=None):
@@ -894,15 +946,7 @@ def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=Non
             (name, hwid if value == '{hwid}' else value)
             for name, value in DEFAULT_FINGERPRINT_HEADERS
         ]
-        ua = next((v for n, v in pairs if n.lower() == 'user-agent'), SUBSCRIPTION_USER_AGENT)
-        # --user-agent instead of a second --header: passing both made wget send
-        # User-Agent twice, which no real client does.
-        cmd = ['wget', '-qO-', f'--user-agent={ua}']
-        for name, value in pairs:
-            if name.lower() == 'user-agent':
-                continue
-            cmd.extend(['--header', f'{name}: {value}'])
-        cmd.append(source)
+        cmd = build_fetch_command(source, pairs, timeout)
 
         last_error = 'неизвестная ошибка'
 
@@ -3011,6 +3055,11 @@ def main():
         else:
             log("INFO", f"Профиль запроса подписок встроенный: {SUBSCRIPTION_USER_AGENT}, {SUBSCRIPTION_DEVICE_OS}, {SUBSCRIPTION_VER_OS}, {SUBSCRIPTION_DEVICE_MODEL}")
         # Значение X-HWID в лог не пишется: по нему панель опознаёт устройство.
+        if have_curl():
+            log("INFO", "Загрузчик подписок: curl (заголовки уходят в заданном порядке и регистре)")
+        else:
+            log("INFO", "Загрузчик подписок: wget. Он ставит User-Agent последним и своим написанием; "
+                        "для точного совпадения с настоящим клиентом поставьте curl: opkg install curl")
         log("INFO", "Реальная модель и ядро роутера подписочным серверам не отправляются")
         jobs = load_jobs(args.subs)
         if not jobs:
