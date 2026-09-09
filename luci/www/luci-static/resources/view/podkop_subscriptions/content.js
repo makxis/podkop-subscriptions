@@ -12,6 +12,13 @@ const LOCAL_LINKS = "/etc/podkop-subscriptions/local-links";
 const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.6.6";
 const STATUS_STYLE_PLAIN_CARD_V36 = true;
 
+// Примеры в подсказках оформляются только отступами и полоской слева.
+// Цвет текста и фон остаются темы: жёстко заданный светлый фон делал текст
+// нечитаемым в тёмных темах вроде Argon.
+const EXAMPLE_BLOCK_STYLE =
+  "<pre style=\"margin:4px 0 10px;padding:6px 10px;border-left:3px solid currentColor;" +
+  "opacity:.85;white-space:pre-wrap;font-family:monospace\">";
+
 function hideDuplicatedSubscriptionsTitle() {
   if (document.getElementById("podkop-subscriptions-title-hide-style"))
     return;
@@ -264,7 +271,9 @@ return baseclass.extend({
           safeText +
           '</div>';
       }).catch(function(err) {
-        return '<div style="white-space:pre-wrap;padding:10px;border-left:4px solid #999;background:#f7f7f7">Состояние: нет данных. ' +
+        // Цвет текста задаётся вместе с фоном: без него карточка в тёмной теме
+        // получалась белым по белому.
+        return '<div style="white-space:pre-wrap;padding:10px;border-left:4px solid #999;background:#ffffff;color:#000000">Состояние: нет данных. ' +
           String(err).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") +
           '</div>';
       });
@@ -453,10 +462,12 @@ return baseclass.extend({
       form.TextValue,
       "_headers",
       _("Заголовки"),
-      _("Одним блоком, по заголовку в строке, в формате «Имя: значение». Порядок строк и регистр имён сохраняются как есть — панель смотрит и на то, и на другое. Строка «X-HWID: {hwid}» подставит значение из поля ниже. Host и Accept-Encoding можно оставить, updater их отбросит сам." ) +
+      _("Одним блоком, по заголовку в строке, в формате «Имя: значение». Порядок строк и регистр имён сохраняются как есть — панель смотрит и на то, и на другое. X-HWID тоже просто строка блока: если оставить в ней {hwid} или убрать строку совсем, при первом обновлении сюда будет записан персональный идентификатор этого роутера. Host и Accept-Encoding можно оставить, updater их отбросит сам." ) +
         "<br><br>" +
         _("Встроенный набор, если захочется вернуть как было:") +
-        "<pre style=\"margin:4px 0;padding:6px;background:#f7f7f7;border-left:3px solid #999;white-space:pre-wrap\">" +
+        // Ни цвета, ни фона: тема задаёт их сама. Со светлым фоном вписанным в
+        // стиль текст в тёмной теме оказывался белым по белому.
+        EXAMPLE_BLOCK_STYLE +
         "User-agent: v2raytun/android\n" +
         "X-HWID: {hwid}\n" +
         "X-Device-OS: Android\n" +
@@ -464,7 +475,7 @@ return baseclass.extend({
         "X-Device-Model: OnePlus MT2110\n" +
         "X-App-Version: 5.25.81</pre>" +
         _("Набор Happ, если панель ждёт именно этот клиент:") +
-        "<pre style=\"margin:4px 0;padding:6px;background:#f7f7f7;border-left:3px solid #999;white-space:pre-wrap\">" +
+        EXAMPLE_BLOCK_STYLE +
         "User-agent: Happ/3.24.1/Android/17815953510421845578\n" +
         "X-Device-Locale: ru\n" +
         "X-HWID: {hwid}\n" +
@@ -502,14 +513,6 @@ return baseclass.extend({
       uci.unset("podkop_subscriptions", section_id, "header");
     };
 
-    o = ss.option(
-      form.Value,
-      "hwid",
-      _("X-HWID"),
-      _("Идентификатор устройства. Пустое поле означает, что при следующем обновлении будет сгенерирован персональный и записан сюда. Менять его после этого не нужно: для панели смена X-HWID выглядит как новое устройство, а лимит устройств на подписку есть у многих панелей. Если лимит мешает, скопируйте сюда значение с первого настроенного роутера.")
-    );
-    o.placeholder = _("будет сгенерирован при первом обновлении");
-    o.rmempty = true;
 
     o = section.option(
       form.SectionValue,

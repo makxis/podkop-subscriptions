@@ -850,8 +850,34 @@ def load_fingerprints(config_path):
     return result
 
 
+def persist_headers(config_path, section, pairs):
+    """Переписывает список заголовков профиля целиком.
+
+    Нужно, когда в блоке стоял placeholder {hwid} или X-HWID вовсе не было:
+    сгенерированное значение уезжает прямо в строку заголовка, чтобы блок
+    оставался единственным источником правды и дальше не менялся.
+    """
+    if os.path.basename(config_path) != 'podkop_subscriptions' or not config_path.startswith('/etc/config'):
+        log("WARN", f"HWID сгенерирован, но не сохранён: {config_path} не является UCI-конфигом. "
+                    "При следующем запуске он будет другим.")
+        return False
+    try:
+        subprocess.run(['uci', '-q', 'delete', f'podkop_subscriptions.{section}.header'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for hname, hvalue in pairs:
+            subprocess.run(['uci', 'add_list',
+                            f'podkop_subscriptions.{section}.header={hname}: {hvalue}'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(['uci', 'commit', 'podkop_subscriptions'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return True
+    except Exception as exc:
+        log("WARN", f"Не удалось сохранить заголовки в UCI: {type(exc).__name__}")
+        return False
+
+
 def persist_hwid(config_path, section, hwid):
-    """Write a freshly generated HWID back, so it never changes again."""
+    """Совместимость со старым конфигом, где HWID жил отдельной опцией."""
     if os.path.basename(config_path) != 'podkop_subscriptions' or not config_path.startswith('/etc/config'):
         log("WARN", f"HWID сгенерирован, но не сохранён: {config_path} не является UCI-конфигом. "
                     "При следующем запуске он будет другим.")
@@ -876,11 +902,10 @@ def create_default_fingerprint(config_path, hwid):
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         subprocess.run(['uci', 'set', 'podkop_subscriptions.default.enabled=1'],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        subprocess.run(['uci', 'set', f'podkop_subscriptions.default.hwid={hwid}'],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         for hname, hvalue in DEFAULT_FINGERPRINT_HEADERS:
+            value = hwid if hvalue == '{hwid}' else hvalue
             subprocess.run(['uci', 'add_list',
-                            f'podkop_subscriptions.default.header={hname}: {hvalue}'],
+                            f'podkop_subscriptions.default.header={hname}: {value}'],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         subprocess.run(['uci', 'commit', 'podkop_subscriptions'],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -921,20 +946,35 @@ def resolve_fingerprint(fingerprints, name, config_path):
             for hname, hvalue in DEFAULT_FINGERPRINT_HEADERS
         ]
 
-    hwid = profile.get('hwid', '').strip()
-    if not hwid:
-        hwid = generate_hwid()
-        if persist_hwid(config_path, section, hwid):
-            log("INFO", f"Сгенерирован персональный X-HWID для этого роутера (профиль '{section}')")
-        profile['hwid'] = hwid
+    headers = list(profile.get('headers') or DEFAULT_FINGERPRINT_HEADERS)
+    # X-HWID живёт обычной строкой блока, а не отдельной опцией: так весь
+    # отпечаток редактируется и вставляется одним куском. Отдельная опция hwid
+    # ещё читается ради конфигов, написанных до этого изменения.
+    legacy_hwid = profile.get('hwid', '').strip()
+    has_placeholder = any(v == '{hwid}' for _, v in headers)
+    has_hwid_line = any(n.lower() == 'x-hwid' for n, _ in headers)
 
-    headers = profile.get('headers') or DEFAULT_FINGERPRINT_HEADERS
-    resolved = []
-    for hname, hvalue in headers:
-        resolved.append((hname, hwid if hvalue == '{hwid}' else hvalue))
-    if not any(n.lower() == 'x-hwid' for n, _ in resolved):
-        resolved.append(('X-HWID', hwid))
-    return resolved
+    if has_placeholder or not has_hwid_line:
+        hwid = legacy_hwid or generate_hwid()
+        resolved = [(n, hwid if v == '{hwid}' else v) for n, v in headers]
+        if not has_hwid_line:
+            resolved.append(('X-HWID', hwid))
+        # Записываем значение обратно в блок, чтобы оно больше не менялось:
+        # для панели новый X-HWID это каждый раз новое устройство.
+        if persist_headers(config_path, section, resolved):
+            log("INFO", f"В профиль '{section}' записан персональный X-HWID этого роутера")
+            if legacy_hwid:
+                # Значение переехало в блок, отдельная опция больше не нужна и
+                # только сбивала бы с толку: непонятно, что из двух главнее.
+                subprocess.run(['uci', '-q', 'delete',
+                                f'podkop_subscriptions.{section}.hwid'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(['uci', 'commit', 'podkop_subscriptions'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        profile['headers'] = resolved
+        return resolved
+
+    return headers
 
 
 def have_curl():
