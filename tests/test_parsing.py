@@ -221,6 +221,11 @@ def test_refusals():
     links, fmt = u.extract_links_from_payload(stub)
     check('заглушка антибота', fmt == 'blocked' and not links, fmt)
 
+    page = ('<!DOCTYPE html>\n<html lang="ru"><head><title>Подписка</title></head>'
+            '<body>Скачайте приложение</body></html>')
+    links, fmt = u.extract_links_from_payload(page)
+    check('витрина отличается от пустой подписки', fmt == 'html' and not links, fmt)
+
     placeholder = ('vless://00000000-0000-4000-8000-000000000001@0.0.0.0:1'
                    '?type=tcp&security=none#%D0%9B%D0%B8%D0%BC%D0%B8%D1%82\n')
     links, _ = u.extract_links_from_payload(placeholder)

@@ -1500,6 +1500,14 @@ def extract_links_from_payload(payload):
     if looks_like_blocked_body(text):
         return [], 'blocked'
 
+    # Веб-страница вместо подписки — обычная человеческая ошибка: у многих
+    # сервисов есть витрина со ссылками на приложения, а сам эндпоинт лежит по
+    # другому адресу. Без отдельного признака это выглядело как «пустая
+    # подписка», по которому не догадаешься, что скопирован не тот URL.
+    head = text[:200].lstrip().lower()
+    if head.startswith('<!doctype html') or head.startswith('<html'):
+        return [], 'html'
+
     # Порядок важен: base64 -> прямые ссылки -> JSON. Подписка, являющаяся
     # base64 от JSON, при обратном порядке разбирается как «неизвестный формат».
     if _looks_like_base64(text):
@@ -2311,7 +2319,9 @@ def fetch_source_trying_fingerprints(source, order, fingerprints, config_path,
 
         last_result = (payload, links, fmt, name)
         if index < len(order):
-            if fmt == 'blocked':
+            if fmt == 'html':
+                reason = 'пришла веб-страница, а не подписка'
+            elif fmt == 'blocked':
                 reason = 'заглушка вместо подписки'
             elif fmt == 'placeholder':
                 reason = 'панель не признала этот отпечаток'
@@ -2403,10 +2413,15 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
                 continue
 
             if not links_raw:
-                st['status'] = 'empty_subscription'
+                st['status'] = 'html_page' if payload_type == 'html' else 'empty_subscription'
                 if not is_local:
                     job['source_stats'].append(st)
-                    log("WARN", f"[{sec}]: в {label} нет ссылок поддерживаемого типа; продолжаю, если есть резервные источники")
+                    if payload_type == 'html':
+                        log("WARN", f"[{sec}]: {label} вернул веб-страницу, а не подписку. "
+                                    "Обычно это витрина сервиса: адрес самой подписки на ней указан "
+                                    "отдельной ссылкой, её и надо прописать в источнике")
+                    else:
+                        log("WARN", f"[{sec}]: в {label} нет ссылок поддерживаемого типа; продолжаю, если есть резервные источники")
                     job['source_errors'] += 1
                 else:
                     log("DEBUG", f"[{sec}]: локальный список пустой")
@@ -2589,6 +2604,7 @@ def status_text_for_code(code):
         'empty_response': 'источник вернул пустой ответ',
         'unsupported_format': 'неподдерживаемый формат подписки',
         'empty_subscription': 'в подписке не найдено proxy-ссылок',
+        'html_page': 'вместо подписки пришла веб-страница',
         'empty_after_filter': 'все ключи отброшены фильтром',
         'no_subscription_links': 'валидных ключей из подписок не найдено',
         'no_jobs': 'нет настроенных подписок',
