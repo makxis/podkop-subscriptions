@@ -1642,6 +1642,27 @@ def expand_domain_ips(links, sec):
     return result
 
 
+SOURCE_TAG_RE = re.compile(r'^\s*\[\d+\]\s*')
+
+
+def tag_links_with_source(links, index):
+    """Дописывает к имени узла номер источника: [2] 🇳🇱 Нидерланды.
+
+    Нужно, чтобы в списке Podkop было видно, откуда ключ приехал. Имя в
+    stable_id не участвует, поэтому переименование не создаёт новых ключей и
+    не сбрасывает накопленную статистику.
+
+    Прежний номер снимается: источник мог поменять порядок, и без этого
+    префиксы копились бы при каждом запуске.
+    """
+    tagged = []
+    for link in links:
+        head, sep, frag = link.partition('#')
+        name = SOURCE_TAG_RE.sub('', unquote_percent(frag) if sep else '')
+        tagged.append(f"{head}#{percent_encode(f'[{index}] {name}'.rstrip())}")
+    return tagged
+
+
 def filter_links(links_raw, regex_pattern, match_mode, on_empty, sec, source_label):
     if not regex_pattern:
         return links_raw
@@ -2620,6 +2641,10 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
             # regex-ом, значит впустую ходить в DNS.
             if entry.get('expand_ips') and filtered_links:
                 filtered_links = expand_domain_ips(filtered_links, sec)
+            # Нумеруем после разворачивания, чтобы копии по IP получили тот же
+            # номер, что и исходный доменный ключ.
+            if not is_local and filtered_links:
+                filtered_links = tag_links_with_source(filtered_links, external_idx)
             st['filtered'] = len(filtered_links)
             if not is_local:
                 job['filtered_links_count'] += len(filtered_links)
@@ -3705,6 +3730,29 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     remaining_ids = {stable_id(x) for x in remaining_links}
     removed_this_run = set(remove_ids)
     final_links = list(remaining_links)
+
+    # Ключи, уже лежащие в секции, номера источника не имеют: они попали туда
+    # до появления нумерации. Раз тот же узел снова пришёл из подписки, берём
+    # у него имя — иначе список остаётся наполовину подписанным, а наполовину
+    # нет. Сам URL не трогаем: менять параметры работающего ключа ради имени
+    # незачем, а stable_id имя и так не учитывает.
+    fresh_names = {}
+    for link in subscription_links:
+        head, sep, frag = link.partition('#')
+        if sep:
+            fresh_names[stable_id(link)] = frag
+    renamed = 0
+    for i, link in enumerate(final_links):
+        frag = fresh_names.get(stable_id(link))
+        if frag is None:
+            continue
+        head, sep, current_frag = link.partition('#')
+        if current_frag != frag:
+            final_links[i] = f"{head}#{frag}"
+            renamed += 1
+    if renamed:
+        log("INFO", f"[{sec}]: обновлены имена уже добавленных ключей: {renamed}")
+
     added = 0
     skipped_by_limit = 0
     skipped_removed_this_run = 0

@@ -37,6 +37,12 @@
 - Base64 detection is strict now — length, alphabet including the url-safe one,
   and a sanity check on the decoded text — instead of trying to decode anything
   that had no direct links in it.
+- Keys from subscriptions carry their source's number in the name, `[2] 🇳🇱
+  Нидерланды`, matching the "источник 2" lines in the log, so the Podkop list
+  shows where each node came from. Keys already in the section are renamed as
+  well when the same node arrives again. The number is replaced rather than
+  appended on each run, and since `stable_id` ignores everything after `#`,
+  renaming creates no new keys and loses no failure history.
 - New per-group option `expand_domain_ips`: a domain resolving to two or more
   addresses also yields one key per IP, with the domain key kept. URLTest can
   then pick the fastest server rather than whatever DNS returned. Only the host

@@ -410,6 +410,26 @@ conversions, fewer ways to drift.
 
 ---
 
+## Source number in the key name
+
+Every key coming from a subscription gets the source's number prefixed to its
+name, in the order the sources are listed in the group: `[2] 🇳🇱 Нидерланды`.
+The Podkop list then shows where a node came from, and the number matches the
+"источник 2" lines in the log.
+
+The number is refreshed on every run rather than accumulated, so reordering the
+sources renumbers the keys. Keys already sitting in the section are renamed too,
+once the same node arrives from a subscription again.
+
+The name plays no part in identifying a key - `stable_id` is computed from the
+link without the part after `#` - so renaming creates no new keys and resets no
+accumulated failure counts.
+
+Local keys from `local-links` get no number: they do not come from a
+subscription.
+
+---
+
 ## Expanding domains into IPs
 
 A subscription often points at a node by domain while several servers sit
