@@ -2281,8 +2281,17 @@ def fingerprint_order(fingerprints, preferred):
     return names
 
 
+# Коды curl, означающие, что до хоста не дошли вовсе: DNS, отказ в соединении,
+# таймаут, обрыв TLS. Отпечаток на них никак не влияет, поэтому пробовать
+# остальные профили бесполезно — это просто лишние попытки к мёртвому адресу.
+CURL_TRANSPORT_ERRORS = (5, 6, 7, 28, 35, 56, 60)
 FINGERPRINT_PROBE_DAYS = 7
 FINGERPRINT_REGRESSION_RATIO = 0.7
+
+
+def is_transport_failure(error):
+    m = re.search(r'curl: \((\d+)\)', str(error))
+    return bool(m) and int(m.group(1)) in CURL_TRANSPORT_ERRORS
 
 
 def source_state_id(source):
@@ -2393,6 +2402,8 @@ def probe_fingerprints(order, source, fingerprints, config_path, header_cache,
     best = None
     scores = []
     refused = []
+    last_result = None
+    last_error = None
     for name in order:
         try:
             payload, links, fmt, _ = fetch_source_trying_fingerprints(
@@ -2400,7 +2411,12 @@ def probe_fingerprints(order, source, fingerprints, config_path, header_cache,
                 payload_cache, label, hwid, device_model, kernel_ver)
         except Exception as exc:  # noqa: BLE001 — профиль просто не участвует
             scores.append((name, 0, type(exc).__name__))
+            last_error = exc
+            if is_transport_failure(exc):
+                log("DEBUG", f"{label}: до источника не достучались, остальные профили не пробую")
+                break
             continue
+        last_result = (payload, links, fmt, name)
         scores.append((name, len(links), fmt))
         if fmt in ('placeholder', 'blocked'):
             # Панель не просто не дала список, а отказала этому клиенту. Отказ
@@ -2414,7 +2430,7 @@ def probe_fingerprints(order, source, fingerprints, config_path, header_cache,
     if scores:
         log("INFO", f"{label}: замер профилей — "
                     + ', '.join(f'{n}: {c}' for n, c, _ in scores))
-    return best, refused
+    return best, refused, last_result, last_error
 
 
 def fetch_source_by_best_fingerprint(source, order, fingerprints, config_path,
@@ -2450,13 +2466,18 @@ def fetch_source_by_best_fingerprint(source, order, fingerprints, config_path,
 
     if need:
         log("INFO", f"{label}: подбираю профиль отпечатка ({why})")
-        best, refused = probe_fingerprints(usable, source, fingerprints, config_path, header_cache,
-                                           payload_cache, label, hwid, device_model, kernel_ver)
+        best, refused, last_result, last_error = probe_fingerprints(
+            usable, source, fingerprints, config_path, header_cache,
+            payload_cache, label, hwid, device_model, kernel_ver)
         if best is None:
-            # Ни один профиль ничего не дал — обычный путь сам сообщит причину.
-            return fetch_source_trying_fingerprints(
-                source, order, fingerprints, config_path, header_cache,
-                payload_cache, label, hwid, device_model, kernel_ver)
+            # Замер уже сходил каждым профилем. Повторять то же самое обычным
+            # перебором — значит удвоить запросы к недоступному источнику,
+            # поэтому берём то, что замер и увидел.
+            if last_result is not None:
+                return last_result
+            if last_error is not None:
+                raise last_error
+            return '', [], 'empty', order[0]
         name, count, payload, links, fmt = best
         memory[key] = {'profile': name, 'count': count, 'checked_at': now,
                        'refused': sorted(set(previously_refused) | set(refused))}
@@ -2475,8 +2496,9 @@ def fetch_source_by_best_fingerprint(source, order, fingerprints, config_path,
     if used == chosen and previous and len(links) < previous * FINGERPRINT_REGRESSION_RATIO:
         log("WARN", f"{label}: профиль '{chosen}' дал {len(links)} узлов вместо {previous}, "
                     "перепроверяю остальные")
-        best, refused = probe_fingerprints(usable, source, fingerprints, config_path, header_cache,
-                                           payload_cache, label, hwid, device_model, kernel_ver)
+        best, refused, _, _ = probe_fingerprints(
+            usable, source, fingerprints, config_path, header_cache,
+            payload_cache, label, hwid, device_model, kernel_ver)
         if best is not None and best[1] > len(links):
             name, count, payload, links, fmt = best
             memory[key] = {'profile': name, 'count': count, 'checked_at': now,
