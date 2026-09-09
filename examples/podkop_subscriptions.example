@@ -28,6 +28,10 @@ config subscription_group 'main'
     # одному на адрес, плюс исходный доменный. Нужно, чтобы URLTest выбирал
     # конкретный быстрый сервер, а не тот, что вернул DNS.
     option expand_domain_ips '0'
+    # Как часто перезамерять, какой профиль отпечатка выгоднее на этом
+    # источнике. Первый замер делается всегда, дальше не чаще этого срока.
+    # 0 — замерить один раз и больше не трогать.
+    option fingerprint_probe_days '7'
     option use_local_links '1'
     option regex ''
     option match_mode 'ifnotmatch'

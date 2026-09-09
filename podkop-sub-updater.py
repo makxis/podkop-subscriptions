@@ -677,6 +677,12 @@ def load_jobs_from_uci_podkop(config_path):
         # fingerprint section keep working as before.
         fingerprint_name = opt.get('fingerprint', '').strip()
         expand_ips = is_enabled_value(opt.get('expand_domain_ips', '0'))
+        # Как часто перезамерять, какой профиль отпечатка выгоднее.
+        # 0 — замерить один раз при первом чтении и больше не трогать.
+        probe_days = parse_positive_int(opt.get('fingerprint_probe_days', ''),
+                                        FINGERPRINT_PROBE_DAYS)
+        if str(opt.get('fingerprint_probe_days', '')).strip() == '0':
+            probe_days = 0
         if not sec_name:
             log("WARN", f"subscription_group '{g['name']}': не задана целевая секция Podkop. Пропуск.")
             continue
@@ -724,6 +730,7 @@ def load_jobs_from_uci_podkop(config_path):
                 'on_empty': on_empty,
                 'fingerprint': fingerprint_name,
                 'expand_ips': expand_ips,
+                'probe_days': probe_days,
                 'line_num': g['line_num']
             })
     return jobs
@@ -2274,6 +2281,43 @@ def fingerprint_order(fingerprints, preferred):
     return names
 
 
+FINGERPRINT_PROBE_DAYS = 7
+FINGERPRINT_REGRESSION_RATIO = 0.7
+
+
+def source_state_id(source):
+    return hashlib.sha256(source.encode('utf-8')).hexdigest()[:16]
+
+
+def fingerprint_memory(state):
+    mem = state.get('fingerprints')
+    if not isinstance(mem, dict):
+        mem = {}
+        state['fingerprints'] = mem
+    return mem
+
+
+def _probe_needed(record, order, now):
+    """Нужен ли повторный замер профилей для этого источника.
+
+    Замер стоит лишнего запроса к панели на каждый профиль, поэтому делается
+    редко: когда выбора ещё не было, когда запомненный профиль исчез из
+    конфига, когда результат устарел, или когда узлов вдруг стало заметно
+    меньше — последнее означает, что панель поменяла поведение.
+    """
+    if not isinstance(record, dict):
+        return True, 'выбора ещё не было'
+    if record.get('profile') not in order:
+        return True, 'запомненный профиль исчез из конфига'
+    try:
+        age_days = (now - float(record.get('checked_at') or 0)) / 86400.0
+    except (TypeError, ValueError):
+        return True, 'непонятная отметка времени'
+    if age_days >= FINGERPRINT_PROBE_DAYS:
+        return True, f'прошло {int(age_days)} дней с последнего замера'
+    return False, ''
+
+
 def fetch_source_trying_fingerprints(source, order, fingerprints, config_path,
                                      header_cache, payload_cache, label,
                                      hwid, device_model, kernel_ver):
@@ -2338,10 +2382,122 @@ def fetch_source_trying_fingerprints(source, order, fingerprints, config_path,
     return last_result
 
 
-def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_path=''):
+def probe_fingerprints(order, source, fingerprints, config_path, header_cache,
+                       payload_cache, label, hwid, device_model, kernel_ver):
+    """Опрашивает источник каждым профилем и возвращает лучший по числу узлов.
+
+    Стоит по запросу на профиль, поэтому вызывается редко — см. _probe_needed.
+    При равенстве побеждает более ранний в списке: это либо выбор группы, либо
+    default, и без причины менять его не стоит.
+    """
+    best = None
+    scores = []
+    refused = []
+    for name in order:
+        try:
+            payload, links, fmt, _ = fetch_source_trying_fingerprints(
+                source, [name], fingerprints, config_path, header_cache,
+                payload_cache, label, hwid, device_model, kernel_ver)
+        except Exception as exc:  # noqa: BLE001 — профиль просто не участвует
+            scores.append((name, 0, type(exc).__name__))
+            continue
+        scores.append((name, len(links), fmt))
+        if fmt in ('placeholder', 'blocked'):
+            # Панель не просто не дала список, а отказала этому клиенту. Отказ
+            # устойчив, в отличие от разовой сетевой ошибки, и на панелях с
+            # лимитом устройств сама попытка занимает слот. Запоминаем, чтобы
+            # больше не проверять этот профиль здесь.
+            refused.append(name)
+        if links and (best is None or len(links) > best[1]):
+            best = (name, len(links), payload, links, fmt)
+
+    if scores:
+        log("INFO", f"{label}: замер профилей — "
+                    + ', '.join(f'{n}: {c}' for n, c, _ in scores))
+    return best, refused
+
+
+def fetch_source_by_best_fingerprint(source, order, fingerprints, config_path,
+                                     header_cache, payload_cache, label,
+                                     hwid, device_model, kernel_ver,
+                                     memory, now, probe_days):
+    """Читает источник профилем, который на нём даёт больше всего узлов.
+
+    Замер стоит по запросу на профиль, поэтому делается редко, а результат
+    живёт в state.json. Обычный прогон обходится одним запросом, как и раньше.
+    Если запомненный профиль вдруг просел по числу узлов, замер повторяется
+    сразу: значит панель изменила поведение.
+    """
+    key = source_state_id(source)
+    record = memory.get(key)
+    previously_refused = []
+    if isinstance(record, dict) and isinstance(record.get('refused'), list):
+        previously_refused = [n for n in record['refused'] if n in order]
+    # Профили, которым панель уже отказала, в замере не участвуют: повторная
+    # попытка ничего не даст, а на панели с лимитом устройств займёт слот.
+    usable = [n for n in order if n not in previously_refused] or list(order)
+    need, why = _probe_needed(record, order, now)
+    if need and probe_days == 0 and isinstance(record, dict) and record.get('profile') in order:
+        # Перезамер отключён настройкой: держимся за прежний выбор.
+        need, why = False, ''
+    elif isinstance(record, dict) and probe_days and why.startswith('прошло'):
+        try:
+            age_days = (now - float(record.get('checked_at') or 0)) / 86400.0
+            need = age_days >= probe_days
+            why = f'прошло {int(age_days)} дней с последнего замера' if need else ''
+        except (TypeError, ValueError):
+            need = True
+
+    if need:
+        log("INFO", f"{label}: подбираю профиль отпечатка ({why})")
+        best, refused = probe_fingerprints(usable, source, fingerprints, config_path, header_cache,
+                                           payload_cache, label, hwid, device_model, kernel_ver)
+        if best is None:
+            # Ни один профиль ничего не дал — обычный путь сам сообщит причину.
+            return fetch_source_trying_fingerprints(
+                source, order, fingerprints, config_path, header_cache,
+                payload_cache, label, hwid, device_model, kernel_ver)
+        name, count, payload, links, fmt = best
+        memory[key] = {'profile': name, 'count': count, 'checked_at': now,
+                       'refused': sorted(set(previously_refused) | set(refused))}
+        log("INFO", f"{label}: выбран профиль '{name}' ({count} узлов)")
+        if refused:
+            log("INFO", f"{label}: отказали и больше не проверяются: {', '.join(refused)}")
+        return payload, links, fmt, name
+
+    chosen = record['profile']
+    rest = [n for n in usable if n != chosen]
+    payload, links, fmt, used = fetch_source_trying_fingerprints(
+        source, [chosen] + rest, fingerprints, config_path, header_cache,
+        payload_cache, label, hwid, device_model, kernel_ver)
+
+    previous = int(record.get('count') or 0)
+    if used == chosen and previous and len(links) < previous * FINGERPRINT_REGRESSION_RATIO:
+        log("WARN", f"{label}: профиль '{chosen}' дал {len(links)} узлов вместо {previous}, "
+                    "перепроверяю остальные")
+        best, refused = probe_fingerprints(usable, source, fingerprints, config_path, header_cache,
+                                           payload_cache, label, hwid, device_model, kernel_ver)
+        if best is not None and best[1] > len(links):
+            name, count, payload, links, fmt = best
+            memory[key] = {'profile': name, 'count': count, 'checked_at': now,
+                           'refused': sorted(set(previously_refused) | set(refused))}
+            log("INFO", f"{label}: профиль сменён на '{name}' ({count} узлов)")
+            return payload, links, fmt, name
+
+    if links:
+        memory[key] = {'profile': used, 'count': len(links),
+                       'checked_at': record.get('checked_at') or now,
+                       'refused': previously_refused}
+    return payload, links, fmt, used
+
+
+def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_path='',
+                state=None):
     payload_cache = {}
     fingerprints = fingerprints if fingerprints is not None else {}
     header_cache = {}
+    memory = fingerprint_memory(state) if isinstance(state, dict) else {}
+    now = time.time()
     for sec, job in jobs.items():
         log("DEBUG", f"--- Обработка секции: [{sec}] ---")
         section_links = []
@@ -2375,9 +2531,15 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
             payload = ''
             links_ready = None
             try:
-                payload, links_ready, fmt_ready, used_fp = fetch_source_trying_fingerprints(
-                    source, order, fingerprints, config_path, header_cache,
-                    payload_cache, label, hwid, device_model, kernel_ver)
+                if is_local or len(order) < 2:
+                    payload, links_ready, fmt_ready, used_fp = fetch_source_trying_fingerprints(
+                        source, order, fingerprints, config_path, header_cache,
+                        payload_cache, label, hwid, device_model, kernel_ver)
+                else:
+                    payload, links_ready, fmt_ready, used_fp = fetch_source_by_best_fingerprint(
+                        source, order, fingerprints, config_path, header_cache,
+                        payload_cache, label, hwid, device_model, kernel_ver,
+                        memory, now, entry.get('probe_days'))
             except subprocess.TimeoutExpired:
                 st['status'] = 'download_failed'
                 if not is_local:
@@ -3777,7 +3939,7 @@ def main():
         imported, updated = import_current_links_to_state(state, current_sections)
         if imported or updated:
             log("INFO", f"State синхронизирован с текущим Podkop config: новых={imported}, обновлено={updated}")
-        fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints, args.subs)
+        fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints, args.subs, state)
         validate_jobs_links_for_podkop(jobs)
         protected_local_ids = load_local_protected_ids()
 

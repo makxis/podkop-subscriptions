@@ -303,6 +303,7 @@ config subscription_schedule 'main_0310'
 | `dedupe_endpoint_host` | `0` | `1` — collapse links sharing the same `IP/domain:port`. |
 | `expand_domain_ips` | `0` | `1` — a domain resolving to several addresses also yields one key per IP. The domain key stays. See [Expanding domains into IPs](#expanding-domains-into-ips). |
 | `fingerprint` | empty | Name of the fingerprint profile for this group. Empty means `default`. See [Client fingerprint](#client-fingerprint). |
+| `fingerprint_probe_days` | `7` | How often to re-measure which profile yields more nodes. `0` measures once and never again. |
 
 When several groups write into one section, numeric limits take the smallest value set, and the flags (`force_cleanup`, both `dedupe_*`) turn on if enabled in at least one group.
 
