@@ -1,5 +1,6 @@
 "use strict";
 "require form";
+"require uci";
 "require fs";
 "require ui";
 "require baseclass";
@@ -449,10 +450,10 @@ return baseclass.extend({
     o.rmempty = false;
 
     o = ss.option(
-      form.DynamicList,
-      "header",
+      form.TextValue,
+      "_headers",
       _("Заголовки"),
-      _("По одному в строке, в формате «Имя: значение». Порядок строк сохраняется как есть. Строка «X-HWID: {hwid}» подставит значение из поля ниже. Host и Accept-Encoding можно оставить, updater их отбросит сам." ) +
+      _("Одним блоком, по заголовку в строке, в формате «Имя: значение». Порядок строк и регистр имён сохраняются как есть — панель смотрит и на то, и на другое. Строка «X-HWID: {hwid}» подставит значение из поля ниже. Host и Accept-Encoding можно оставить, updater их отбросит сам." ) +
         "<br><br>" +
         _("Встроенный набор, если захочется вернуть как было:") +
         "<pre style=\"margin:4px 0;padding:6px;background:#f7f7f7;border-left:3px solid #999;white-space:pre-wrap\">" +
@@ -471,8 +472,35 @@ return baseclass.extend({
         "X-Ver-OS: 11\n" +
         "X-Device-model: MT2110</pre>"
     );
-    o.placeholder = "X-Device-OS: Android";
+    o.rows = 8;
+    o.monospace = true;
+    o.placeholder = "User-agent: v2raytun/android\nX-HWID: {hwid}\nX-Device-OS: Android";
     o.rmempty = true;
+
+    // В UCI это list header, а в поле — единый текст: вставлять и править
+    // снятый с приложения набор целиком куда проще, чем по строке за раз.
+    o.cfgvalue = function(section_id) {
+      let list = uci.get("podkop_subscriptions", section_id, "header");
+      if (!list) return "";
+      if (!Array.isArray(list)) list = [list];
+      return list.join("\n");
+    };
+
+    o.write = function(section_id, value) {
+      const lines = String(value || "")
+        .split(/\r?\n/)
+        .map(function(s) { return s.trim(); })
+        .filter(function(s) { return s.length > 0; });
+      if (!lines.length) {
+        uci.unset("podkop_subscriptions", section_id, "header");
+        return;
+      }
+      uci.set("podkop_subscriptions", section_id, "header", lines);
+    };
+
+    o.remove = function(section_id) {
+      uci.unset("podkop_subscriptions", section_id, "header");
+    };
 
     o = ss.option(
       form.Value,

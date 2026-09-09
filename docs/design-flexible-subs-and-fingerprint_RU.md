@@ -55,7 +55,7 @@ config fingerprint 'v2raytun'
 
 ```
 User-agent: v2raytun/android
-X-HWID: <HWID-REDACTED>
+X-HWID: <генерируется для каждого роутера>
 X-Device-OS: Android
 X-Ver-OS: Android 11
 X-Device-Model: OnePlus MT2110
@@ -68,7 +68,8 @@ X-App-Version: 5.25.81
 
 ### 2.1 HWID: у каждого роутера свой
 
-Зашитый `SUBSCRIPTION_HWID = '<HWID-REDACTED>'` общим значением не остаётся.
+Зашитой константы `SUBSCRIPTION_HWID` больше нет: она содержала реальный
+идентификатор устройства и попадала в публичный репозиторий.
 Один и тот же HWID на нескольких роутерах это ровно то, чего настоящий клиент
 не делает, и панель вправе счесть такое за клонирование.
 

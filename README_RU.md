@@ -546,12 +546,12 @@ ubus call service list | grep -A 6 podkop_subscriptions
 При прямых запросах к подпискам updater не отправляет реальную модель роутера и версию ядра OpenWrt. Используется фиксированный профиль:
 
 ```text
-User-Agent:      v2raytun/android
-X-HWID:          <HWID-REDACTED>
+User-agent:      v2raytun/android
+X-HWID:          <генерируется для каждого роутера>
 X-Device-OS:     Android
 X-Ver-OS:        Android 11
 X-Device-Model:  OnePlus MT2110
-X-App-Version:   5.23.74
+X-App-Version:   5.25.81
 ```
 
 Так запрос с роутера и внешний загрузчик подписок выглядят для сервиса как одно устройство.

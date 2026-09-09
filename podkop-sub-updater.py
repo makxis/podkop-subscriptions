@@ -38,19 +38,19 @@ SUBSCRIPTION_USER_AGENT = 'v2raytun/android'
 SUBSCRIPTION_DEVICE_OS = 'Android'
 SUBSCRIPTION_VER_OS = 'Android 11'
 SUBSCRIPTION_DEVICE_MODEL = 'OnePlus MT2110'
-SUBSCRIPTION_APP_VERSION = '5.23.74'
-# Fallback only. Every router is expected to generate its own X-HWID on first
-# run and keep it in UCI from then on; see resolve_fingerprint(). A single HWID
-# shared by several routers is exactly what a real client never does, and a
-# panel may treat it as a cloned device. This value stays as the last resort
-# for configs that predate the fingerprint section.
-SUBSCRIPTION_HWID = '<HWID-REDACTED>'
+SUBSCRIPTION_APP_VERSION = '5.25.81'
+# X-HWID здесь намеренно нет. Раньше он был зашит одним значением на всех, и
+# любая установка ходила за подписками под чужим идентификатором устройства.
+# Теперь каждый роутер генерирует свой при первом запуске и хранит его в UCI,
+# см. resolve_fingerprint().
 USER_AGENT = SUBSCRIPTION_USER_AGENT
 # Header names and their order are part of the fingerprint: panels look at
 # X-HWID vs x-hwid and at the sequence, so this is a list of pairs and never
 # a dict.
 DEFAULT_FINGERPRINT_HEADERS = [
-    ('User-Agent', SUBSCRIPTION_USER_AGENT),
+    # Именно 'User-agent' со строчной 'a': так его пишет само приложение, а
+    # curl отправляет имя байт в байт, в отличие от прежнего wget.
+    ('User-agent', SUBSCRIPTION_USER_AGENT),
     ('X-HWID', '{hwid}'),
     ('X-Device-OS', SUBSCRIPTION_DEVICE_OS),
     ('X-Ver-OS', SUBSCRIPTION_VER_OS),
@@ -867,6 +867,29 @@ def persist_hwid(config_path, section, hwid):
         return False
 
 
+def create_default_fingerprint(config_path, hwid):
+    """Заводит секцию fingerprint 'default' со встроенным набором заголовков."""
+    if os.path.basename(config_path) != 'podkop_subscriptions' or not config_path.startswith('/etc/config'):
+        return False
+    try:
+        subprocess.run(['uci', 'set', 'podkop_subscriptions.default=fingerprint'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(['uci', 'set', 'podkop_subscriptions.default.enabled=1'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(['uci', 'set', f'podkop_subscriptions.default.hwid={hwid}'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        for hname, hvalue in DEFAULT_FINGERPRINT_HEADERS:
+            subprocess.run(['uci', 'add_list',
+                            f'podkop_subscriptions.default.header={hname}: {hvalue}'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(['uci', 'commit', 'podkop_subscriptions'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return True
+    except Exception as exc:
+        log("WARN", f"Не удалось создать профиль отпечатка: {type(exc).__name__}")
+        return False
+
+
 def resolve_fingerprint(fingerprints, name, config_path):
     """Header pairs for a subscription request, with X-HWID substituted.
 
@@ -879,11 +902,22 @@ def resolve_fingerprint(fingerprints, name, config_path):
         if name:
             log("WARN", f"Отпечаток '{name}' не найден, беру встроенный профиль")
         # Конфиг без секции fingerprint вообще: ведём себя ровно как раньше.
-        # Генерировать HWID здесь нельзя — записать его будет некуда, и он
-        # менялся бы на каждом запуске, а для панели это каждый раз новое
-        # устройство.
+        # Секции fingerprint в конфиге ещё нет: заводим её со встроенным
+        # набором заголовков и персональным HWID. Раз записать удалось, дальше
+        # профиль читается из конфига и значение больше не меняется.
+        hwid = generate_hwid()
+        if create_default_fingerprint(config_path, hwid):
+            log("INFO", "Создан профиль отпечатка 'default' с персональным X-HWID "
+                        "для этого роутера")
+            fingerprints['default'] = {
+                'headers': list(DEFAULT_FINGERPRINT_HEADERS),
+                'hwid': hwid,
+            }
+        else:
+            log("WARN", "Не удалось сохранить профиль отпечатка: X-HWID будет "
+                        "новым при каждом запуске, и панель увидит новое устройство")
         return [
-            (hname, SUBSCRIPTION_HWID if hvalue == '{hwid}' else hvalue)
+            (hname, hwid if hvalue == '{hwid}' else hvalue)
             for hname, hvalue in DEFAULT_FINGERPRINT_HEADERS
         ]
 
@@ -3541,7 +3575,9 @@ def main():
         log("INFO", "=== ЗАПУСК ОБНОВЛЕНИЯ ПОДПИСОК ===")
         device_model = SUBSCRIPTION_DEVICE_MODEL
         kernel_ver = SUBSCRIPTION_VER_OS
-        hwid = SUBSCRIPTION_HWID
+        # Значение больше не зашито: его даёт профиль отпечатка, а сюда
+        # передаётся пустая строка ради совместимости сигнатур.
+        hwid = ''
         fingerprints = load_fingerprints(args.subs)
         if fingerprints:
             log("INFO", f"Профили отпечатка из конфига: {', '.join(sorted(fingerprints))}")

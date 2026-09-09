@@ -544,12 +544,12 @@ The `/tmp/podkop-sub-updater.lock` directory in `podkop-sub-run-now` exists only
 The updater does not send the real OpenWrt model or kernel version to subscription providers. It uses a fixed profile:
 
 ```text
-User-Agent:      v2raytun/android
-X-HWID:          <HWID-REDACTED>
+User-agent:      v2raytun/android
+X-HWID:          <генерируется для каждого роутера>
 X-Device-OS:     Android
 X-Ver-OS:        Android 11
 X-Device-Model:  OnePlus MT2110
-X-App-Version:   5.23.74
+X-App-Version:   5.25.81
 ```
 
 This way a direct request from the router and an external subscription client look like a single device to the provider.
