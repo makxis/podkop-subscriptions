@@ -114,6 +114,32 @@ def test_xray_configs():
           len(with_path) == in_config['ws'] + in_config['xhttp'], str(len(with_path)))
 
 
+def test_xray_hysteria():
+    """Hysteria в диалекте Xray лежит иначе остальных протоколов.
+
+    Адрес и порт прямо в settings, ключ в streamSettings.hysteriaSettings,
+    версия задаёт схему ссылки. Эта ветка была пропущена при переносе, и на
+    реальной подписке терялось 11 узлов из 25 — снятый до того образец её не
+    содержал, поэтому тест ничего не замечал.
+    """
+    print('Hysteria в конфигах Xray')
+    links, fmt = u.extract_links_from_payload(fixture('xray_hysteria_json.txt'))
+    check('формат распознан', fmt == 'json', fmt)
+    check('узлы не потеряны', len(links) == 3, str(len(links)))
+
+    hy = [l for l in links if l.startswith('hysteria2://')]
+    check('hysteria собран как hysteria2', len(hy) == 1, str(len(hy)))
+    if hy:
+        _, params, name = parse_link(hy[0])
+        check('hysteria: sni из tlsSettings', params.get('sni', '').endswith('example.net'),
+              params.get('sni'))
+        check('hysteria: alpn перенесён', params.get('alpn') == 'h3', params.get('alpn'))
+        check('hysteria: имя из remarks', 'Hysteria' in name, name)
+        check('hysteria: ключ в ссылке', '@' in hy[0] and hy[0].split('://')[1].split('@')[0])
+
+    check('vless рядом не пострадал', len([l for l in links if l.startswith('vless://')]) == 2)
+
+
 def test_trojan_and_ss():
     """Ветки trojan и ss.
 
@@ -257,7 +283,7 @@ def test_fingerprint_headers():
 
 
 def main():
-    for test in (test_clash_matches_reference, test_xray_configs, test_trojan_and_ss,
+    for test in (test_clash_matches_reference, test_xray_configs, test_xray_hysteria, test_trojan_and_ss,
                  test_plain_and_base64,
                  test_refusals, test_domain_expansion, test_fingerprint_headers):
         test()

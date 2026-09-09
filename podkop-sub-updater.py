@@ -1380,6 +1380,31 @@ def xray_outbound_to_uri(config, outbound):
         return (f"vless://{percent_encode(user['id'])}@{vnext.get('address')}:{vnext.get('port')}"
                 f"?{_clash_query(params)}#{percent_encode(name)}")
 
+    if protocol in ('hysteria', 'hysteria2', 'hy2'):
+        # Здесь всё лежит иначе, чем у остальных: адрес и порт прямо в
+        # settings, а ключ — в streamSettings.hysteriaSettings. Версия
+        # определяет схему ссылки, по умолчанию вторая.
+        settings = outbound.get('settings') or {}
+        hy = stream.get('hysteriaSettings') or {}
+        address = settings.get('address') or settings.get('server') or outbound.get('server')
+        port = settings.get('port') or settings.get('server_port') or outbound.get('server_port') or 443
+        auth = hy.get('auth') or settings.get('auth') or settings.get('password') or settings.get('auth_str')
+        if not address or not auth:
+            return None
+        try:
+            version = int(settings.get('version') or hy.get('version') or 2)
+        except (TypeError, ValueError):
+            version = 2
+        scheme = 'hysteria2' if version >= 2 else 'hysteria'
+        name = config.get('remarks') or outbound.get('tag') or address
+        params = {
+            'sni': tls.get('serverName') or settings.get('serverName') or settings.get('sni'),
+            'alpn': ','.join(alpn) if isinstance(alpn, list) else alpn,
+            'insecure': '1' if tls.get('allowInsecure') else None,
+        }
+        return (f"{scheme}://{percent_encode(auth)}@{address}:{port}"
+                f"?{_clash_query(params)}#{percent_encode(name)}")
+
     if protocol in ('trojan', 'shadowsocks'):
         server = ((outbound.get('settings') or {}).get('servers') or [None])[0]
         if not server:

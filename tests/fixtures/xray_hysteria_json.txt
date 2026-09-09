@@ -1,0 +1,118 @@
+[
+ {
+  "remarks": "🇫🇷 Франция | Hysteria",
+  "outbounds": [
+   {
+    "tag": "proxy",
+    "protocol": "hysteria",
+    "settings": {
+     "address": "node01.example.net",
+     "port": 42629,
+     "version": 2
+    },
+    "streamSettings": {
+     "network": "hysteria",
+     "hysteriaSettings": {
+      "version": 2,
+      "auth": "fixture-hysteria-auth"
+     },
+     "security": "tls",
+     "tlsSettings": {
+      "serverName": "sni03.example.net",
+      "enableSessionResumption": false,
+      "fingerprint": "firefox",
+      "alpn": [
+       "h3"
+      ]
+     },
+     "finalmask": {
+      "quicParams": {
+       "brutalUp": "100 mbps",
+       "brutalDown": "300 mbps",
+       "congestion": "brutal"
+      }
+     }
+    }
+   }
+  ]
+ },
+ {
+  "remarks": "🇦🇹 Австрия | 📺 YT без рекламы",
+  "outbounds": [
+   {
+    "tag": "proxy",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "node04.example.net",
+       "port": 443,
+       "users": [
+        {
+         "id": "fixture-hysteria-auth",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "tls",
+     "tlsSettings": {
+      "serverName": "node04.example.net",
+      "enableSessionResumption": false,
+      "fingerprint": "firefox",
+      "alpn": [
+       "h2",
+       "http/1.1"
+      ]
+     }
+    }
+   }
+  ]
+ },
+ {
+  "remarks": "🇪🇺 🗽 LTE 4 | не гарант",
+  "outbounds": [
+   {
+    "tag": "proxy",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "node05.example.net",
+       "port": 443,
+       "users": [
+        {
+         "id": "fixture-hysteria-auth",
+         "encryption": "none",
+         "flow": ""
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "ws",
+     "wsSettings": {
+      "path": "/api/v1/catalog/events",
+      "host": "node05.example.net",
+      "headers": {}
+     },
+     "security": "tls",
+     "tlsSettings": {
+      "serverName": "node05.example.net",
+      "enableSessionResumption": false,
+      "fingerprint": "edge",
+      "alpn": [
+       "http/1.1"
+      ]
+     }
+    }
+   }
+  ]
+ }
+]
