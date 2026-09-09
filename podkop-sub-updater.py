@@ -1038,12 +1038,85 @@ def _clash_query(params):
     return '&'.join(parts)
 
 
+def _first(value):
+    """Clash допускает список там, где нужен один элемент (path, host, alpn)."""
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _alpn(value):
+    if isinstance(value, list):
+        return ','.join(str(x) for x in value)
+    return value
+
+
+def _clash_transport_params(proxy, network):
+    """Транспортная часть запроса по правилам Sub-Store.
+
+    Портировано с producers/uri.js проекта Sub-Store: это тот самый код,
+    которым панель формирует ?target=URI, то есть эталон, с которым наш
+    результат и сверяется. Экзотика оттуда (ech, pqv, vcn, kcp, ранние данные
+    ws) сознательно не переносилась: в подписках, которые сюда приходят, её
+    нет, а каждый лишний параметр это лишний способ ошибиться.
+    """
+    opts = proxy.get(f'{network}-opts') or {}
+    params = {}
+
+    uri_type = network
+    if network == 'ws' and opts.get('v2ray-http-upgrade'):
+        uri_type = 'httpupgrade'
+    elif network == 'http':
+        uri_type = 'tcp'
+    elif network == 'h2':
+        uri_type = 'http'
+    params['type'] = uri_type
+
+    if network == 'http':
+        params['headerType'] = 'http'
+
+    if network == 'grpc':
+        # Xray требует режим явно, у Sub-Store значение по умолчанию gun.
+        params['mode'] = opts.get('_grpc-type') or 'gun'
+        params['authority'] = opts.get('_grpc-authority')
+
+    params['path'] = _first(opts.get('path'))
+
+    if network in ('h2', 'xhttp'):
+        host = opts.get('host')
+        if host is None:
+            headers = opts.get('headers') or {}
+            host = headers.get('Host') or headers.get('host')
+    else:
+        headers = opts.get('headers') or {}
+        host = headers.get('Host') or headers.get('host') or opts.get('host')
+    params['host'] = _first(host)
+
+    params['serviceName'] = opts.get(f'{network}-service-name')
+    return params
+
+
+def _packet_encoding(proxy):
+    value = proxy.get('packet-encoding')
+    if value is not None:
+        value = str(value).strip().lower()
+    elif proxy.get('xudp'):
+        value = 'xudp'
+    elif proxy.get('packet-addr'):
+        value = 'packetaddr'
+    elif proxy.get('udp') is True:
+        value = ''
+    else:
+        return None
+    return {'': 'none', 'packetaddr': 'packet', 'xudp': 'xudp'}.get(value)
+
+
 def clash_proxy_to_uri(proxy):
     """Объект Clash/Mihomo -> URI. Возвращает None, если тип не поддержан.
 
     Такие объекты приходят не только из YAML: sub-store с ?target=JSON отдаёт
     ровно их, массивом. Поэтому разбор возможен без python3-yaml, на одном
-    стандартном json.
+    стандартном json. Правила сборки взяты из Sub-Store, а не выведены на глаз.
     """
     if not isinstance(proxy, dict):
         return None
@@ -1057,9 +1130,8 @@ def clash_proxy_to_uri(proxy):
 
     tls_on = bool(proxy.get('tls'))
     network = str(proxy.get('network') or 'tcp').strip().lower()
-    ws = proxy.get('ws-opts') or {}
-    grpc = proxy.get('grpc-opts') or {}
     reality = proxy.get('reality-opts') or {}
+    insecure = bool(proxy.get('skip-cert-verify'))
 
     if ptype == 'vless':
         uuid = str(proxy.get('uuid') or '').strip()
@@ -1071,36 +1143,43 @@ def clash_proxy_to_uri(proxy):
             security = 'tls'
         else:
             security = 'none'
-        params = {
-            'encryption': proxy.get('encryption') or 'none',
-            'type': network,
-            'security': security,
-            'flow': proxy.get('flow'),
-            'sni': proxy.get('sni'),
-            'fp': proxy.get('client-fingerprint'),
-            'pbk': reality.get('public-key'),
-            'sid': reality.get('short-id'),
-            'path': ws.get('path'),
-            'host': (ws.get('headers') or {}).get('Host'),
-            'serviceName': grpc.get('grpc-service-name'),
-            # sub-store кладёт режим grpc в служебный ключ с подчёркиванием.
-            'mode': grpc.get('_grpc-type') or grpc.get('grpc-type'),
-        }
+        params = {'security': security}
+        params.update(_clash_transport_params(proxy, network))
+        # packetEncoding намеренно не добавляем. В свежем Sub-Store он есть,
+        # но установка, с которой мы сверяемся, его не отдаёт, и все уже
+        # накопленные в конфиге ссылки тоже без него. С ним один и тот же
+        # узел, пришедший из JSON и из ?target=URI, выглядел бы разными
+        # строками, и podkop завёл бы дубль.
+        params['alpn'] = _alpn(proxy.get('alpn'))
+        params['allowInsecure'] = '1' if insecure else None
+        params['h2'] = '1' if proxy.get('_h2') else None
+        params['sni'] = proxy.get('sni')
+        params['fp'] = proxy.get('client-fingerprint')
+        params['flow'] = proxy.get('flow')
+        params['sid'] = reality.get('short-id')
+        params['spx'] = reality.get('_spider-x')
+        params['pbk'] = reality.get('public-key')
+        if not params.get('mode') and proxy.get('_mode'):
+            params['mode'] = proxy.get('_mode')
+        params['encryption'] = proxy.get('encryption')
         return f"vless://{percent_encode(uuid)}@{server}:{port}?{_clash_query(params)}#{percent_encode(name)}"
 
     if ptype == 'trojan':
         password = str(proxy.get('password') or '').strip()
         if not password:
             return None
-        params = {
-            'type': network,
-            'security': 'tls' if tls_on or proxy.get('sni') else 'none',
-            'sni': proxy.get('sni'),
-            'fp': proxy.get('client-fingerprint'),
-            'path': ws.get('path'),
-            'host': (ws.get('headers') or {}).get('Host'),
-            'serviceName': grpc.get('grpc-service-name'),
-        }
+        # sni у Sub-Store подставляется из server, если не задан явно.
+        params = {'sni': proxy.get('sni') or server,
+                  'allowInsecure': '1' if insecure else None}
+        if proxy.get('network'):
+            params.update(_clash_transport_params(proxy, network))
+        params['alpn'] = _alpn(proxy.get('alpn'))
+        params['fp'] = proxy.get('client-fingerprint')
+        if reality:
+            params['security'] = 'reality'
+            params['pbk'] = reality.get('public-key')
+            params['sid'] = reality.get('short-id')
+            params['spx'] = reality.get('_spider-x')
         return f"trojan://{percent_encode(password)}@{server}:{port}?{_clash_query(params)}#{percent_encode(name)}"
 
     if ptype in ('hysteria2', 'hy2'):
@@ -1108,8 +1187,14 @@ def clash_proxy_to_uri(proxy):
         if not password:
             return None
         params = {
+            'hop-interval': proxy.get('hop-interval'),
+            'keepalive': proxy.get('keepalive'),
+            'insecure': '1' if insecure else None,
+            'obfs': proxy.get('obfs'),
+            'obfs-password': proxy.get('obfs-password') if proxy.get('obfs') else None,
             'sni': proxy.get('sni'),
-            'insecure': '1' if proxy.get('skip-cert-verify') else None,
+            'mport': proxy.get('ports'),
+            'fastopen': '1' if proxy.get('tfo') else None,
         }
         query = _clash_query(params)
         tail = f"?{query}" if query else ''
