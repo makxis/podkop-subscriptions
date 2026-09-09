@@ -23,12 +23,12 @@
   fingerprint. This adds no dependency: Podkop itself requires `curl`. The wget
   path remains as a fallback and says so in the log. `User-Agent` used to be
   sent twice, via both `--user-agent` and `--header`; now once.
-- JSON subscriptions are understood: Clash/Mihomo objects, as Sub-Store returns
-  them with `?target=JSON`, and arrays of complete Xray configs as Remnawave
-  panels return them. No `python3-yaml` is needed for either. The conversion
-  rules are ported from Sub-Store's own `producers/uri.js` and verified against
-  it — the same collection fetched as JSON and as URI produces identical links,
-  matching on every query parameter.
+- JSON subscriptions are understood: Clash/Mihomo proxy objects, and arrays of
+  complete Xray configs with the node name in `remarks`. No `python3-yaml` is
+  needed for either. The conversion rules are ported from a mature open
+  implementation rather than inferred, and verified against its output: the same
+  node list in both forms produces identical links, matching on every query
+  parameter.
 - Refusals are recognised instead of being counted as empty subscriptions:
   anti-bot stub pages served under a 200, and placeholder nodes on `0.0.0.0:1`
   whose names carry the reason ("Вы достигли максимального числа устройств для

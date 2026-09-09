@@ -1,0 +1,54 @@
+[
+  {
+    "type": "trojan",
+    "name": "Trojan WS",
+    "server": "node20.example.net",
+    "port": 443,
+    "password": "fixture-password",
+    "network": "ws",
+    "ws-opts": {
+      "path": "/tj",
+      "headers": {
+        "Host": "node20.example.net"
+      }
+    },
+    "skip-cert-verify": true,
+    "client-fingerprint": "chrome",
+    "alpn": [
+      "h2",
+      "http/1.1"
+    ],
+    "udp": true
+  },
+  {
+    "type": "trojan",
+    "name": "Trojan plain",
+    "server": "node21.example.net",
+    "port": 8443,
+    "password": "fixture-password",
+    "sni": "sni21.example.net"
+  },
+  {
+    "type": "ss",
+    "name": "Shadowsocks",
+    "server": "node22.example.net",
+    "port": 8388,
+    "cipher": "aes-256-gcm",
+    "password": "fixture-password"
+  },
+  {
+    "type": "vless",
+    "name": "Vless gRPC",
+    "server": "node23.example.net",
+    "port": 443,
+    "uuid": "00000000-0000-4000-8000-000000000003",
+    "tls": true,
+    "sni": "node23.example.net",
+    "network": "grpc",
+    "grpc-opts": {
+      "grpc-service-name": "FixtureService"
+    },
+    "client-fingerprint": "firefox",
+    "udp": true
+  }
+]

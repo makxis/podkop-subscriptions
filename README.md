@@ -397,13 +397,12 @@ Detected automatically, in this order: base64 → direct links → JSON.
 |---|---|
 | direct links, one per line | most panels |
 | base64 of such a list | the same, usual packaging |
-| JSON with Clash/Mihomo objects | Sub-Store with `?target=JSON` |
-| JSON with full Xray configs | Remnawave: an array of configs, node name in `remarks` |
+| JSON with Clash/Mihomo objects | panels and converters serving a node list as JSON |
+| JSON with full Xray configs | an array of configs, one per node, name in `remarks` |
 
 Parsing JSON needs no `python3-yaml`: Clash objects arrive as plain JSON. The
-link-building rules are ported from Sub-Store (`producers/uri.js`), the very
-code a panel runs for `?target=URI`, and checked against it: the same
-collection in both formats yields identical links.
+link-building rules are not invented here: they are ported from a mature open
+implementation and checked against its output on the same data.
 
 If a source can hand out ready-made links, prefer asking it for those — fewer
 conversions, fewer ways to drift.
