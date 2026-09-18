@@ -470,6 +470,41 @@ download subscriptions
 
 This is **not** a ping or speed test — it is protection against malformed links that would break sing-box config generation. If no compatible links remain, the current Podkop section is left unchanged.
 
+### Why there are two checks
+
+They look redundant, but they answer different questions, and the first one is not a weaker version of the second.
+
+The link is turned into an outbound by **Podkop itself**, in
+`/usr/lib/podkop/sing_box_config_facade.sh`. That converter, not sing-box, is
+the ceiling: whatever sing-box can do is useless if Podkop cannot build it. So
+the first check mirrors exactly its `case` branches — on the scheme, on
+`security` and on `type`.
+
+What happens without it, verified on a router:
+
+| Link | Podkop | `sing-box check` |
+|---|---|---|
+| `type=xhttp`, `type=httpupgrade` | logs `Unknown transport 'xhttp' detected.` and builds the outbound **with no transport at all**, i.e. plain TCP | passes |
+| `vmess://`, `tuic://` | `Unsupported proxy vmess type. Aborted.` and exits with an error | nothing to check |
+
+In the first case the key quietly becomes a dead node sitting in URLTest while
+the config itself is valid and passes the second check. In the second, a single
+such key leaves the router with no proxy at all. Both are only catchable before
+conversion.
+
+The second check catches what conversion hides: an unknown shadowsocks method,
+reality without uTLS, and anything else that only surfaces when the finished
+config is parsed.
+
+The first check is also what **builds** the config for the second one:
+`sing-box check` reads JSON, not links.
+
+Which key failed, and on which value, is logged at DEBUG level:
+
+```text
+[x2x]: ключ не для Podkop (🇳🇱 Нидерланды): transport не поддерживается Podkop: xhttp
+```
+
 The log line:
 
 ```text

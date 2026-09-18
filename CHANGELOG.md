@@ -1,5 +1,27 @@
 # Changelog
 
+## 3.7.3
+
+- The check that runs before `sing-box check` now says what it rejected and
+  why. It reported `неподдерживаемый transport: 1` and nothing else, which read
+  as a stricter duplicate of the sing-box check that followed it. It is neither
+  stricter nor a duplicate: the link is converted into an outbound by Podkop's
+  own `/usr/lib/podkop/sing_box_config_facade.sh`, and that converter is the
+  ceiling. Verified on a router: a `type=xhttp` link, which sing-box does have
+  transports for, is turned by Podkop into an outbound with no transport at all
+  — a valid config that passes `sing-box check` and a node that cannot work —
+  while a `vmess://` link makes Podkop exit with `Unsupported proxy vmess type.
+  Aborted.`, leaving the router with no proxy. Neither is visible after
+  conversion, and the converter is also what builds the config the sing-box
+  check reads.
+  - Rejected keys are now named in the log at DEBUG level together with the
+    value that was refused: `ключ не для Podkop (🇳🇱 Нидерланды): transport не
+    поддерживается Podkop: xhttp`.
+  - The reason texts now name Podkop as the limiting side, and the sets of
+    schemes, transports and security values carry a comment pointing at the
+    converter they mirror.
+  - Both READMEs gained a "why there are two checks" section.
+
 ## 3.7.2
 
 - The compatibility check now asks sing-box which key it tripped over instead

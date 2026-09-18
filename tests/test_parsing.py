@@ -287,6 +287,54 @@ def test_fingerprint_headers():
           and all(c in '0123456789ABCDEF' for c in u.generate_hwid()))
 
 
+def test_podkop_conversion_limits():
+    """Граница проходит по возможностям Podkop, а не sing-box.
+
+    Ссылку в outbound превращает конвертер Podkop, поэтому проверка до
+    sing-box check отсеивает ровно то, чего нет в его case-ах. Набор снят с
+    /usr/lib/podkop/sing_box_config_facade.sh.
+    """
+    print('Что Podkop может собрать из ссылки')
+
+    def reject_reason(link):
+        try:
+            u.proxy_link_to_singbox_outbound(link, 'тест')
+            return None
+        except u.LinkValidationError as e:
+            return (e.reason, e.detail)
+
+    uuid = '00000000-0000-4000-8000-000000000001'
+    ok = f'vless://{uuid}@node.example.net:443?type=ws&security=tls&sni=example.net&path=%2Fws#Узел'
+    check('ws через vless проходит', reject_reason(ok) is None)
+
+    grpc = f'vless://{uuid}@node.example.net:443?type=grpc&security=reality&pbk=key&sni=example.net#Узел'
+    check('grpc с reality проходит', reject_reason(grpc) is None)
+
+    # sing-box такой transport умеет, а конвертер Podkop про него не знает и
+    # собрал бы обычный TCP, поэтому ключ отбраковывается до конвертации.
+    xhttp = f'vless://{uuid}@node.example.net:443?type=xhttp&security=tls&sni=example.net#Узел'
+    check('xhttp отбраковывается с указанием значения',
+          reject_reason(xhttp) == ('unsupported_transport', 'xhttp'), str(reject_reason(xhttp)))
+
+    upgrade = f'vless://{uuid}@node.example.net:443?type=httpupgrade&security=tls&sni=example.net#Узел'
+    check('httpupgrade отбраковывается', reject_reason(upgrade) == ('unsupported_transport', 'httpupgrade'))
+
+    # Неизвестная схема роняет podkop целиком, это самый дорогой случай.
+    vmess = 'vmess://eyJhZGQiOiJub2RlLmV4YW1wbGUubmV0In0=#Узел'
+    check('vmess отбраковывается с указанием схемы',
+          reject_reason(vmess) == ('unsupported_scheme', 'vmess'), str(reject_reason(vmess)))
+
+    tuic = f'tuic://{uuid}@node.example.net:443#Узел'
+    check('tuic отбраковывается', reject_reason(tuic) == ('unsupported_scheme', 'tuic'))
+
+    reality_no_key = f'vless://{uuid}@node.example.net:443?type=tcp&security=reality&sni=example.net#Узел'
+    check('reality без pbk отбраковывается',
+          (reject_reason(reality_no_key) or ('', ''))[0] == 'missing_reality_public_key')
+
+    check('текст причины называет Podkop виновником ограничения',
+          'Podkop' in u.validation_reason_text('unsupported_transport'))
+
+
 def test_singbox_check_position():
     print('Поиск битого ключа по ответу sing-box check')
     decode = 'FATAL[0000] decode config at /tmp/x.json: outbounds[3].transport: unknown transport type: bogus'
@@ -362,6 +410,7 @@ def main():
     for test in (test_clash_matches_reference, test_xray_configs, test_xray_hysteria, test_trojan_and_ss,
                  test_plain_and_base64,
                  test_refusals, test_domain_expansion, test_fingerprint_headers,
+                 test_podkop_conversion_limits,
                  test_singbox_check_position, test_singbox_hard_validation):
         test()
         print()

@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.7.2"
+APP_VERSION_FALLBACK = "3.7.3"
 
 
 def app_version():
@@ -1704,6 +1704,20 @@ class LinkValidationError(Exception):
         self.detail = detail
 
 
+# Эти три набора — не наше представление о прекрасном и не возможности
+# sing-box, а ровно то, что разбирает конвертер Podkop в
+# /usr/lib/podkop/sing_box_config_facade.sh: case по схеме в
+# sing_box_cf_add_proxy_outbound, по security в _add_outbound_security и по
+# type в _add_outbound_transport. Podkop и есть потолок, потому что ссылку в
+# outbound превращает он, а не мы и не sing-box.
+#
+# Почему без этой проверки нельзя обойтись, хотя следом идёт sing-box check:
+# на неизвестной схеме Podkop пишет «Unsupported proxy type. Aborted.» и
+# выходит с ошибкой, то есть один такой ключ оставляет роутер без proxy
+# вообще; на неизвестном transport он всего лишь пишет в лог «Unknown
+# transport» и собирает outbound без транспорта, то есть обычный TCP. Такой
+# конфиг sing-box check проходит успешно, а узел не работает и молча висит в
+# URLTest. Поймать это можно только до конвертации.
 VALID_TRANSPORTS = {'', 'tcp', 'raw', 'ws', 'grpc'}
 VALID_SECURITY = {'', 'none', 'tls', 'reality'}
 SUPPORTED_SCHEMES = {'vless', 'ss', 'trojan', 'socks4', 'socks4a', 'socks5', 'hy2', 'hysteria2'}
@@ -1712,14 +1726,18 @@ SUPPORTED_SCHEMES = {'vless', 'ss', 'trojan', 'socks4', 'socks4a', 'socks5', 'hy
 def validation_reason_text(reason):
     mapping = {
         'invalid_url': 'некорректная ссылка',
-        'unsupported_scheme': 'неподдерживаемый тип proxy',
+        # Ограничение здесь не наше и не sing-box, а конвертера самого Podkop:
+        # /usr/lib/podkop/sing_box_config_facade.sh знает ровно этот набор схем,
+        # транспортов и security, всё остальное он либо тихо теряет, либо
+        # роняет podkop целиком.
+        'unsupported_scheme': 'тип proxy не поддерживается Podkop',
         'missing_host': 'не указан host',
         'missing_port': 'не указан port',
         'invalid_port': 'некорректный port',
         'missing_userinfo': 'не указан пользователь/пароль',
         'invalid_userinfo': 'некорректный userinfo',
-        'unsupported_transport': 'неподдерживаемый transport',
-        'unsupported_security': 'неподдерживаемый security',
+        'unsupported_transport': 'transport не поддерживается Podkop',
+        'unsupported_security': 'security не поддерживается Podkop',
         'missing_reality_public_key': 'для reality отсутствует pbk',
         'invalid_transport_param': 'некорректный параметр transport',
         'singbox_not_found': 'sing-box не найден',
@@ -1803,7 +1821,7 @@ def _parse_hostport(hostport):
 def _parse_link_parts(link):
     scheme, rest = _split_scheme(link)
     if scheme not in SUPPORTED_SCHEMES:
-        raise LinkValidationError('unsupported_scheme')
+        raise LinkValidationError('unsupported_scheme', scheme)
     main, query = _split_query(rest)
     q = _parse_query(query)
 
@@ -1877,7 +1895,7 @@ def _build_tls_object(parts):
     if not security and scheme in ('hy2', 'hysteria2'):
         security = 'tls'
     if security not in VALID_SECURITY:
-        raise LinkValidationError('unsupported_security')
+        raise LinkValidationError('unsupported_security', security)
     if security in ('', 'none'):
         return None
 
@@ -1909,7 +1927,7 @@ def _build_transport_object(parts):
     q = parts['query']
     transport = (q.get('type', '') or '').strip().lower()
     if transport not in VALID_TRANSPORTS:
-        raise LinkValidationError('unsupported_transport')
+        raise LinkValidationError('unsupported_transport', transport)
     if transport in ('', 'tcp', 'raw'):
         return None
     if transport == 'ws':
@@ -1933,7 +1951,7 @@ def _build_transport_object(parts):
         if service_name:
             grpc['service_name'] = service_name
         return grpc
-    raise LinkValidationError('unsupported_transport')
+    raise LinkValidationError('unsupported_transport', transport)
 
 
 def _parse_ss_userinfo(userinfo):
@@ -2100,7 +2118,7 @@ def proxy_link_to_singbox_outbound(link, tag):
                     raise LinkValidationError('invalid_transport_param')
 
     else:
-        raise LinkValidationError('unsupported_scheme')
+        raise LinkValidationError('unsupported_scheme', parts.get('scheme', ''))
 
     tls = _build_tls_object(parts)
     if tls:
@@ -2282,6 +2300,14 @@ def validate_links_for_podkop_singbox(sec, links):
         except LinkValidationError as e:
             stats['rejected'] += 1
             stats['rejected_by_reason'][e.reason] = stats['rejected_by_reason'].get(e.reason, 0) + 1
+            # Одной сводки «отброшено: 1» мало, чтобы понять, придирается ли
+            # проверка или ключ и правда не для Podkop. Поэтому в лог идёт имя
+            # ключа и то самое значение, на котором разбор встал.
+            name = link_name(link)
+            detail = f": {e.detail}" if e.detail else ''
+            log('DEBUG', f"[{sec}]: ключ не для Podkop"
+                         + (f" ({name})" if name else '')
+                         + f": {validation_reason_text(e.reason)}{detail}")
 
     if normalized_count:
         log('INFO', f"[{sec}]: для совместимости с Podkop добавлен type=tcp в ключах: {normalized_count}")
@@ -2293,7 +2319,7 @@ def validate_links_for_podkop_singbox(sec, links):
 
     stats['formal_ok'] = len(formally_ok)
     if stats['rejected']:
-        log('WARN', f"[{sec}]: быстрая проверка совместимости отбросила ключей: {stats['rejected']}")
+        log('WARN', f"[{sec}]: Podkop не умеет собрать outbound из ключей: {stats['rejected']}")
         for reason, count in sorted(stats['rejected_by_reason'].items()):
             if reason == 'normalized_missing_transport':
                 continue
