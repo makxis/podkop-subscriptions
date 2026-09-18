@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.7.1
+
+- The LuCI page no longer leaves labels pointing at ids that do not exist.
+  LuCI titles every option with `<label for="widget.cbid.<config>.<section>.<option>">`,
+  but only widgets built around an input, select or textarea publish that id:
+  a flag keeps it in `data-widget-id` and gives the checkbox a random id
+  instead, while a dummy value and a button have nothing focusable at all. The
+  browser reported 19 such labels on this page, and a screen reader announced
+  those controls unlabelled. Each option's rendered frame is now repaired:
+  a flag's label is pointed at the checkbox itself, and a label with nothing to
+  address loses its `for`. The label is replaced by a clone in the process,
+  which drops LuCI's own click handler — with `for` resolving, the browser
+  activates the checkbox itself, and keeping both would toggle it twice per
+  click on the title.
+
 ## 3.7.0
 
 - The request fingerprint is no longer hardcoded. A `config fingerprint`

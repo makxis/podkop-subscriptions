@@ -9,7 +9,7 @@ const LOCAL_LINKS = "/etc/podkop-subscriptions/local-links";
 // Fallback only, used when the view could not read the installed VERSION file.
 // That file is the source of truth, so this constant cannot silently drift out
 // of sync with releases the way the old hardcoded version did.
-const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.7.0";
+const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.7.1";
 const STATUS_STYLE_PLAIN_CARD_V36 = true;
 
 // Примеры в подсказках оформляются только отступами и полоской слева.
@@ -238,6 +238,68 @@ function followUpdaterLog(box, state) {
     }
 
     step();
+  });
+}
+
+// LuCI titles every option with <label for="widget.cbid.<config>.<section>.<option>">,
+// but only the widgets built around an input, select or textarea publish that
+// id. A flag keeps it in data-widget-id on the checkbox and gives the checkbox
+// a random id instead; a dummy value and a button have nothing focusable at all,
+// just a hidden field whose id lacks the "widget." prefix. The label then points
+// at an id that does not exist, which is what the browser reports as "the
+// label's for attribute doesn't match any element id", and a screen reader
+// announces those controls unlabelled. LuCI compensates with its own click
+// handler on the label, so only assistive technology notices.
+function repairOptionLabel(node) {
+  if (!node || typeof node.querySelector !== "function")
+    return node;
+
+  const label = node.querySelector("label.cbi-value-title[for]");
+
+  if (!label)
+    return node;
+
+  const want = label.getAttribute("for");
+
+  // Attribute selector, not "#id": these ids contain dots, which a CSS id
+  // selector reads as class separators.
+  if (!want || node.querySelector('[id="' + want + '"]'))
+    return node;
+
+  const widget = node.querySelector('[data-widget-id="' + want + '"]');
+  // Cloning drops LuCI's click handler along with the old node. That handler
+  // has to go: once "for" resolves, the browser activates the control itself,
+  // and keeping both would toggle a checkbox twice per click on the title.
+  const fixed = label.cloneNode(true);
+
+  if (widget && widget.id)
+    fixed.setAttribute("for", widget.id);
+  else
+    fixed.removeAttribute("for");
+
+  label.parentNode.replaceChild(fixed, label);
+
+  return node;
+}
+
+// Wrapping renderFrame rather than fixing the rendered page once: adding or
+// removing a group re-renders the map, and every re-render goes through the
+// option objects again.
+function repairLabelsOf(sectionObj) {
+  (sectionObj.children || []).forEach(function(child) {
+    if (child.subsection) {
+      repairLabelsOf(child.subsection);
+      return;
+    }
+
+    if (typeof child.renderFrame !== "function")
+      return;
+
+    const renderFrame = child.renderFrame;
+
+    child.renderFrame = function() {
+      return repairOptionLabel(renderFrame.apply(this, arguments));
+    };
   });
 }
 
@@ -685,5 +747,9 @@ return baseclass.extend({
       const v = version || PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK;
       return '<div style="margin-top:8px;color:#888;font-size:11px;line-height:1.3">Podkop Subscriptions v' + v + '</div>';
     };
+
+    // Every option at once, not the affected types only: the pass does nothing
+    // when the label already resolves, so new options need no bookkeeping here.
+    repairLabelsOf(section);
   }
 });
