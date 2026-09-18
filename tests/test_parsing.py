@@ -287,10 +287,82 @@ def test_fingerprint_headers():
           and all(c in '0123456789ABCDEF' for c in u.generate_hwid()))
 
 
+def test_singbox_check_position():
+    print('Поиск битого ключа по ответу sing-box check')
+    decode = 'FATAL[0000] decode config at /tmp/x.json: outbounds[3].transport: unknown transport type: bogus'
+    init = 'FATAL[0000] initialize outbound[1]: unknown method: rc4-nonsense'
+    dup = 'FATAL[0000] decode config at /tmp/x.json: duplicate outbound/endpoint tag: podkop-sub-test-2'
+
+    check('позиция из decode', u.parse_singbox_check_position(decode, 5) == 3)
+    check('позиция из initialize', u.parse_singbox_check_position(init, 5) == 1)
+    check('позиция из тега', u.parse_singbox_check_position(dup, 5) == 1)
+    check('позиция вне списка отбрасывается', u.parse_singbox_check_position(decode, 2) is None)
+    check('без позиции None', u.parse_singbox_check_position('FATAL: something went wrong', 5) is None)
+    check('пустой ответ', u.parse_singbox_check_position('', 5) is None)
+
+
+def test_singbox_hard_validation():
+    print('Отбраковка ключей через sing-box check')
+    links = ['vless://00000000-0000-4000-8000-00000000000%d@node%d.example.net:443?type=tcp#Узел-%d' % (i, i, i)
+             for i in range(1, 9)]
+    bad = {links[2], links[6]}
+    original = u.run_singbox_check_for_links
+
+    def fake_check(batch, timeout=None):
+        """sing-box падает на первом неподходящем ключе и называет его позицию."""
+        for idx, link in enumerate(batch):
+            if link in bad:
+                return False, 'singbox_check_failed', idx
+        return True, '', None
+
+    def blind_check(batch, timeout=None):
+        """Тот же ответ, но без позиции: остаётся деление пополам."""
+        ok, reason, _position = fake_check(batch)
+        return ok, reason, None
+
+    try:
+        u.run_singbox_check_for_links = fake_check
+        good, stats = u.hard_validate_links_with_singbox('тест', links)
+        check('битые ключи отброшены', good == [l for l in links if l not in bad], str(len(good)))
+        check('порядок сохранён', good == sorted(good, key=links.index))
+        check('запусков на один больше, чем битых ключей', stats['runs'] == len(bad) + 1, str(stats['runs']))
+        check('счётчик отброшенных верен', stats['rejected'] == len(bad))
+        check('проверка признана успешной', stats['ok'] is True)
+
+        u.run_singbox_check_for_links = blind_check
+        good_blind, stats_blind = u.hard_validate_links_with_singbox('тест', links)
+        check('без позиции результат тот же', good_blind == good, str(len(good_blind)))
+        check('без позиции запусков больше', stats_blind['runs'] > stats['runs'],
+              f"{stats_blind['runs']} vs {stats['runs']}")
+
+        # Потолок запусков: битые ключи кончаются позже, чем разрешённые запуски.
+        u.run_singbox_check_for_links = lambda batch, timeout=None: (False, 'singbox_check_failed', 0)
+        good_limit, stats_limit = u.hard_validate_links_with_singbox('тест', links, max_runs=2)
+        check('при исчерпании лимита секция не меняется', good_limit == [])
+        check('причина названа', 'singbox_check_limit' in stats_limit['rejected_by_reason'])
+        check('лимит не превышен', stats_limit['runs'] <= 2, str(stats_limit['runs']))
+
+        u.run_singbox_check_for_links = lambda batch, timeout=None: (False, 'singbox_not_found', None)
+        good_missing, stats_missing = u.hard_validate_links_with_singbox('тест', links)
+        check('без sing-box список не принимается', good_missing == [])
+        check('отсутствие sing-box названо причиной',
+              'singbox_not_found' in stats_missing['rejected_by_reason'])
+
+        u.run_singbox_check_for_links = lambda batch, timeout=None: (True, '', None)
+        good_all, stats_all = u.hard_validate_links_with_singbox('тест', links)
+        check('чистый список проходит за один запуск', good_all == links and stats_all['runs'] == 1,
+              str(stats_all['runs']))
+        check('пустой список не запускает sing-box',
+              u.hard_validate_links_with_singbox('тест', [])[1]['runs'] == 0)
+    finally:
+        u.run_singbox_check_for_links = original
+
+
 def main():
     for test in (test_clash_matches_reference, test_xray_configs, test_xray_hysteria, test_trojan_and_ss,
                  test_plain_and_base64,
-                 test_refusals, test_domain_expansion, test_fingerprint_headers):
+                 test_refusals, test_domain_expansion, test_fingerprint_headers,
+                 test_singbox_check_position, test_singbox_hard_validation):
         test()
         print()
     if failures:

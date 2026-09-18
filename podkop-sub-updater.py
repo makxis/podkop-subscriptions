@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.7.1"
+APP_VERSION_FALLBACK = "3.7.2"
 
 
 def app_version():
@@ -93,7 +93,18 @@ SOURCE_RETRIES_DEFAULT = 3
 CATCHUP_AFTER_HOURS_DEFAULT = 24
 VALID_TIME_MIN_TS = 1700000000
 SINGBOX_CHECK_TIMEOUT_DEFAULT = 15
+# Потолок числа запусков sing-box check на секцию. Он не про размер подписки, а
+# про защиту от вырождения поиска битого ключа: сам sing-box называет позицию,
+# на которой споткнулся, поэтому обычно запусков ровно на один больше, чем
+# битых ключей. Потолок остаётся страховкой для случая, когда позицию
+# разобрать не удалось и приходится делить список пополам.
 SINGBOX_CHECK_MAX_RUNS_DEFAULT = 40
+SINGBOX_CHECK_TAG_PREFIX = 'podkop-sub-test-'
+# «decode config at /tmp/...: outbounds[3].transport: unknown transport type»
+# и «initialize outbound[1]: unknown method» — единственное и множественное
+# число, обе формы встречаются у sing-box 1.12.
+SINGBOX_CHECK_INDEX_RE = re.compile(r'outbounds?\[(\d+)\]')
+SINGBOX_CHECK_TAG_RE = re.compile(re.escape(SINGBOX_CHECK_TAG_PREFIX) + r'(\d+)')
 UPDATER_FLOCK_PATH = '/tmp/podkop-sub-updater.flock'
 UPDATER_LOCK_WAIT_SECONDS = 300
 UPDATER_LOCK_BUSY_EXIT_CODE = 75
@@ -2107,9 +2118,37 @@ def _singbox_config_for_links(links):
     return {'log': {'disabled': True}, 'outbounds': outbounds}
 
 
+def parse_singbox_check_position(text, count):
+    """Позиция ключа, на котором sing-box check остановился, или None.
+
+    sing-box разбирает и поднимает outbound'ы по порядку и падает на первом
+    неподходящем, называя его: «outbounds[3].transport: ...» при разборе
+    конфига и «initialize outbound[1]: ...» при инициализации. Номер в
+    сообщении — индекс в том же массиве, который мы ему и передали, поэтому по
+    нему сразу видно виновника. Если индекса нет, в ход идёт тег: имена вида
+    podkop-sub-test-N мы раздаём сами, по порядку, с единицы.
+    """
+    text = text or ''
+
+    m = SINGBOX_CHECK_INDEX_RE.search(text)
+    if m:
+        idx = int(m.group(1))
+        if 0 <= idx < count:
+            return idx
+
+    m = SINGBOX_CHECK_TAG_RE.search(text)
+    if m:
+        idx = int(m.group(1)) - 1
+        if 0 <= idx < count:
+            return idx
+
+    return None
+
+
 def run_singbox_check_for_links(links, timeout=SINGBOX_CHECK_TIMEOUT_DEFAULT):
+    """Возвращает (ok, причина, позиция битого ключа или None)."""
     if not links:
-        return True, ''
+        return True, '', None
     tmp_path = f'/tmp/podkop-sub-singbox-check-{os.getpid()}-{int(time.time() * 1000)}.json'
     try:
         cfg = _singbox_config_for_links(links)
@@ -2125,12 +2164,14 @@ def run_singbox_check_for_links(links, timeout=SINGBOX_CHECK_TIMEOUT_DEFAULT):
                 timeout=timeout
             )
         except FileNotFoundError:
-            return False, 'singbox_not_found'
+            return False, 'singbox_not_found', None
         except subprocess.TimeoutExpired:
-            return False, 'singbox_check_failed'
+            return False, 'singbox_check_failed', None
         if result.returncode == 0:
-            return True, ''
-        return False, 'singbox_check_failed'
+            return True, '', None
+        position = parse_singbox_check_position(
+            (result.stderr or '') + '\n' + (result.stdout or ''), len(links))
+        return False, 'singbox_check_failed', position
     finally:
         try:
             os.remove(tmp_path)
@@ -2138,9 +2179,15 @@ def run_singbox_check_for_links(links, timeout=SINGBOX_CHECK_TIMEOUT_DEFAULT):
             pass
 
 
-def hard_validate_links_with_singbox(links, max_runs=SINGBOX_CHECK_MAX_RUNS_DEFAULT):
+def hard_validate_links_with_singbox(sec, links, max_runs=None):
+    links = list(links or [])
     if not links:
         return [], {'ok': True, 'runs': 0, 'rejected': 0, 'rejected_by_reason': {}}
+
+    # Один запуск на битый ключ плюс подтверждающий, плюс запас на случай, когда
+    # позицию разобрать не вышло и список делится пополам.
+    if max_runs is None:
+        max_runs = max(SINGBOX_CHECK_MAX_RUNS_DEFAULT, len(links) + 8)
 
     runs = {'n': 0}
     bad_ids = set()
@@ -2148,49 +2195,60 @@ def hard_validate_links_with_singbox(links, max_runs=SINGBOX_CHECK_MAX_RUNS_DEFA
 
     def check(batch):
         if not batch:
-            return True, ''
+            return True, '', None
         if runs['n'] >= max_runs:
             raise LinkValidationError('singbox_check_limit')
         runs['n'] += 1
         return run_singbox_check_for_links(batch)
 
+    def mark_bad(link, reason):
+        sid = stable_id(link)
+        bad_ids.add(sid)
+        bad_reason[sid] = reason or 'singbox_check_failed'
+
+    def isolate(batch):
+        """Запасной путь: sing-box не назвал позицию, ищем делением пополам."""
+        if not batch:
+            return
+        if len(batch) == 1:
+            mark_bad(batch[0], 'singbox_check_failed')
+            return
+        mid = len(batch) // 2
+        for part in (batch[:mid], batch[mid:]):
+            if not part:
+                continue
+            ok_part, reason_part, _position = check(part)
+            if not ok_part:
+                if reason_part == 'singbox_not_found':
+                    for link in part:
+                        mark_bad(link, 'singbox_not_found')
+                else:
+                    isolate(part)
+
     try:
-        ok, reason = check(links)
-        if ok:
-            return list(links), {'ok': True, 'runs': runs['n'], 'rejected': 0, 'rejected_by_reason': {}}
-        if reason == 'singbox_not_found':
-            return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {'singbox_not_found': len(links)}}
+        pending = list(links)
+        while pending:
+            ok, reason, position = check(pending)
+            if ok:
+                break
+            if reason == 'singbox_not_found':
+                return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {'singbox_not_found': len(links)}}
 
-        def isolate(batch):
-            if not batch:
-                return
-            if len(batch) == 1:
-                sid = stable_id(batch[0])
-                bad_ids.add(sid)
-                bad_reason[sid] = 'singbox_check_failed'
-                return
-            mid = len(batch) // 2
-            left = batch[:mid]
-            right = batch[mid:]
-            for part in (left, right):
-                if not part:
-                    continue
-                ok_part, reason_part = check(part)
-                if not ok_part:
-                    if reason_part == 'singbox_not_found':
-                        for link in part:
-                            sid = stable_id(link)
-                            bad_ids.add(sid)
-                            bad_reason[sid] = 'singbox_not_found'
-                    else:
-                        isolate(part)
+            if position is None:
+                isolate(pending)
+                pending = [x for x in pending if stable_id(x) not in bad_ids]
+                if pending:
+                    ok_final, reason_final, _position = check(pending)
+                    if not ok_final:
+                        return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {reason_final or 'singbox_check_failed': len(links)}}
+                break
 
-        isolate(list(links))
+            culprit = pending.pop(position)
+            mark_bad(culprit, reason)
+            name = link_name(culprit)
+            log('DEBUG', f"[{sec}]: sing-box отклонил ключ {position + 1}/{len(pending) + 1}" + (f": {name}" if name else ''))
+
         good = [x for x in links if stable_id(x) not in bad_ids]
-        if good:
-            ok_final, reason_final = check(good)
-            if not ok_final:
-                return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {reason_final or 'singbox_check_failed': len(links)}}
         by_reason = {}
         for sid in bad_ids:
             r = bad_reason.get(sid, 'singbox_check_failed')
@@ -2245,7 +2303,7 @@ def validate_links_for_podkop_singbox(sec, links):
         stats['hard_check_ok'] = False
         return [], stats
 
-    valid, hard = hard_validate_links_with_singbox(formally_ok)
+    valid, hard = hard_validate_links_with_singbox(sec, formally_ok)
     stats['singbox_runs'] = int(hard.get('runs', 0) or 0)
     stats['hard_rejected'] = int(hard.get('rejected', 0) or 0)
     for reason, count in (hard.get('rejected_by_reason') or {}).items():

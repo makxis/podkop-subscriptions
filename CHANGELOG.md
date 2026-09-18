@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.7.2
+
+- The compatibility check now asks sing-box which key it tripped over instead
+  of guessing. `sing-box check` stops at the first outbound it cannot accept
+  and names it — `outbounds[3].transport: unknown transport type` when decoding
+  the config, `initialize outbound[1]: unknown method` when bringing it up —
+  and the number is the position in the very array we handed it. Dropping that
+  one key and asking again costs one run per bad key plus a confirming run,
+  where the old bisection cost about twelve runs per bad key.
+  - That bisection is kept as the fallback for a failure sing-box reports
+    without a position, and the run budget, which now scales with the length of
+    the list, guards only that path.
+  - The budget used to be reachable in ordinary use: a section of 65 keys with
+    five bad ones needed more than the 40 runs allowed, and a section whose
+    check ran out of budget was left untouched entirely — the whole update
+    silently did nothing for it. Measured on the router, the same 65 keys now
+    take 6 runs instead of 40, and the five bad keys are dropped instead of
+    freezing the section.
+  - Each rejected key is now named in the log at DEBUG level, so it is possible
+    to tell which node a panel is serving broken.
+
 ## 3.7.1
 
 - The LuCI page no longer leaves labels pointing at ids that do not exist.

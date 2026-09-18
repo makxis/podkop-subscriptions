@@ -9,7 +9,7 @@ const LOCAL_LINKS = "/etc/podkop-subscriptions/local-links";
 // Fallback only, used when the view could not read the installed VERSION file.
 // That file is the source of truth, so this constant cannot silently drift out
 // of sync with releases the way the old hardcoded version did.
-const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.7.1";
+const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.7.2";
 const STATUS_STYLE_PLAIN_CARD_V36 = true;
 
 // Примеры в подсказках оформляются только отступами и полоской слева.
