@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.7.0
 
 - The request fingerprint is no longer hardcoded. A `config fingerprint`
   section holds the headers as an ordered list of `Name: value` lines, which is
