@@ -23,8 +23,7 @@ Typical output (the program logs in Russian):
 ```text
 [INFO] === ЗАПУСК ОБНОВЛЕНИЯ ПОДПИСОК ===
 [INFO] Профиль запроса подписок: v2raytun/android, Android, Android 11, OnePlus MT2110; ...
-[INFO] источник 1: попытка 1/3, timeout=45s
-[INFO] источник 1: успешно загружен с попытки 1/3
+[INFO] источник 1: попытка 1/3, лимит 45s, на соединение 15s
 [INFO] [main]: источник 1 (base64) -> ссылок после фильтра: 96
 [INFO] [main]: Дубликатов в новых ссылках подписки отброшено: 4
 [INFO] [main]: Итого уникальных новых ссылок из внешних подписок: 92
@@ -302,7 +301,7 @@ config subscription_schedule 'main_0310'
 | `force_cleanup` | `0` | `1` — prune links with `fail_count >= 2` and over-latency links even when `max_links` is not reached. |
 | `dedupe_sni_rotation` | `0` | `1` — treat links differing only by `sni` as one. |
 | `dedupe_endpoint_host` | `0` | `1` — collapse links sharing the same `IP/domain:port`. |
-| `expand_domain_ips` | `0` | `1` — a domain resolving to several addresses also yields one key per IP. The domain key stays. See [Expanding domains into IPs](#expanding-domains-into-ips). |
+| `expand_domain_ips` | `1` | A domain resolving to several addresses also yields one key per IP. The domain key stays. `0` turns it off. See [Expanding domains into IPs](#expanding-domains-into-ips). |
 | `fingerprint` | empty | Name of the fingerprint profile for this group. Empty means `default`. See [Client fingerprint](#client-fingerprint). |
 | `fingerprint_probe_days` | `7` | How often to re-measure which profile yields more nodes. `0` measures once and never again. |
 
@@ -451,6 +450,11 @@ Domains with a single address are left alone. Expansion runs after the regex
 filter, so links that get dropped never cost a DNS lookup.
 
 The number of keys grows noticeably, so the `max_links` cap fills up sooner.
+
+The option is on by default, including for configs that do not carry it at all:
+after an upgrade such a group starts expanding domains. Turn it off with an
+explicit `option expand_domain_ips '0'` in the group, or by clearing the
+checkbox in LuCI — that choice survives later upgrades.
 
 ---
 

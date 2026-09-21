@@ -374,6 +374,9 @@ config subscription_group 'main'
     option max_links '0'
     option max_latency_ms '0'
 
+    # Разворачивать домены с несколькими адресами в ключ на каждый IP.
+    option expand_domain_ips '1'
+
     # Жёсткая чистка и схлопывание похожих ключей.
     option force_cleanup '0'
     option dedupe_sni_rotation '0'
@@ -423,6 +426,8 @@ $src"
   [ "$pt_choice" = "2" ] && ptype="selector" || ptype="urltest"
   max_links="$(ask_value "Максимум ключей в секции, 0 — без лимита" "50")"
   max_ping="$(ask_value "Максимальный ping, мс, 0 — без фильтра" "500")"
+  # Не спрашиваем: вариант по умолчанию тут один, а снять галку можно в LuCI.
+  expand_ips="1"
   force_cleanup="0"
   if ask_yn "Включить принудительную чистку?" "no"; then force_cleanup="1"; fi
   dedupe_sni="1"
@@ -449,6 +454,7 @@ $src"
   say "  тип группы: $ptype"
   say "  максимум ключей: $max_links"
   say "  максимум ping: $max_ping"
+  say "  разворачивать домены в IP: $expand_ips"
   say "  принудительная чистка: $force_cleanup"
   say "  SNI-схлопывание: $dedupe_sni"
   say "  cron enabled: $schedule"
@@ -472,6 +478,7 @@ $src"
     echo "    option proxy_type '$ptype'"
     echo "    option max_links '$(uci_escape "$max_links")'"
     echo "    option max_latency_ms '$(uci_escape "$max_ping")'"
+    echo "    option expand_domain_ips '$expand_ips'"
     echo "    option force_cleanup '$force_cleanup'"
     echo "    option dedupe_sni_rotation '$dedupe_sni'"
     echo ""

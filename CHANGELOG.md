@@ -2,6 +2,27 @@
 
 ## 3.7.4
 
+- `expand_domain_ips` is on by default now, for new configs and for existing
+  groups that never carried the option. A domain with several addresses behind
+  it is measured by URLTest as one key, and which server that key reaches is
+  whatever DNS returned at the time, so the fastest of them was being picked by
+  chance. A group that has the option set to `0` keeps it off.
+- The source download log no longer reads as a promise to wait 45 seconds. The
+  45s is a per-attempt ceiling: a refused connection or a missing DNS record
+  fails in milliseconds, and an unanswered handshake fails on the connect
+  timeout, which is 15s. Measured on a dead port, three attempts took 2.0s in
+  total while the log said `timeout=45s` three times.
+  - Each attempt now names both limits before it runs and how long it actually
+    took afterwards, and the final error gives the elapsed time of the whole
+    cycle instead of the number that was never reached.
+  - `--connect-timeout` moved out of the command into a named constant next to
+    the other one, and the subprocess timeout now sits 5s above curl's
+    `--max-time`. They used to be the same number, so which timer fired first
+    was a toss-up: curl's message and exit code, or a bare TimeoutExpired.
+- Keys from the local list are logged with their own line and their own count,
+  and the summary counter that quietly duplicated them was removed. They are
+  still deliberately kept out of `last_sources_ok` and `last_unique_links`, so a
+  local file can never make a failed subscription download look successful.
 - An upgrade now keeps the panel the way it was installed. The documented
   upgrade command is `install.sh --remote --with-panel --no-config`, and
   `--with-panel` used to mean "visible": every run wrote a fresh `menu.d` entry

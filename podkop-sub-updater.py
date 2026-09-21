@@ -88,7 +88,17 @@ def is_local_links_source(source):
     return False
 DELETE_AFTER_FAIL_COUNT_DEFAULT = 72
 MIN_KEEP_PER_SECTION_DEFAULT = 1
+# Потолок на одну попытку загрузки, а не ожидание: почти все отказы приходят
+# раньше и сразу. Нет DNS — ошибка мгновенная, порт закрыт — тоже, сервер не
+# отвечает на handshake — падение на --connect-timeout, то есть на 15s, а не на
+# 45s. Полные 45s тратит только источник, который соединение принял и молчит.
 SOURCE_TIMEOUT_DEFAULT = 45
+SOURCE_CONNECT_TIMEOUT_DEFAULT = 15
+# Запас, с которым subprocess ждёт дольше самого curl. Без него два таймера
+# стоят на одно и то же число, и кто сработает первым — лотерея: выиграет
+# subprocess — получим TimeoutExpired без причины, выиграет curl — получим
+# внятное сообщение и код.
+SOURCE_TIMEOUT_MARGIN = 5
 SOURCE_RETRIES_DEFAULT = 3
 CATCHUP_AFTER_HOURS_DEFAULT = 24
 VALID_TIME_MIN_TS = 1700000000
@@ -687,7 +697,9 @@ def load_jobs_from_uci_podkop(config_path):
         # Empty means the built-in profile, so configs that predate the
         # fingerprint section keep working as before.
         fingerprint_name = opt.get('fingerprint', '').strip()
-        expand_ips = is_enabled_value(opt.get('expand_domain_ips', '0'))
+        # По умолчанию включено: без разворачивания URLTest меряет домен, а
+        # каким из серверов за ним он окажется, решает DNS в момент запроса.
+        expand_ips = is_enabled_value(opt.get('expand_domain_ips', '1'))
         # Как часто перезамерять, какой профиль отпечатка выгоднее.
         # 0 — замерить один раз при первом чтении и больше не трогать.
         probe_days = parse_positive_int(opt.get('fingerprint_probe_days', ''),
@@ -1018,7 +1030,8 @@ def build_fetch_command(source, pairs, timeout):
         # этого сервер, отвечающий 502 с пустым телом, выглядел неотличимо от
         # таймаута и от честно пустой подписки — во всех случаях «Пустой ответ».
         cmd = ['curl', '-sS', '-L', '--fail-with-body',
-               '--max-time', str(timeout), '--connect-timeout', '15']
+               '--max-time', str(timeout),
+               '--connect-timeout', str(SOURCE_CONNECT_TIMEOUT_DEFAULT)]
         for name, value in pairs:
             # Сжатие не запрашиваем вовсе. libcurl в OpenWrt собран без zlib,
             # там даже --compressed не существует ("the installed libcurl
@@ -1065,39 +1078,54 @@ def read_source_payload(source, hwid, device_model, kernel_ver, cache, label=Non
         cmd = build_fetch_command(source, pairs, timeout)
 
         last_error = 'неизвестная ошибка'
+        # Сколько попытка шла на самом деле — единственный способ отличить
+        # «сервер думал и не ответил» от «до сервера вообще не дошло». Раньше в
+        # логе стояло только число 45, и строка читалась как обещание ждать
+        # столько, хотя отказ прилетал за доли секунды.
+        started_all = time.monotonic()
 
         for attempt in range(1, retries + 1):
+            started = time.monotonic()
             try:
-                log('INFO', f"{source_display_label(source, label)}: попытка {attempt}/{retries}, timeout={timeout}s")
+                log('INFO', f"{source_display_label(source, label)}: попытка {attempt}/{retries}, "
+                            f"лимит {timeout}s, на соединение {SOURCE_CONNECT_TIMEOUT_DEFAULT}s")
                 result = subprocess.run(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=timeout
+                    timeout=timeout + SOURCE_TIMEOUT_MARGIN
                 )
+                took = time.monotonic() - started
 
                 if result.returncode == 0 and result.stdout and result.stdout.strip():
                     if attempt > 1:
-                        log('INFO', f"{source_display_label(source, label)}: успешно загружен с попытки {attempt}/{retries}")
+                        log('INFO', f"{source_display_label(source, label)}: успешно загружен с попытки "
+                                    f"{attempt}/{retries} за {took:.1f}s")
                     cache[cache_key] = result.stdout
                     return result.stdout
 
                 last_error = result.stderr.strip() or 'Пустой ответ'
-                log('WARN', f"{source_display_label(source, label)}: попытка {attempt}/{retries} неуспешна -> {last_error}")
+                log('WARN', f"{source_display_label(source, label)}: попытка {attempt}/{retries} неуспешна "
+                            f"за {took:.1f}s -> {last_error}")
 
             except subprocess.TimeoutExpired:
-                last_error = f"timeout {timeout}s"
-                log('WARN', f"{source_display_label(source, label)}: попытка {attempt}/{retries} превысила timeout {timeout}s")
+                took = time.monotonic() - started
+                last_error = f"нет ответа за {took:.0f}s"
+                log('WARN', f"{source_display_label(source, label)}: попытка {attempt}/{retries} прервана "
+                            f"по лимиту {timeout}s")
 
             except Exception as e:
+                took = time.monotonic() - started
                 last_error = str(e)
-                log('WARN', f"{source_display_label(source, label)}: попытка {attempt}/{retries} завершилась ошибкой -> {last_error}")
+                log('WARN', f"{source_display_label(source, label)}: попытка {attempt}/{retries} завершилась "
+                            f"ошибкой за {took:.1f}s -> {last_error}")
 
             if attempt < retries:
                 time.sleep(1)
 
-        raise RuntimeError(f"не удалось загрузить после {retries} попыток по {timeout}s: {last_error}")
+        raise RuntimeError(f"не удалось загрузить, попыток {retries} за "
+                           f"{time.monotonic() - started_all:.1f}s: {last_error}")
 
     path = source[7:] if source.startswith('file://') else source
     if not os.path.exists(path):
@@ -2759,6 +2787,13 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
 
         local_unique, local_dups = dedupe_links_keep_order(local_links)
         job['local_links_count'] = len(local_unique)
+        if local_unique:
+            # Отдельной строкой и отдельным счётчиком: локальный список идёт в
+            # секцию наравне с подписками, но в статистику загрузки источников
+            # не входит — иначе свой файл с ключами выдавал бы упавшую загрузку
+            # подписок за успешную.
+            log("INFO", f"[{sec}]: локальный список -> ключей после фильтра: {len(local_unique)}"
+                        " (в счёт источников не идут)")
 
         job['links'], dup_count = dedupe_links_keep_order(section_links)
         if dup_count:
@@ -3243,7 +3278,6 @@ def update_subscription_meta(state, jobs, processed_sections, total_added, total
     raw_links = sum(int(j.get('raw_links_count', 0) or 0) for j in jobs.values())
     filtered_links = sum(int(j.get('filtered_links_count', 0) or 0) for j in jobs.values())
     unique_links = sum(int(j.get('external_valid_count', 0) or 0) for j in jobs.values())
-    local_links = sum(int(j.get('local_links_count', 0) or 0) for j in jobs.values())
     if status is None:
         if unique_links > 0:
             status = 'partial_ok' if source_errors else 'ok'
@@ -3301,10 +3335,12 @@ def update_subscription_meta(state, jobs, processed_sections, total_added, total
     meta['last_raw_links'] = raw_links
     meta['last_after_filter_links'] = filtered_links
     meta['last_unique_links'] = unique_links
-    meta['last_local_links'] = local_links
     meta['last_added'] = int(total_added or 0)
     meta['last_removed'] = int(total_removed or 0)
     meta['last_final_links'] = int(total_final or 0)
+    # Локальные ключи считаются отдельно и намеренно не попадают ни в
+    # last_sources_ok, ни в last_unique_links: файл со своими ключами читается
+    # всегда и не должен выдавать аварию загрузки подписок за успех.
     meta['last_local_links'] = int(protected_local_count or 0)
     meta['last_processed_sections'] = int(processed_sections or 0)
     health = state.get('health', {})
