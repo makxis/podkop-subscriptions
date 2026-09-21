@@ -1,12 +1,13 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.7.4"
+APP_VERSION="3.7.5"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
 PANEL_MODE="ask"
 PANEL_VISIBILITY_FORCED=0
+PANEL_MODE_INSTALLED=""
 SOURCE_MODE="auto"
 CONFIG_MODE="ask"
 
@@ -266,6 +267,9 @@ remove_legacy_sections_from_podkop() {
 }
 
 cleanup_old_luci_leftovers() {
+  # This wipes menu.d, which is the only record of whether the panel was
+  # installed hidden. Whoever needs that answer has to ask before install_core
+  # runs — see PANEL_MODE_INSTALLED in the main block.
   rm -f /www/luci-static/resources/view/podkop/subscriptions.js 2>/dev/null || true
   rm -rf /www/luci-static/resources/view/podkop_subscriptions 2>/dev/null || true
   rm -f /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json 2>/dev/null || true
@@ -688,12 +692,14 @@ keep_installed_panel_visibility() {
   # menu entry, so neither may undo a hidden installation: menu.d is written
   # afresh on every run, and without this the panel came back into the menu on
   # the next upgrade. The visibility is changed only when it is stated
-  # outright, with --with-panel-visible or --with-panel-hidden.
+  # outright, with --with-panel-visible or --with-panel-hidden. The state it
+  # reads is the snapshot taken before install_core, because by now the file it
+  # was read from has been deleted.
   if [ "$PANEL_VISIBILITY_FORCED" = "1" ] || [ "$PANEL_MODE" != "yes" ]; then
     return 0
   fi
 
-  if [ "$(installed_panel_mode)" = "hidden" ]; then
+  if [ "$PANEL_MODE_INSTALLED" = "hidden" ]; then
     PANEL_MODE="hidden"
     say "Panel is installed hidden, upgrading it the same way. Use --with-panel-visible for the menu entry."
   fi
@@ -799,6 +805,9 @@ ask_configure() {
 }
 
 need_root
+# Before install_core: it clears the old LuCI files, menu.d included, and after
+# that a panel installed hidden is indistinguishable from no panel at all.
+PANEL_MODE_INSTALLED="$(installed_panel_mode)"
 install_core
 if ask_configure; then
   interactive_config

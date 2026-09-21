@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.7.5
+
+- Fixes 3.7.4's panel check, which never saw a hidden panel. The check read
+  `menu.d` at the start of `install_panel`, but `install_core` runs first and
+  its `cleanup_old_luci_leftovers` deletes that very file along with the other
+  old LuCI files. By the time the check ran, a hidden installation looked
+  exactly like no installation at all, so the upgrade put the menu entry back —
+  the behaviour the check was added to prevent.
+  - The state is now read once at the top of the run, before `install_core`
+    touches anything, and `cleanup_old_luci_leftovers` carries a note saying
+    what it destroys.
+
 ## 3.7.4
 
 - `expand_domain_ips` is on by default now, for new configs and for existing
