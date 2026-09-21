@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.7.4
+
+- An upgrade now keeps the panel the way it was installed. The documented
+  upgrade command is `install.sh --remote --with-panel --no-config`, and
+  `--with-panel` used to mean "visible": every run wrote a fresh `menu.d` entry
+  with a title, so a panel installed with `--with-panel-hidden` came back into
+  Services on the next upgrade, silently and without anything in the output
+  saying so.
+  - `--with-panel`, and the interactive prompt answered with Y, now mean
+    "install the panel" only. Before the files are written the installer reads
+    the existing `menu.d` entry: no title there means the panel is hidden, and
+    that is how it is reinstalled. The run says so instead of staying quiet.
+  - Visibility is changed only when it is stated outright. `--with-panel-hidden`
+    hides a visible panel as before, and the new `--with-panel-visible` is the
+    way to bring a hidden one back into the menu.
+  - A missing, unreadable or foreign `menu.d` file, or a router without
+    python3, is treated as "not installed hidden", so a first install still
+    lands in the menu.
+
 ## 3.7.3
 
 - The check that runs before `sing-box check` now says what it rejected and

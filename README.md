@@ -133,7 +133,7 @@ Removes downloaded archives, unpacked directories, and the LuCI cache. Configs, 
 wget -O /tmp/podkop-sub-upgrade.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-upgrade.sh --remote --with-panel --no-config && /usr/bin/podkop-sub-clean-temp
 ```
 
-`/etc/config/podkop_subscriptions`, local links, and `state.json` are preserved.
+`/etc/config/podkop_subscriptions`, local links, and `state.json` are preserved. The panel is upgraded the way it was installed: a hidden one stays hidden, a visible one stays visible. Only `--with-panel-visible` brings a hidden panel back into the menu.
 
 ---
 
@@ -186,7 +186,8 @@ sing-box:        1.12.17; 1.12.22
 | Command | What it does |
 |---|---|
 | `sh install.sh` | Interactive install: asks about the LuCI panel and the config. |
-| `sh install.sh --with-panel` | Install with a visible LuCI page. |
+| `sh install.sh --with-panel` | Install the LuCI panel. A panel already installed hidden stays hidden. |
+| `sh install.sh --with-panel-visible` | Install the panel and put it in the menu even if it was hidden before. |
 | `sh install.sh --with-panel-hidden` | Install the panel files but do not add a menu entry. |
 | `sh install.sh --no-panel` (`--core-only`) | Core only, no LuCI. Managed over SSH/cron. |
 | `sh install.sh --configure` | Create/recreate `/etc/config/podkop_subscriptions` without prompting. |

@@ -135,7 +135,7 @@ grep -c "proxy_string" /etc/config/podkop
 wget -O /tmp/podkop-sub-upgrade.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh && sh /tmp/podkop-sub-upgrade.sh --remote --with-panel --no-config && /usr/bin/podkop-sub-clean-temp
 ```
 
-`/etc/config/podkop_subscriptions`, локальные ключи и `state.json` при этом не пересоздаются.
+`/etc/config/podkop_subscriptions`, локальные ключи и `state.json` при этом не пересоздаются. Панель обновляется так же, как была поставлена: скрытая остаётся скрытой, видимая видимой. Показать скрытую панель можно только явно, флагом `--with-panel-visible`.
 
 ---
 
@@ -188,7 +188,8 @@ sing-box:        1.12.17; 1.12.22
 | Команда | Что делает |
 |---|---|
 | `sh install.sh` | Интерактивная установка: спрашивает про панель LuCI и про конфиг. |
-| `sh install.sh --with-panel` | Поставить с видимой страницей LuCI. |
+| `sh install.sh --with-panel` | Поставить панель LuCI. Если она уже стоит скрытой, такой и останется. |
+| `sh install.sh --with-panel-visible` | Поставить панель и показать её в меню, даже если до этого она была скрыта. |
 | `sh install.sh --with-panel-hidden` | Поставить файлы панели, но не добавлять пункт в меню. |
 | `sh install.sh --no-panel` (`--core-only`) | Только ядро, без LuCI. Управление через SSH/cron. |
 | `sh install.sh --configure` | Создать/пересоздать `/etc/config/podkop_subscriptions` без вопросов. |

@@ -1,11 +1,12 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.7.3"
+APP_VERSION="3.7.4"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
 PANEL_MODE="ask"
+PANEL_VISIBILITY_FORCED=0
 SOURCE_MODE="auto"
 CONFIG_MODE="ask"
 
@@ -24,7 +25,8 @@ esac
 for arg in "$@"; do
   case "$arg" in
     --with-panel) PANEL_MODE="yes" ;;
-    --with-panel-hidden) PANEL_MODE="hidden" ;;
+    --with-panel-visible) PANEL_MODE="yes"; PANEL_VISIBILITY_FORCED=1 ;;
+    --with-panel-hidden) PANEL_MODE="hidden"; PANEL_VISIBILITY_FORCED=1 ;;
     --no-panel|--core-only) PANEL_MODE="no" ;;
     --configure) CONFIG_MODE="yes" ;;
     --no-config) CONFIG_MODE="no" ;;
@@ -34,7 +36,7 @@ for arg in "$@"; do
     --branch=*) BRANCH="${arg#--branch=}"; RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}" ;;
     --raw-base=*) RAW_BASE="${arg#--raw-base=}" ;;
     -h|--help)
-      echo "Usage: sh install.sh [--with-panel|--with-panel-hidden|--no-panel] [--configure|--no-config] [--local|--remote] [--repo=owner/repo] [--branch=main]"
+      echo "Usage: sh install.sh [--with-panel|--with-panel-visible|--with-panel-hidden|--no-panel] [--configure|--no-config] [--local|--remote] [--repo=owner/repo] [--branch=main]"
       exit 0
       ;;
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
@@ -649,13 +651,60 @@ with open(path, 'w', encoding='utf-8') as f:
 PY
 }
 
+installed_panel_mode() {
+  # Prints how the panel is installed right now: "yes" when it has a menu
+  # entry, "hidden" when the files are in place without one, nothing at all
+  # when it is not installed.
+  menu_file="/usr/share/luci/menu.d/luci-app-podkop-subscriptions.json"
+  [ -f "$menu_file" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  python3 - "$menu_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8', errors='replace') as f:
+        data = json.load(f)
+except (OSError, ValueError):
+    raise SystemExit(0)
+
+entry = data.get('admin/services/podkop-subscriptions')
+if isinstance(entry, dict):
+    print('yes' if entry.get('title') else 'hidden')
+PY
+}
+
+keep_installed_panel_visibility() {
+  # An upgrade is run as "install.sh --with-panel", and the interactive prompt
+  # answered with Y ends in the same place. Neither says anything about the
+  # menu entry, so neither may undo a hidden installation: menu.d is written
+  # afresh on every run, and without this the panel came back into the menu on
+  # the next upgrade. The visibility is changed only when it is stated
+  # outright, with --with-panel-visible or --with-panel-hidden.
+  if [ "$PANEL_VISIBILITY_FORCED" = "1" ] || [ "$PANEL_MODE" != "yes" ]; then
+    return 0
+  fi
+
+  if [ "$(installed_panel_mode)" = "hidden" ]; then
+    PANEL_MODE="hidden"
+    say "Panel is installed hidden, upgrading it the same way. Use --with-panel-visible for the menu entry."
+  fi
+}
+
 install_panel() {
   if [ ! -d /www/luci-static/resources/view ]; then
     warn "LuCI static view directory was not found. Install LuCI first, then rerun with --with-panel."
     return 0
   fi
 
-  say "Installing standalone LuCI app: Services -> Подписки Podkop"
+  keep_installed_panel_visibility
+
+  if [ "$PANEL_MODE" = "hidden" ]; then
+    say "Installing standalone LuCI app without a menu entry (hidden mode)"
+  else
+    say "Installing standalone LuCI app: Services -> Подписки Podkop"
+  fi
   say "Podkop native LuCI files are not patched or replaced."
 
   backup_file /www/luci-static/resources/view/podkop/subscriptions.js
