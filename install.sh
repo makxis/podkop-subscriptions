@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.7.5"
+APP_VERSION="3.8.0"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
@@ -13,6 +13,8 @@ CONFIG_MODE="ask"
 
 SUB_CFG="/etc/config/podkop_subscriptions"
 PODKOP_CFG="/etc/config/podkop"
+# Tachyon, a Podkop Plus fork, replaces Podkop and keeps its sections here.
+TACHYON_CFG="/etc/config/tachyon"
 DATA_DIR="/etc/podkop-subscriptions"
 LOCAL_LINKS="$DATA_DIR/local-links"
 LOCAL_LINKS_LEGACY="/etc/config/podkop-local-links"
@@ -139,7 +141,9 @@ ensure_python() {
 }
 
 list_podkop_sections() {
-  [ -f "$PODKOP_CFG" ] || return 0
+  cfg="$PODKOP_CFG"
+  [ -f "$cfg" ] || cfg="$TACHYON_CFG"
+  [ -f "$cfg" ] || return 0
   awk '
     /^[ \t]*config[ \t]+section[ \t]+/ {
       name=$3
@@ -147,7 +151,7 @@ list_podkop_sections() {
       gsub(/^\"|\"$/, "", name)
       if (name != "") print name
     }
-  ' "$PODKOP_CFG"
+  ' "$cfg"
 }
 
 choose_target_section() {

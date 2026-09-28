@@ -147,6 +147,18 @@ LuCI App Podkop: v0.7.17–v0.7.19
 sing-box:        1.12.17; 1.12.22
 ```
 
+### Tachyon
+
+С версии 3.8.0 работает и с [Tachyon](https://github.com/Dushnilin/tachyon), форком Podkop Plus, который ставится вместо Podkop. Проверено на Tachyon 1.4.3, OpenWrt 24.10.7, sing-box 1.12.22.
+
+Совместимость неполная, потому что у Tachyon своя схема конфига:
+
+- Если `/etc/config/podkop` нет, а `/etc/config/tachyon` есть, апдейтер сам переключается на Tachyon. Cron, панель и команды из этого README менять не нужно.
+- Ключи пишутся в `selector_proxy_links` секции, у секции ставится `action 'connection'`. Поля Podkop (`connection_type`, `proxy_config_type`, `urltest_proxy_links`) туда не пишутся. Tachyon переносит их только при обновлении своего пакета, а до этого секция осталась бы без ключей.
+- URLTest в Tachyon задаётся отдельной секцией `config urltest` со ссылкой на целевую секцию. Для `proxy_type 'urltest'` апдейтер создаёт такую группу `Fastest`, если её нет. `proxy_type 'selector'` существующую группу не удаляет: её настройки принадлежат Tachyon.
+- Проверка живости берётся из `tachyon clash_api get_proxies`, после обновления перезапускается `/etc/init.d/tachyon`.
+- Собственные подписки Tachyon (`subscription_urls`) не используйте в той же секции: их outbound'ы сдвинут нумерацию `<секция>-N-out`, и health-check начнёт путать ключи.
+
 ## Что умеет
 
 - загружает подписки в plain-text, base64 и JSON (объекты Clash/Mihomo и конфиги Xray);

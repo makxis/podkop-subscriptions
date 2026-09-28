@@ -6,6 +6,8 @@ The guiding principle is **never break a working configuration**. If a subscript
 
 [Русская версия](README_RU.md) · [Changelog](CHANGELOG.md)
 
+Since 3.8.0 it also works with [Tachyon](https://github.com/Dushnilin/tachyon), a Podkop Plus fork that replaces Podkop (tested on Tachyon 1.4.3). The support is partial by design, see [Tachyon](#tachyon) below.
+
 ---
 
 ## Update links right now
@@ -43,6 +45,16 @@ Subscription URLs and proxy links are replaced with `<remote-url>` and `<proxy-l
 `/usr/bin/podkop-sub-run-now` performs the same cycle in the background, writing to `/tmp/podkop-sub-updater.log`. It exists so the **Запустить updater** button in LuCI can report a result. From a console it is rarely worth it: you have to chase the output with `tail -f`. See [All commands](#all-commands) for details.
 
 ---
+
+
+## Tachyon
+
+When `/etc/config/podkop` is missing and `/etc/config/tachyon` exists, the updater switches to Tachyon on its own; cron entries, the panel and the commands in this README stay the same. Tachyon's schema differs, so:
+
+- Links go into the section's `selector_proxy_links` and the section gets `action 'connection'`. Podkop options (`connection_type`, `proxy_config_type`, `urltest_proxy_links`) are not written: Tachyon converts them only when its package is upgraded, and until then the section would have no links.
+- URLTest is a separate `config urltest` section pointing at the target. For `proxy_type 'urltest'` the updater adds a `Fastest` group if there is none; `proxy_type 'selector'` does not delete an existing group, since its settings belong to Tachyon.
+- Health comes from `tachyon clash_api get_proxies`; after an update `/etc/init.d/tachyon` is restarted.
+- Do not use Tachyon's own `subscription_urls` in the same section: its outbounds shift the `<section>-N-out` numbering and the health check would mix up links.
 
 ## Quick start
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.8.0
+
+- Works with [Tachyon](https://github.com/Dushnilin/tachyon), the Podkop Plus
+  fork that replaces Podkop. On such a router `/etc/config/podkop` does not
+  exist, so every run died with `--config не найден`.
+  - `--config /etc/config/podkop` falls back to `/etc/config/tachyon` when only
+    the latter exists, so existing cron entries keep working.
+  - Links are written in Tachyon's own schema: `selector_proxy_links` plus
+    `action 'connection'`, URLTest as a `config urltest` child. Podkop options
+    are not written: Tachyon only migrates them on a package upgrade, and until
+    then the section would carry no links at all.
+  - Health comes from `tachyon clash_api get_proxies`, the service restarted is
+    `/etc/init.d/tachyon`. Its `<section>-N-out` tags follow the link order the
+    same way Podkop's do (checked on 61 links against the generated config).
+  - The panel and the installer list Tachyon's sections when Podkop is absent.
+- An anonymous section after the target (`config urltest` in Tachyon) was taken
+  for part of the target: the links were written into it a second time. The
+  section header regex now accepts a missing name.
+- Rewriting the config keeps its file mode. Tachyon holds its config at 0600
+  because it stores bot and API tokens; the temp file used to widen it to 0644.
+
 ## 3.7.5
 
 - Fixes 3.7.4's panel check, which never saw a hidden panel. The check read

@@ -39,7 +39,11 @@ return view.extend({
     // Версия читается здесь, а не в cfgvalue: form.js вызывает cfgvalue
     // синхронно, и промис отрисовался бы как [object Promise].
     return Promise.all([
-      fs.read("/etc/config/podkop").catch(function() { return ""; }),
+      // Tachyon replaces Podkop and keeps the same `config section` blocks
+      // in its own package.
+      fs.read("/etc/config/podkop").catch(function() {
+        return fs.read("/etc/config/tachyon").catch(function() { return ""; });
+      }),
       fs.read("/usr/share/podkop-subscriptions/VERSION").catch(function() { return ""; })
     ]);
   },

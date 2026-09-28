@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.7.5"
+APP_VERSION_FALLBACK = "3.8.0"
 
 
 def app_version():
@@ -71,6 +71,51 @@ LOCAL_LINKS_PATH_DEFAULT = DATA_DIR_DEFAULT + '/local-links'
 # reported a parse error on it. Kept readable so an upgrade cannot lose links
 # that were never migrated.
 LOCAL_LINKS_PATH_LEGACY = '/etc/config/podkop-local-links'
+PODKOP_CONFIG_PATH = '/etc/config/podkop'
+# Tachyon (a fork of Podkop Plus) keeps its sections in its own UCI package with
+# a different schema: links always live in selector_proxy_links, URLTest is a
+# separate `config urltest` child pointing at the section, and connection_type /
+# proxy_config_type are legacy markers that Tachyon only migrates on package
+# upgrade. Writing Podkop options there leaves the section without links.
+TACHYON_CONFIG_PATH = '/etc/config/tachyon'
+TACHYON_URLTEST_DEFAULTS = (
+    ('name', 'Fastest'),
+    ('check_interval', '3m'),
+    ('tolerance', '50'),
+    ('testing_url', 'https://www.gstatic.com/generate_204'),
+    ('filter_mode', 'disabled'),
+    ('detect_server_country', 'flag_emoji'),
+    ('interrupt_exist_connections', '1'),
+    ('pin_dashboard', '1'),
+)
+
+
+def config_backend(config_path):
+    return 'tachyon' if os.path.basename(config_path) == 'tachyon' else 'podkop'
+
+
+def backend_title(config_path):
+    return 'Tachyon' if config_backend(config_path) == 'tachyon' else 'Podkop'
+
+
+def resolve_config_path(config_path):
+    # Crontab entries and the installer's hints pass the Podkop path; on a router
+    # where Tachyon replaced Podkop follow the config that actually exists.
+    if (os.path.abspath(config_path) == PODKOP_CONFIG_PATH
+            and not os.path.exists(config_path)
+            and os.path.exists(TACHYON_CONFIG_PATH)):
+        return TACHYON_CONFIG_PATH
+    return config_path
+
+
+def tachyon_urltest_owners(config_path):
+    owners = set()
+    for s in parse_uci_sections(config_path):
+        if s['type'].lower() == 'urltest':
+            owner = s['options'].get('section', '').strip().lower()
+            if owner:
+                owners.add(owner)
+    return owners
 
 
 def local_links_path():
@@ -2808,6 +2853,19 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
 
 def load_current_podkop_sections(config_path):
     result = {}
+    if config_backend(config_path) == 'tachyon':
+        urltest_owners = tachyon_urltest_owners(config_path)
+        for s in parse_uci_sections(config_path):
+            if s['type'].lower() != 'section' or not s['name']:
+                continue
+            name = s['name'].strip().lower()
+            is_urltest = name in urltest_owners or s['options'].get('urltest_enabled') == '1'
+            result[name] = {
+                'ptype': 'urltest' if is_urltest else 'selector',
+                'links': list(s['lists'].get('selector_proxy_links', [])),
+                'section': s
+            }
+        return result
     for s in parse_uci_sections(config_path):
         if s['type'].lower() != 'section' or not s['name']:
             continue
@@ -3403,8 +3461,8 @@ def mark_subscription_seen(state, sec, links):
             st_sec['links'][sid]['last_seen_in_subscription'] = now
 
 
-def load_podkop_proxies():
-    cmd = ['/usr/bin/podkop', 'clash_api', 'get_proxies']
+def load_podkop_proxies(config_path):
+    cmd = ['/usr/bin/' + config_backend(config_path), 'clash_api', 'get_proxies']
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"command failed: {' '.join(cmd)}")
@@ -3458,7 +3516,7 @@ def observe_only(config_path, state_path):
         save_state(state_path, state)
         return
     try:
-        proxies = load_podkop_proxies()
+        proxies = load_podkop_proxies(config_path)
     except Exception as e:
         log("WARN", f"Не удалось получить состояние Podkop URLTest: {e}. fail_count не изменён.")
         state.setdefault('health', {})['last_scan_status'] = 'api_error'
@@ -3952,6 +4010,18 @@ def update_uci_config_with_final_links(config_path, updates):
     current_type = None
     found_sections = set()
     skip_multiline = False
+    tachyon = config_backend(config_path) == 'tachyon'
+    urltest_owners = tachyon_urltest_owners(config_path) if tachyon else set()
+    if tachyon:
+        stripped_prefixes = ('list selector_proxy_links', 'option action')
+    else:
+        stripped_prefixes = (
+            'list urltest_proxy_links',
+            'list selector_proxy_links',
+            'option connection_type',
+            'option proxy_config_type',
+            'option proxy_string'
+        )
 
     def is_target(sec_type, sec_name):
         return sec_type and sec_name and sec_type.lower() == 'section' and sec_name.lower() in updates
@@ -3963,13 +4033,20 @@ def update_uci_config_with_final_links(config_path, updates):
         upd = updates[sec]
         ptype = upd['ptype']
         links = upd['links']
+        if tachyon:
+            out_lines.append(f"\toption action 'connection'\n")
+            for link in links:
+                out_lines.append(f"\tlist selector_proxy_links {uci_quote(link)}\n")
+            return
         out_lines.append(f"\toption connection_type 'proxy'\n")
         out_lines.append(f"\toption proxy_config_type '{ptype}'\n")
         for link in links:
             out_lines.append(f"\tlist {ptype}_proxy_links {uci_quote(link)}\n")
 
     for line in old_lines:
-        m = re.match(r"^\s*config\s+([a-zA-Z0-9_-]+)\s+['\"]?([a-zA-Z0-9_-]+)['\"]?", line, re.IGNORECASE)
+        # The name is optional: an anonymous section (Tachyon's `config urltest`)
+        # still ends the previous one, or its lines would be taken for it.
+        m = re.match(r"^\s*config\s+([a-zA-Z0-9_-]+)(?:\s+['\"]?([a-zA-Z0-9_-]+)['\"]?)?\s*$", line, re.IGNORECASE)
         if m:
             if current_sec:
                 flush_section(current_type, current_sec)
@@ -3986,19 +4063,26 @@ def update_uci_config_with_final_links(config_path, updates):
                 if "'" in sline:
                     skip_multiline = False
                 continue
-            if any(sline.startswith(prefix) for prefix in (
-                'list urltest_proxy_links',
-                'list selector_proxy_links',
-                'option connection_type',
-                'option proxy_config_type',
-                'option proxy_string'
-            )):
+            if any(sline.startswith(prefix) for prefix in stripped_prefixes):
                 if line.count("'") % 2 != 0:
                     skip_multiline = True
                 continue
         out_lines.append(line)
     if current_sec:
         flush_section(current_type, current_sec)
+    if tachyon:
+        for sec in sorted(found_sections):
+            ptype = updates[sec]['ptype']
+            if ptype == 'urltest' and sec not in urltest_owners:
+                if out_lines and not out_lines[-1].endswith('\n'):
+                    out_lines.append('\n')
+                out_lines.append("\nconfig urltest\n")
+                out_lines.append(f"\toption section {uci_quote(sec)}\n")
+                for key, value in TACHYON_URLTEST_DEFAULTS:
+                    out_lines.append(f"\toption {key} {uci_quote(value)}\n")
+                log("INFO", f"[{sec}]: в Tachyon добавлена группа URLTest 'Fastest' для секции")
+            elif ptype == 'selector' and sec in urltest_owners:
+                log("INFO", f"[{sec}]: proxy_type=selector, но у секции в Tachyon есть группа URLTest; она оставлена как есть")
     for sec in updates:
         if sec not in found_sections:
             log("WARN", f"Секция '{sec}' собрана, но отсутствует как config section '{sec}' в {config_path}")
@@ -4006,15 +4090,23 @@ def update_uci_config_with_final_links(config_path, updates):
 
 
 def apply_updates_with_uci(config_path, updates):
-    if os.path.abspath(config_path) != '/etc/config/podkop':
+    backend = config_backend(config_path)
+    if os.path.abspath(config_path) != {'podkop': PODKOP_CONFIG_PATH, 'tachyon': TACHYON_CONFIG_PATH}[backend]:
         return
     changed = False
     for sec, upd in updates.items():
         links = upd.get('links') or []
         ptype = upd.get('ptype', 'urltest')
-        exists = subprocess.run(['uci', '-q', 'get', f'podkop.{sec}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        exists = subprocess.run(['uci', '-q', 'get', f'{backend}.{sec}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
         if not exists:
-            log("WARN", f"[{sec}]: секция отсутствует в /etc/config/podkop, UCI-применение пропущено")
+            log("WARN", f"[{sec}]: секция отсутствует в {config_path}, UCI-применение пропущено")
+            continue
+        if backend == 'tachyon':
+            subprocess.run(['uci', '-q', 'delete', f'tachyon.{sec}.selector_proxy_links'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['uci', 'set', f'tachyon.{sec}.action=connection'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for link in links:
+                subprocess.run(['uci', 'add_list', f'tachyon.{sec}.selector_proxy_links={link}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            changed = True
             continue
         commands = [
             ['uci', '-q', 'delete', f'podkop.{sec}.urltest_proxy_links'],
@@ -4029,8 +4121,8 @@ def apply_updates_with_uci(config_path, updates):
             subprocess.run(['uci', 'add_list', f'podkop.{sec}.{ptype}_proxy_links={link}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         changed = True
     if changed:
-        subprocess.run(['uci', 'commit', 'podkop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log("INFO", "UCI-поля секций Podkop зафиксированы через uci commit.")
+        subprocess.run(['uci', 'commit', backend], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log("INFO", f"UCI-поля секций {backend_title(config_path)} зафиксированы через uci commit.")
 
 
 def normalize_config(text):
@@ -4051,6 +4143,7 @@ def validate_file_argument(path, arg_name):
 def main():
     setup_syslog()
     args = parse_args()
+    args.config = resolve_config_path(args.config)
 
     # Read-only informational commands must never be blocked by an update.
     if args.version:
@@ -4142,7 +4235,7 @@ def main():
         proxies = None
         if need_proxies:
             try:
-                proxies = load_podkop_proxies()
+                proxies = load_podkop_proxies(args.config)
                 log("INFO", "Текущее состояние Podkop URLTest получено для отсеивателя.")
             except Exception as e:
                 log("WARN", f"Не удалось получить текущее состояние Podkop URLTest для отсеивателя: {e}. Будет использован только state.json.")
@@ -4204,10 +4297,16 @@ def main():
             tmp_path = f"{args.config}.tmp.{os.getpid()}"
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 f.write(new_content)
+            # Tachyon keeps its config 0600 (it holds bot and API tokens); a
+            # fresh temp file would silently widen that to 0644.
+            try:
+                os.chmod(tmp_path, os.stat(args.config).st_mode & 0o7777)
+            except OSError:
+                pass
             os.replace(tmp_path, args.config)
             apply_updates_with_uci(args.config, updates)
-            os.system("/etc/init.d/podkop restart")
-            log("INFO", "Успешно завершено: конфиг обновлён, Podkop перезапущен.")
+            os.system(f"/etc/init.d/{config_backend(args.config)} restart")
+            log("INFO", f"Успешно завершено: конфиг обновлён, {backend_title(args.config)} перезапущен.")
         except Exception as e:
             state = load_state(args.state)
             update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids), status='config_write_error', message=f'Ошибка при сохранении конфига: {e}')

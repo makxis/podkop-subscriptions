@@ -9,6 +9,9 @@
         "/etc/config/podkop_subscriptions": [
           "read"
         ],
+        "/etc/config/tachyon": [
+          "read"
+        ],
         "/usr/bin/podkop-sub-updater.py": [
           "exec"
         ],
