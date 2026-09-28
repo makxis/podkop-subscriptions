@@ -53,6 +53,7 @@ When `/etc/config/podkop` is missing and `/etc/config/tachyon` exists, the updat
 
 - Links go into the section's `selector_proxy_links` and the section gets `action 'connection'`. Podkop options (`connection_type`, `proxy_config_type`, `urltest_proxy_links`) are not written: Tachyon converts them only when its package is upgraded, and until then the section would have no links.
 - URLTest is a separate `config urltest` section pointing at the target. For `proxy_type 'urltest'` the updater adds a `Fastest` group if there is none; `proxy_type 'selector'` does not delete an existing group, since its settings belong to Tachyon.
+- The link filter follows Tachyon: `http`, `h2` and `httpupgrade` pass, and `xhttp` passes only when the installed sing-box supports it (extended or lx). On a plain build such keys are dropped with a reason saying so.
 - Health comes from `tachyon clash_api get_proxies`; after an update `/etc/init.d/tachyon` is restarted.
 - Do not use Tachyon's own `subscription_urls` in the same section: its outbounds shift the `<section>-N-out` numbering and the health check would mix up links.
 

@@ -335,6 +335,46 @@ def test_podkop_conversion_limits():
           'Podkop' in u.validation_reason_text('unsupported_transport'))
 
 
+def test_tachyon_conversion_limits():
+    """У Tachyon свой конвертер ссылок, и xhttp зависит от сборки sing-box."""
+    print('Что Tachyon может собрать из ссылки')
+
+    def reject_reason(link):
+        try:
+            return None, u.proxy_link_to_singbox_outbound(link, 'тест')
+        except u.LinkValidationError as e:
+            return e.reason, None
+
+    uuid = '00000000-0000-4000-8000-000000000001'
+    xhttp = f'vless://{uuid}@node.example.net:443?type=xhttp&security=tls&sni=example.net&path=%2Fx&mode=packet-up#Узел'
+    upgrade = f'vless://{uuid}@node.example.net:443?type=httpupgrade&security=tls&sni=example.net&path=%2Fu#Узел'
+    saved = dict(u.TARGET)
+    original = u.sing_box_supports_xhttp
+    try:
+        u.sing_box_supports_xhttp = lambda: False
+        u.set_link_target('/etc/config/tachyon')
+        check('без extended xhttp отбракован с понятной причиной',
+              reject_reason(xhttp)[0] == 'xhttp_unsupported_singbox', str(reject_reason(xhttp)[0]))
+        check('причина называет sing-box, а не Podkop',
+              'sing-box' in u.validation_reason_text('xhttp_unsupported_singbox'))
+        check('httpupgrade проходит и без extended', reject_reason(upgrade)[0] is None)
+        check('сообщения называют Tachyon',
+              'Tachyon' in u.validation_reason_text('unsupported_transport'))
+
+        u.sing_box_supports_xhttp = lambda: True
+        u.set_link_target('/etc/config/tachyon')
+        reason, outbound = reject_reason(xhttp)
+        transport = (outbound or {}).get('transport') or {}
+        check('с extended xhttp проходит', reason is None, str(reason))
+        check('xhttp собран как у Tachyon',
+              transport.get('type') == 'xhttp' and transport.get('mode') == 'packet-up'
+              and transport.get('path') == '/x' and transport.get('host') == 'example.net', str(transport))
+    finally:
+        u.sing_box_supports_xhttp = original
+        u.TARGET.clear()
+        u.TARGET.update(saved)
+
+
 def test_singbox_check_position():
     print('Поиск битого ключа по ответу sing-box check')
     decode = 'FATAL[0000] decode config at /tmp/x.json: outbounds[3].transport: unknown transport type: bogus'
@@ -410,7 +450,7 @@ def main():
     for test in (test_clash_matches_reference, test_xray_configs, test_xray_hysteria, test_trojan_and_ss,
                  test_plain_and_base64,
                  test_refusals, test_domain_expansion, test_fingerprint_headers,
-                 test_podkop_conversion_limits,
+                 test_podkop_conversion_limits, test_tachyon_conversion_limits,
                  test_singbox_check_position, test_singbox_hard_validation):
         test()
         print()

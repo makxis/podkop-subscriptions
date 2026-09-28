@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.8.0"
+APP_VERSION_FALLBACK = "3.8.1"
 
 
 def app_version():
@@ -752,7 +752,7 @@ def load_jobs_from_uci_podkop(config_path):
         if str(opt.get('fingerprint_probe_days', '')).strip() == '0':
             probe_days = 0
         if not sec_name:
-            log("WARN", f"subscription_group '{g['name']}': не задана целевая секция Podkop. Пропуск.")
+            log("WARN", f"subscription_group '{g['name']}': не задана целевая секция {TARGET['title']}. Пропуск.")
             continue
         if not sources:
             log("WARN", f"subscription_group '{g['name']}': нет ни одного source. Пропуск.")
@@ -1792,6 +1792,33 @@ class LinkValidationError(Exception):
 # конфиг sing-box check проходит успешно, а узел не работает и молча висит в
 # URLTest. Поймать это можно только до конвертации.
 VALID_TRANSPORTS = {'', 'tcp', 'raw', 'ws', 'grpc'}
+# Tachyon converts links itself (subscription/parser.uc) and knows more
+# transports than Podkop. xhttp is not in upstream sing-box: Tachyon only
+# accepts it when the installed build has it (extended/lx, or a with_xhttp
+# tag), and so do we, otherwise the key would pass here and break the config.
+TACHYON_TRANSPORTS = VALID_TRANSPORTS | {'http', 'h2', 'httpupgrade'}
+TARGET = {'title': 'Podkop', 'transports': VALID_TRANSPORTS, 'xhttp': False}
+
+
+def sing_box_supports_xhttp():
+    try:
+        out = subprocess.run(['sing-box', 'version'], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, timeout=15).stdout
+    except Exception:
+        return False
+    first = out.split('\n', 1)[0]
+    if re.search(r'-(extended|lx)\b', first):
+        return True
+    return 'with_xhttp' in re.split(r'[,:\s]+', out)
+
+
+def set_link_target(config_path):
+    if config_backend(config_path) != 'tachyon':
+        return
+    xhttp = sing_box_supports_xhttp()
+    TARGET['title'] = 'Tachyon'
+    TARGET['xhttp'] = xhttp
+    TARGET['transports'] = TACHYON_TRANSPORTS | ({'xhttp'} if xhttp else set())
 VALID_SECURITY = {'', 'none', 'tls', 'reality'}
 SUPPORTED_SCHEMES = {'vless', 'ss', 'trojan', 'socks4', 'socks4a', 'socks5', 'hy2', 'hysteria2'}
 
@@ -1818,7 +1845,8 @@ def validation_reason_text(reason):
         'singbox_check_limit': 'превышен лимит sing-box check',
         'normalized_missing_transport': 'добавлен type=tcp для совместимости с Podkop'
     }
-    return mapping.get(reason, reason or 'неизвестная ошибка')
+    mapping['xhttp_unsupported_singbox'] = 'xhttp не поддерживается установленным sing-box (нужен extended или lx)'
+    return mapping.get(reason, reason or 'неизвестная ошибка').replace('Podkop', TARGET['title'])
 
 
 def _split_no_fragment(link):
@@ -1999,7 +2027,9 @@ def _build_tls_object(parts):
 def _build_transport_object(parts):
     q = parts['query']
     transport = (q.get('type', '') or '').strip().lower()
-    if transport not in VALID_TRANSPORTS:
+    if transport == 'xhttp' and TARGET['title'] == 'Tachyon' and not TARGET['xhttp']:
+        raise LinkValidationError('xhttp_unsupported_singbox', transport)
+    if transport not in TARGET['transports']:
         raise LinkValidationError('unsupported_transport', transport)
     if transport in ('', 'tcp', 'raw'):
         return None
@@ -2024,6 +2054,39 @@ def _build_transport_object(parts):
         if service_name:
             grpc['service_name'] = service_name
         return grpc
+    # The shapes below follow Tachyon's parser, so sing-box check sees the
+    # outbound Tachyon will actually build.
+    path = q.get('path', '')
+    host = q.get('host', '')
+    if transport in ('http', 'h2'):
+        http = {'type': 'http'}
+        if path:
+            http['path'] = path
+        if host:
+            http['host'] = [h.strip() for h in host.split(',') if h.strip()]
+        return http
+    if transport == 'httpupgrade':
+        upgrade = {'type': 'httpupgrade'}
+        if path:
+            upgrade['path'] = path
+        if host:
+            upgrade['host'] = host
+        return upgrade
+    if transport == 'xhttp':
+        mode = q.get('mode', '') or 'auto'
+        if mode not in ('auto', 'packet-up', 'stream-up', 'stream-one'):
+            mode = 'auto'
+        # Tachyon's defaults; sing-box-extended refuses xhttp without
+        # x_padding_bytes ("x_padding_bytes cannot be disabled").
+        xhttp = {
+            'type': 'xhttp', 'mode': mode, 'path': path or '/',
+            'x_padding_bytes': '100-1000', 'no_grpc_header': False,
+            'sc_max_each_post_bytes': '1000000', 'sc_min_posts_interval_ms': '30'
+        }
+        host = host or q.get('sni', '')
+        if host:
+            xhttp['host'] = host
+        return xhttp
     raise LinkValidationError('unsupported_transport', transport)
 
 
@@ -2378,12 +2441,12 @@ def validate_links_for_podkop_singbox(sec, links):
             # ключа и то самое значение, на котором разбор встал.
             name = link_name(link)
             detail = f": {e.detail}" if e.detail else ''
-            log('DEBUG', f"[{sec}]: ключ не для Podkop"
+            log('DEBUG', f"[{sec}]: ключ не для {TARGET['title']}"
                          + (f" ({name})" if name else '')
                          + f": {validation_reason_text(e.reason)}{detail}")
 
     if normalized_count:
-        log('INFO', f"[{sec}]: для совместимости с Podkop добавлен type=tcp в ключах: {normalized_count}")
+        log('INFO', f"[{sec}]: для совместимости с {TARGET['title']} добавлен type=tcp в ключах: {normalized_count}")
 
     # Нормализация могла сделать несколько URI одинаковыми, поэтому повторно убираем дубли.
     formally_ok, normalized_dups = dedupe_links_keep_order(formally_ok)
@@ -2392,7 +2455,7 @@ def validate_links_for_podkop_singbox(sec, links):
 
     stats['formal_ok'] = len(formally_ok)
     if stats['rejected']:
-        log('WARN', f"[{sec}]: Podkop не умеет собрать outbound из ключей: {stats['rejected']}")
+        log('WARN', f"[{sec}]: {TARGET['title']} не умеет собрать outbound из ключей: {stats['rejected']}")
         for reason, count in sorted(stats['rejected_by_reason'].items()):
             if reason == 'normalized_missing_transport':
                 continue
@@ -2411,9 +2474,9 @@ def validate_links_for_podkop_singbox(sec, links):
     stats['hard_check_ok'] = bool(hard.get('ok')) and len(valid) > 0
 
     if hard.get('ok'):
-        log('INFO', f"[{sec}]: проверка совместимости Podkop/sing-box: принято {len(valid)}, отброшено {stats['rejected']}, sing-box check запусков: {stats['singbox_runs']}")
+        log('INFO', f"[{sec}]: проверка совместимости {TARGET['title']}/sing-box: принято {len(valid)}, отброшено {stats['rejected']}, sing-box check запусков: {stats['singbox_runs']}")
     else:
-        log('WARN', f"[{sec}]: проверка совместимости Podkop/sing-box не смогла собрать безопасный список; секция не будет изменена")
+        log('WARN', f"[{sec}]: проверка совместимости {TARGET['title']}/sing-box не смогла собрать безопасный список; секция не будет изменена")
         for reason, count in sorted((hard.get('rejected_by_reason') or {}).items()):
             log('WARN', f"[{sec}]: {validation_reason_text(reason)}: {count}")
 
@@ -3510,15 +3573,15 @@ def observe_only(config_path, state_path):
     current_sections = load_current_podkop_sections(config_path)
     imported, updated = import_current_links_to_state(state, current_sections)
     if imported or updated:
-        log("INFO", f"State импортирован из текущего Podkop config: новых={imported}, обновлено={updated}")
+        log("INFO", f"State импортирован из текущего {TARGET['title']} config: новых={imported}, обновлено={updated}")
     if not current_sections:
-        log("WARN", "В /etc/config/podkop нет секций Podkop с proxy-ссылками. Проверка пропущена.")
+        log("WARN", f"В конфиге нет секций {TARGET['title']} с proxy-ссылками. Проверка пропущена.")
         save_state(state_path, state)
         return
     try:
         proxies = load_podkop_proxies(config_path)
     except Exception as e:
-        log("WARN", f"Не удалось получить состояние Podkop URLTest: {e}. fail_count не изменён.")
+        log("WARN", f"Не удалось получить состояние {TARGET['title']} URLTest: {e}. fail_count не изменён.")
         state.setdefault('health', {})['last_scan_status'] = 'api_error'
         state['health']['last_scan_error'] = str(e)
         state['health']['last_scan'] = int(time.time())
@@ -3565,7 +3628,7 @@ def observe_only(config_path, state_path):
     state['health']['bad'] = bad
     state['health']['missing'] = missing
     save_state(state_path, state)
-    log("INFO", f"Проверка завершена: total={total}, ok={ok}, bad={bad}, missing={missing}. Конфиг Podkop не изменялся.")
+    log("INFO", f"Проверка завершена: total={total}, ok={ok}, bad={bad}, missing={missing}. Конфиг {TARGET['title']} не изменялся.")
 
 
 
@@ -4001,7 +4064,7 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
 
 def update_uci_config_with_final_links(config_path, updates):
     if not os.path.exists(config_path):
-        log("ERROR", f"Конфиг {config_path} не найден. Настройте Podkop в интерфейсе.")
+        log("ERROR", f"Конфиг {config_path} не найден. Настройте {TARGET['title']} в интерфейсе.")
         sys.exit(1)
     with open(config_path, 'r', encoding='utf-8', errors='replace') as f:
         old_lines = f.readlines()
@@ -4144,6 +4207,7 @@ def main():
     setup_syslog()
     args = parse_args()
     args.config = resolve_config_path(args.config)
+    set_link_target(args.config)
 
     # Read-only informational commands must never be blocked by an update.
     if args.version:
@@ -4221,7 +4285,7 @@ def main():
 
         imported, updated = import_current_links_to_state(state, current_sections)
         if imported or updated:
-            log("INFO", f"State синхронизирован с текущим Podkop config: новых={imported}, обновлено={updated}")
+            log("INFO", f"State синхронизирован с текущим {TARGET['title']} config: новых={imported}, обновлено={updated}")
         fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints, args.subs, state)
         validate_jobs_links_for_podkop(jobs)
         protected_local_ids = load_local_protected_ids()
@@ -4236,9 +4300,9 @@ def main():
         if need_proxies:
             try:
                 proxies = load_podkop_proxies(args.config)
-                log("INFO", "Текущее состояние Podkop URLTest получено для отсеивателя.")
+                log("INFO", f"Текущее состояние {TARGET['title']} URLTest получено для отсеивателя.")
             except Exception as e:
-                log("WARN", f"Не удалось получить текущее состояние Podkop URLTest для отсеивателя: {e}. Будет использован только state.json.")
+                log("WARN", f"Не удалось получить текущее состояние {TARGET['title']} URLTest для отсеивателя: {e}. Будет использован только state.json.")
 
         updates = {}
         summary_changed = False
@@ -4274,9 +4338,9 @@ def main():
         save_state(args.state, state)
         if not updates:
             if args.force:
-                log("INFO", "Изменений нет. Конфиг Podkop не изменялся, перезапуск не выполняется.")
+                log("INFO", f"Изменений нет. Конфиг {TARGET['title']} не изменялся, перезапуск не выполняется.")
             else:
-                log("INFO", "Изменений не обнаружено. Конфиг и Podkop не трогаются.")
+                log("INFO", f"Изменений не обнаружено. Конфиг и {TARGET['title']} не трогаются.")
             return
         old_content, new_content = update_uci_config_with_final_links(args.config, updates)
         is_content_changed = normalize_config(old_content) != normalize_config(new_content)
@@ -4305,7 +4369,12 @@ def main():
                 pass
             os.replace(tmp_path, args.config)
             apply_updates_with_uci(args.config, updates)
-            os.system(f"/etc/init.d/{config_backend(args.config)} restart")
+            # Tachyon's init script prints its own ubus noise ("Command failed:
+            # ... tachyon-steer-zapret (Not found)"); keep only the exit code.
+            rc = subprocess.run([f"/etc/init.d/{config_backend(args.config)}", 'restart'],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+            if rc != 0:
+                log("WARN", f"/etc/init.d/{config_backend(args.config)} restart завершился с кодом {rc}")
             log("INFO", f"Успешно завершено: конфиг обновлён, {backend_title(args.config)} перезапущен.")
         except Exception as e:
             state = load_state(args.state)

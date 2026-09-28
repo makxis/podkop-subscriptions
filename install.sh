@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.8.0"
+APP_VERSION="3.8.1"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"

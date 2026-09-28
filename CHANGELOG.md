@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.8.1
+
+- With Tachyon as the target, the link filter no longer applies Podkop's
+  limits. Tachyon converts links itself and knows `http`, `h2` and
+  `httpupgrade`, so those pass now. `xhttp` passes only when the installed
+  sing-box can run it: `-extended` or `-lx` in `sing-box version`, or a
+  `with_xhttp` build tag, the same test Tachyon uses. On a plain build the key
+  is rejected with a reason that names sing-box, not Podkop.
+  - The outbound built for `sing-box check` follows Tachyon's parser, including
+    its xhttp defaults. Without `x_padding_bytes` sing-box-extended refuses the
+    transport outright, which rejected all ten xhttp keys on the test router.
+  - Log lines and rejection reasons name the actual target, Tachyon or Podkop.
+- The service restart no longer leaks the init script's output into the log.
+  Tachyon printed `Command failed: ubus call service delete ...
+  tachyon-steer-zapret (Not found)` on every run; the log now keeps only a
+  non-zero exit code.
+
 ## 3.8.0
 
 - Works with [Tachyon](https://github.com/Dushnilin/tachyon), the Podkop Plus

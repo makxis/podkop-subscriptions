@@ -156,6 +156,7 @@ sing-box:        1.12.17; 1.12.22
 - Если `/etc/config/podkop` нет, а `/etc/config/tachyon` есть, апдейтер сам переключается на Tachyon. Cron, панель и команды из этого README менять не нужно.
 - Ключи пишутся в `selector_proxy_links` секции, у секции ставится `action 'connection'`. Поля Podkop (`connection_type`, `proxy_config_type`, `urltest_proxy_links`) туда не пишутся. Tachyon переносит их только при обновлении своего пакета, а до этого секция осталась бы без ключей.
 - URLTest в Tachyon задаётся отдельной секцией `config urltest` со ссылкой на целевую секцию. Для `proxy_type 'urltest'` апдейтер создаёт такую группу `Fastest`, если её нет. `proxy_type 'selector'` существующую группу не удаляет: её настройки принадлежат Tachyon.
+- Фильтр ключей сверяется с возможностями Tachyon: проходят `http`, `h2`, `httpupgrade`, а `xhttp` только если установленный sing-box его умеет (extended или lx). На обычном sing-box такие ключи отбрасываются с причиной «xhttp не поддерживается установленным sing-box».
 - Проверка живости берётся из `tachyon clash_api get_proxies`, после обновления перезапускается `/etc/init.d/tachyon`.
 - Собственные подписки Tachyon (`subscription_urls`) не используйте в той же секции: их outbound'ы сдвинут нумерацию `<секция>-N-out`, и health-check начнёт путать ключи.
 
