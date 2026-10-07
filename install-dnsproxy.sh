@@ -12,10 +12,14 @@
 #      Сам конфиг Podkop не изменяется, если не указан --configure-podkop.
 #
 # Повторный запуск безопасен: конфиги предварительно сохраняются в /root.
+# Он же приводит уже настроенный роутер к актуальной лёгкой конфигурации
+# (без HTTP/3, без собственного кеша и прочих лишних функций), сохраняя
+# ранее подобранные upstream/bootstrap/fallback, включая правила вида
+# [/домен/]сервер.
 
 set -eu
 
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
@@ -28,6 +32,7 @@ LOG_FILE="/tmp/install-dnsproxy.log"
 CONFIGURE_PODKOP=0
 RESTART_PODKOP=1
 ADD_ISP_DNS=1
+KEEP_SERVERS=1
 INSTALL_PACKAGES=1
 INSTALL_LUCI=1
 TEST_SERVERS=0
@@ -67,6 +72,8 @@ usage() {
                        параметр оставлен для совместимости.
   --no-podkop-restart  С --configure-podkop: настроить Podkop, но не
                        перезапускать его.
+  --reset-servers      Не сохранять ранее настроенные upstream/bootstrap/
+                       fallback, а записать списки по умолчанию.
   --no-isp-dns         Не добавлять DNS-серверы провайдера в fallback и bootstrap.
   --config-only        Не устанавливать пакеты, только записать конфиг.
   --no-luci            Не устанавливать luci-app-dnsproxy.
@@ -94,6 +101,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-podkop-restart)
             RESTART_PODKOP=0
+            shift
+            ;;
+        --reset-servers)
+            KEEP_SERVERS=0
             shift
             ;;
         --no-isp-dns)
@@ -634,38 +645,68 @@ cat "$ISP_DNS_FILE" >> "$BOOTSTRAP_FILE"
 awk 'NF && !seen[$0]++ { print $0 }' "$BOOTSTRAP_FILE" > "$BOOTSTRAP_FILE.unique"
 mv "$BOOTSTRAP_FILE.unique" "$BOOTSTRAP_FILE"
 
+# Ранее настроенные серверы (подобранные test-doh.sh или руками, включая
+# правила вида [/nalog.ru/]адрес) при повторном запуске сохраняются: задача
+# повторного запуска — убрать лишнее, а не сбросить чужой выбор серверов.
+# Значения без пробелов, поэтому вывод uci get можно делить по словам.
+OLD_UPSTREAM=""
+OLD_BOOTSTRAP=""
+OLD_FALLBACK=""
+if [ "$KEEP_SERVERS" = "1" ] && [ -f /etc/config/dnsproxy ]; then
+    OLD_UPSTREAM="$(uci -q get dnsproxy.servers.upstream 2>/dev/null || true)"
+    if [ -n "$OLD_UPSTREAM" ]; then
+        OLD_BOOTSTRAP="$(uci -q get dnsproxy.servers.bootstrap 2>/dev/null || true)"
+        OLD_FALLBACK="$(uci -q get dnsproxy.servers.fallback 2>/dev/null || true)"
+        log "Сохраняю ранее настроенные upstream/bootstrap/fallback (--reset-servers, чтобы сбросить)"
+    fi
+fi
+
+# set -f: правила вида [/домен/] не должны раскрываться как glob.
+set -f
+if [ -n "$OLD_BOOTSTRAP" ]; then
+    printf '%s\n' $OLD_BOOTSTRAP > "$BOOTSTRAP_FILE"
+fi
+if [ -n "$OLD_FALLBACK" ]; then
+    printf '%s\n' $OLD_FALLBACK > "$FALLBACK_FILE"
+fi
+
+set +f
+
+# Конфиг минимальный намеренно. На роутерах с ~256 МБ RAM dnsproxy с HTTP/3
+# и собственным кешем разрастался до ~60 МБ RSS, без них держится в
+# единицах мегабайт. Здесь он только раздаёт запросы dnsmasq на несколько
+# upstream в режиме parallel: кеширует уже dnsmasq, второй кеш не нужен, а
+# QUIC для DoH ничего не даёт, зато стоит памяти. Секции перечислены явно с
+# enabled '0', чтобы LuCI и повторный запуск видели, что они выключены.
 DNSPROXY_CONFIG_TMP="$TMP_DIR/dnsproxy.config"
 cat > "$DNSPROXY_CONFIG_TMP" <<EOF
 config dnsproxy 'global'
 	list listen_addr '$LISTEN_ADDR'
 	list listen_port '$LISTEN_PORT'
 	option refuse_any '1'
-	option http3 '1'
+	option http3 '0'
 	option ipv6_disabled '1'
 	option enabled '1'
+	option verbose '0'
 	option upstream_mode 'parallel'
 
 config dnsproxy 'bogus_nxdomain'
 
 config dnsproxy 'cache'
-	option cache_optimistic '1'
-	option size '65535'
-	option enabled '1'
-	option min_ttl '60'
-	option max_ttl '3600'
+	option enabled '0'
+	option cache_optimistic '0'
 
 config dnsproxy 'dns64'
-	option dns64_prefix '64:ff9b::'
+	option enabled '0'
 
 config dnsproxy 'edns'
+	option enabled '0'
 
 config dnsproxy 'hosts'
 	option enabled '0'
-	list hosts_files ''
 
 config dnsproxy 'private_rdns'
 	option enabled '0'
-	list upstream '127.0.0.1:53'
 
 config dnsproxy 'servers'
 EOF
@@ -682,23 +723,32 @@ while IFS= read -r dns; do
     printf "\tlist fallback '%s'\n" "$dns" >> "$DNSPROXY_CONFIG_TMP"
 done < "$FALLBACK_FILE"
 
+printf '\n' >> "$DNSPROXY_CONFIG_TMP"
+
 # upstream — основной путь, только шифрованные резолверы, режим parallel:
 # запрос уходит во все разом, побеждает первый ответ. Четыре независимых
 # оператора взяты намеренно — это отправная точка, а не оптимум: скорость и
 # доступность публичных резолверов сильно зависят от провайдера и страны,
 # поэтому свои стоит проверить (как — описано в README).
-cat >> "$DNSPROXY_CONFIG_TMP" <<'EOF'
-
+if [ -n "$OLD_UPSTREAM" ]; then
+    set -f
+    for dns in $OLD_UPSTREAM; do
+        printf "\tlist upstream '%s'\n" "$dns" >> "$DNSPROXY_CONFIG_TMP"
+    done
+    set +f
+else
+    cat >> "$DNSPROXY_CONFIG_TMP" <<'EOF'
 	list upstream 'https://dns.cloudflare.com/dns-query'
 	list upstream 'https://freedns.controld.com/p0'
 	list upstream 'https://dns.quad9.net/dns-query'
 	list upstream 'https://dns.adguard-dns.com/dns-query'
+EOF
+fi
+
+cat >> "$DNSPROXY_CONFIG_TMP" <<'EOF'
 
 config dnsproxy 'tls'
 	option enabled '0'
-	option https_port '8443'
-	option tls_port '853'
-	option quic_port '853'
 EOF
 
 mkdir -p /etc/config
@@ -813,6 +863,75 @@ if ! verify_final; then
 fi
 
 log "Проверка пройдена"
+
+# luci-app-trafficctl вешает свои HTB/IFB qdisc (br-lan, tctl-ifb0). Вместе с
+# SQM/CAKE это двойной шейпинг, поэтому при включённом SQM он удаляется.
+# Без SQM не трогаем: иначе роутер молча останется вовсе без шейпинга.
+remove_trafficctl() {
+    pkg_installed=0
+    case "$PKG_MANAGER" in
+        apk)  apk info -e luci-app-trafficctl >/dev/null 2>&1 && pkg_installed=1 ;;
+        opkg) opkg list-installed 2>/dev/null | grep -q '^luci-app-trafficctl ' && pkg_installed=1 ;;
+    esac
+    [ "$pkg_installed" = "1" ] || [ -x /etc/init.d/trafficctl ] || return 0
+
+    if ! uci -q show sqm 2>/dev/null | grep -q "\.enabled='1'"; then
+        warn "Найден luci-app-trafficctl, но SQM не включён — оставляю как есть"
+        return 0
+    fi
+
+    log "Удаляю luci-app-trafficctl: шейпинг уже делает SQM/CAKE"
+    if [ -x /etc/init.d/trafficctl ]; then
+        /etc/init.d/trafficctl stop >/dev/null 2>&1 || true
+        /etc/init.d/trafficctl disable >/dev/null 2>&1 || true
+    fi
+    case "$PKG_MANAGER" in
+        apk)  apk del luci-app-trafficctl >/dev/null 2>&1 || warn "Не удалось удалить luci-app-trafficctl" ;;
+        opkg) opkg remove luci-app-trafficctl >/dev/null 2>&1 || warn "Не удалось удалить luci-app-trafficctl" ;;
+    esac
+    if command -v tc >/dev/null 2>&1; then
+        tc qdisc del dev br-lan root >/dev/null 2>&1 || true
+        tc qdisc del dev br-lan ingress >/dev/null 2>&1 || true
+    fi
+    ip link del tctl-ifb0 >/dev/null 2>&1 || true
+    # SQM мог делить интерфейсы с trafficctl — пересобираем его qdisc начисто.
+    if [ -x /etc/init.d/sqm ]; then
+        /etc/init.d/sqm restart >/dev/null 2>&1 || true
+    fi
+}
+remove_trafficctl
+
+# Диагностика памяти: после свежего старта ориентир — единицы мегабайт RSS.
+# Если со временем стабильно растёт до 50–100 МБ, это утечка, которую надо
+# разбирать отдельно, а не заливать swap.
+show_dnsproxy_diag() {
+    PID="$(pidof dnsproxy 2>/dev/null | awk '{print $1}')"
+    if [ -z "$PID" ] || [ ! -r "/proc/$PID/cmdline" ]; then
+        warn "Процесс dnsproxy не найден, диагностика пропущена"
+        return 0
+    fi
+    CMDLINE="$(tr '\0' ' ' < "/proc/$PID/cmdline")"
+
+    echo "===== DNSPROXY COMMAND ====="
+    echo "$CMDLINE"
+    echo "===== DNSPROXY MEMORY ====="
+    grep -E '^(VmRSS|RssAnon|RssFile|VmData|VmSwap|Threads):' "/proc/$PID/status"
+    echo "===== SYSTEM MEMORY ====="
+    free -h 2>/dev/null || free
+
+    case " $CMDLINE " in
+        *" --http3 "*) warn "В командной строке dnsproxy есть --http3 — HTTP/3 должен быть выключен" ;;
+    esac
+    case " $CMDLINE " in
+        *" --upstream-mode parallel "*|*" --upstream-mode=parallel "*) ;;
+        *) warn "В командной строке dnsproxy нет --upstream-mode parallel" ;;
+    esac
+    case " $CMDLINE " in
+        *" --ipv6-disabled "*) ;;
+        *) warn "В командной строке dnsproxy нет --ipv6-disabled" ;;
+    esac
+}
+show_dnsproxy_diag
 log "Готово"
 log "Версия установщика: $SCRIPT_VERSION"
 log "Резервные копии: $BACKUP_DIR"

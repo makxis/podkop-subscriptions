@@ -248,7 +248,15 @@ apply_best_servers() {
     fi
     log "Бэкап текущего конфига: $backup"
 
+    # Правила для отдельных доменов ([/nalog.ru/]адрес) — не обычные upstream,
+    # их замена на «лучшие» сломала бы резолвинг этих доменов. Переносим как есть.
+    keep_rules="$(uci -q get dnsproxy.servers.upstream 2>/dev/null | tr ' ' '\n' | grep '^\[/' || true)"
     uci -q delete dnsproxy.servers.upstream 2>/dev/null || true
+    set -f
+    for rule in $keep_rules; do
+        uci add_list dnsproxy.servers.upstream="$rule" || true
+    done
+    set +f
     i=0
     while IFS="$US" read -r key url t1 t2 t3 success state avg; do
         i=$((i + 1))
@@ -361,7 +369,6 @@ while IFS= read -r url; do
         --upstream "$url" \
         --ipv6-disabled \
         --timeout "${DNSPROXY_TIMEOUT_S}s" \
-        --http3 \
         --bootstrap "$BOOTSTRAP1" \
         --bootstrap "$BOOTSTRAP2" \
         --bootstrap "$BOOTSTRAP3" \
