@@ -765,8 +765,20 @@ if ! /etc/init.d/dnsproxy restart; then
     die "Не удалось запустить dnsproxy. Ничего не изменилось, всё вернул как было"
 fi
 
-sleep 2
-if ! nslookup openwrt.org "$LISTEN_ADDR" >/dev/null 2>&1; then
+# restart асинхронный: procd сначала гасит старый процесс (до ~5 с, затем
+# SIGKILL), и только потом новый занимает порт и поднимает DoH-сессии.
+# Одна проверка через 2 с попадала в это окно и откатывала рабочий конфиг.
+dns_up=0
+tries=0
+while [ "$tries" -lt 10 ]; do
+    sleep 2
+    if nslookup openwrt.org "$LISTEN_ADDR" >/dev/null 2>&1; then
+        dns_up=1
+        break
+    fi
+    tries=$((tries + 1))
+done
+if [ "$dns_up" != "1" ]; then
     warn "Тестовый DNS-запрос через $LISTEN_ADDR не прошёл"
     log "Последние сообщения dnsproxy:"
     logread -e dnsproxy 2>/dev/null | tail -n 30 || true
