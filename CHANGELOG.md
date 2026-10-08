@@ -1,5 +1,91 @@
 # Changelog
 
+## Unreleased
+
+`install-dnsproxy.sh`, `test-doh.sh` and `servers.txt` are fetched from `main`
+directly, so these changes are already live for anyone who downloads them.
+
+- `install-dnsproxy.sh` (installer 1.5.0 -> 1.9.0) writes a lean dnsproxy
+  config, and re-running it is now how a router set up by an older version
+  gets it. On a router with 256 MB of RAM, dnsproxy with HTTP/3 and its own
+  cache had grown to about 61 MB RSS with about 45 MB of system memory left;
+  without them it starts at a few megabytes.
+  - HTTP/3, dnsproxy's own cache and optimistic cache (dnsmasq already
+    caches), DNS64, EDNS Client Subnet, verbose logging, hosts processing,
+    private reverse DNS and the local DoH/DoT server are off. The upstream
+    timeout is 5 s instead of the default 10 s: while the upstreams are
+    unreachable every query waits out the upstream timeout and then the
+    fallback one, and those pending queries pile up in memory.
+  - Upstreams chosen earlier, `[/domain/]address` rules included, are kept.
+    `--reset-servers` writes the defaults instead.
+  - Sections the script does not own are carried over. Newer
+    `luci-app-dnsproxy` versions create `config profile 'preset_…'` once at
+    install time, and rewriting the whole file removed them from LuCI for
+    good. The assembled config is parsed by `uci` before it replaces the live
+    one.
+  - Bootstrap and fallback are no longer a fixed list. The plain resolvers
+    from `servers.txt` are queried from the router, and four responding ones
+    from different operators are written, followed by the ISP's resolvers
+    without a test. dnsproxy queries every bootstrap and every fallback
+    address at once, so a longer list only adds goroutines per query while
+    the upstreams are down.
+  - 1.7.0 and 1.8.0 probed those resolvers with `timeout`, which stock
+    OpenWrt does not have (it comes with `coreutils-timeout`): every candidate
+    counted as dead and the list was written unverified. With `--no-isp-dns`
+    both lists came out empty, because busybox `grep -vxF -f` with an empty
+    pattern file prints nothing. Re-run the installer on routers set up by
+    those versions.
+  - After a restart the check waits for dnsproxy for up to 20 s instead of
+    asking once after 2 s. procd gives the old process 5 s to stop before
+    killing it, and the single early check rolled back a working config.
+  - The run ends with the dnsproxy command line and memory, and warns when
+    `--http3` is present or `--upstream-mode parallel` or `--ipv6-disabled` is
+    missing.
+  - `luci-app-trafficctl` is removed when SQM is enabled: its HTB/IFB qdiscs
+    on `br-lan` and `tctl-ifb0` shaped traffic a second time on top of
+    SQM/CAKE. Without SQM it stays, with a warning.
+  - A re-run no longer downloads an installed `luci-app-dnsproxy` again,
+    restarts rpcd and uhttpd only when the panel was just installed, and does
+    not print the Podkop instructions when Podkop already points at
+    `127.0.0.10`.
+  - Ctrl-C or a dropped SSH session ends the run. The cleanup was the signal
+    handler itself, so ash ran it and carried on installing without its temp
+    files and lock.
+- `test-doh.sh` tests plain resolvers as well as DoH and applies both lists
+  at once: up to five upstreams, and up to four bootstrap/fallback addresses
+  followed by the ISP's resolvers.
+  - Plain resolvers are tested first, and the fastest serve as bootstrap for
+    the DoH test. The fixed `8.8.4.4 1.0.0.1 9.9.9.9` failed every DoH server
+    on networks where those addresses are blocked on port 53.
+  - The best server of each operator is picked before second addresses of
+    the same operator: five Cloudflare endpoints are not five independent
+    upstreams.
+  - No busy-waiting. Each query used to spin a shell loop at 100% of a core,
+    which also took CPU from the dnsproxy being measured. Waiting now relies
+    on `nslookup -timeout`, time comes from `/proc/uptime` through `read`
+    instead of an `awk` per sample, the throwaway dnsproxy is killed with
+    SIGKILL (on SIGTERM it lingered for about 2 s per server), and a server is
+    not queried again after its first failure.
+  - `[/domain/]address` rules in upstream survive applying, and a failed write
+    reverts the staged uci changes instead of leaving them for the next commit.
+  - A work directory or an orphaned test dnsproxy left by a killed run is
+    cleaned up on the next start; the latter would otherwise hold
+    `127.0.0.11:53` and memory until reboot.
+- `servers.txt` has an operator column, more DoH candidates, and plain IPv4
+  candidates for bootstrap and fallback. `family.adguard-dns.com` is gone (an
+  adult-content filter in a `parallel` pool blocks sites at random), and so is
+  Comss DNS, which answers with its own proxies for some services. Yandex DoH
+  points at `common.dot.dns.yandex.net`.
+- The example config written by `install.sh` no longer claims that a plain
+  `uci commit` resyncs cron. Over SSH it takes
+  `uci commit podkop_subscriptions && reload_config`; Save & Apply in LuCI
+  does it by itself.
+- README: install and first-setup commands come first, and the reference
+  material is folded into collapsible sections. The duplicate "HTTP headers"
+  section is merged into "Client fingerprint", and the dnsproxy rollback
+  command now picks the newest backup instead of the first one the glob
+  matched.
+
 ## 3.8.1
 
 - With Tachyon as the target, the link filter no longer applies Podkop's

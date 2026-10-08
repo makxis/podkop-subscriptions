@@ -353,7 +353,8 @@ write_default_config() {
   cat > "$SUB_CFG" <<'CFG'
 # Podkop Subscriptions config
 # Основной файл настройки дополнения.
-# Cron синхронизируется автоматически после uci commit; ручная команда нужна только для диагностики.
+# Save & Apply в LuCI сам пересобирает cron. После правки через SSH выполните
+# uci commit podkop_subscriptions && reload_config: один uci commit cron не трогает.
 
 config subscription_group 'main'
     option enabled '0'
