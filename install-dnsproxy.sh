@@ -6,7 +6,8 @@
 #   2. Устанавливает dnsproxy из штатного репозитория OpenWrt.
 #   3. Скачивает подходящий luci-app-dnsproxy из Fantastic Packages.
 #   4. Настраивает dnsproxy на 127.0.0.10:53.
-#   5. Проверяет публичные DNS (1.1.1.1, 8.8.8.8 и др.) и пишет в bootstrap и fallback только ответившие.
+#   5. Проверяет обычные DNS из servers.txt (1.1.1.1, 8.8.8.8 и др.) и пишет
+#      в bootstrap и fallback 4 ответивших разных операторов.
 #   6. Добавляет текущие IPv4 DNS-серверы провайдера в fallback и bootstrap без проверки.
 #   7. Печатает инструкцию, как направить Podkop на 127.0.0.10.
 #      Сам конфиг Podkop не изменяется, если не указан --configure-podkop.
@@ -20,7 +21,7 @@
 
 set -eu
 
-SCRIPT_VERSION="1.8.0"
+SCRIPT_VERSION="1.9.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
@@ -225,12 +226,33 @@ acquire_lock() {
 }
 
 acquire_lock
+# Временные каталоги прошлых запусков, убитых так, что уборка не успела
+# (SIGKILL, OOM). Лок уже наш, но PID всё равно проверяется.
+for d in /tmp/install-dnsproxy.[0-9]*; do
+    [ -d "$d" ] || continue
+    kill -0 "${d##*.}" 2>/dev/null || rm -rf "$d"
+done
 mkdir -p "$TMP_DIR" "$BACKUP_DIR"
 
 cleanup() {
+    # Повторный сигнал (при обрыве SSH их приходит несколько) не должен
+    # прерывать уже начатую уборку.
+    trap '' 1 2 15
     rm -rf "$TMP_DIR" "$LOCK_DIR"
 }
-trap cleanup 0 1 2 15
+# Ловушка на сигналы только завершает скрипт, уборку делает ловушка EXIT.
+# Если повесить уборку прямо на INT, после Ctrl-C ash выполнил бы её и
+# продолжил установку — уже без временных файлов и без лока.
+on_signal() {
+    if [ -f "$BACKUP_DIR/rollback.sh" ]; then
+        warn "Прервано. Если что-то успело измениться, вернуть как было: sh $BACKUP_DIR/rollback.sh"
+    else
+        warn "Прервано, ничего не изменено"
+    fi
+    exit 1
+}
+trap cleanup 0
+trap on_signal 1 2 15
 
 backup_file() {
     src="$1"
@@ -633,75 +655,133 @@ fi
 # bootstrap разрешает имена самих DoH-upstream, fallback — последняя линия,
 # когда шифрованные upstream недоступны. Оба работают открытым текстом, и
 # у части провайдеров отдельные публичные адреса на 53 порту режутся, поэтому
-# список не статичный: каждый кандидат проверяется запросом с роутера, и в
-# конфиг попадают только ответившие. Ранее записанные адреса тоже
-# перепроверяются. DNS провайдера добавляются в конец без проверки: это
-# свой резолвер сети, он нужен всегда.
-PLAIN_CANDIDATES="$TMP_DIR/plain-candidates.list"
-# Кандидаты — голые IPv4 из servers.txt (тот же список, что у test-doh.sh);
-# если его нет ни рядом, ни в репозитории — короткий встроенный набор.
+# список не статичный: кандидаты проверяются запросом с роутера, и в конфиг
+# попадают только ответившие. Ранее записанные адреса тоже перепроверяются.
+# DNS провайдера добавляются в конец без проверки: это свой резолвер сети,
+# он нужен всегда.
+# Адресов немного намеренно: fallback dnsproxy опрашивает все разом, и когда
+# upstream недоступны, каждый запрос держит по горутине и сокету на каждый
+# адрес. Четырёх разных операторов плюс провайдера для запасного пути хватает.
+PLAIN_PICK=4
+
+# Кандидаты — голые IPv4 из servers.txt (тот же список, что у test-doh.sh) с
+# меткой оператора; если файла нет ни рядом, ни в репозитории — встроенный
+# короткий набор.
 SERVERS_TXT=""
 if [ -f "$SCRIPT_DIR/servers.txt" ]; then
     SERVERS_TXT="$SCRIPT_DIR/servers.txt"
-elif wget -q -O "$TMP_DIR/servers.txt" "$RAW_BASE/servers.txt" 2>/dev/null; then
+elif wget -q -T 15 -O "$TMP_DIR/servers.txt" "$RAW_BASE/servers.txt" 2>/dev/null; then
     SERVERS_TXT="$TMP_DIR/servers.txt"
 fi
+
+PLAIN_CANDIDATES="$TMP_DIR/plain-candidates.list"
 {
     if [ -n "$SERVERS_TXT" ]; then
-        awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 }' "$SERVERS_TXT"
+        awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+            print $1, ((NF >= 2 && $2 !~ /^#/) ? $2 : $1)
+        }' "$SERVERS_TXT"
     fi
-    printf '%s\n' \
-        1.1.1.1 1.0.0.1 \
-        8.8.8.8 8.8.4.4 \
-        9.9.9.9 149.112.112.112 \
-        94.140.14.140 94.140.14.141 \
-        208.67.222.222 208.67.220.220 \
-        77.88.8.8 77.88.8.1
+    cat <<'EOF'
+1.1.1.1 cloudflare
+1.0.0.1 cloudflare
+8.8.8.8 google
+8.8.4.4 google
+9.9.9.9 quad9
+149.112.112.112 quad9
+94.140.14.140 adguard
+94.140.14.141 adguard
+208.67.222.222 cisco
+208.67.220.220 cisco
+77.88.8.8 yandex
+77.88.8.1 yandex
+EOF
     for dns in $OLD_PLAIN; do
-        printf '%s\n' "$dns"
+        printf '%s %s\n' "$dns" "$dns"
     done
-} | awk '
-    $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !seen[$1]++ { print $1 }
-' > "$PLAIN_CANDIDATES.all"
-grep -vxF -f "$ISP_DNS_FILE" "$PLAIN_CANDIDATES.all" > "$PLAIN_CANDIDATES" || true
+# DNS провайдера из кандидатов исключаются — они и так допишутся в конец.
+# Фильтр сделан через awk, а не grep -vxF -f: busybox grep с пустым файлом
+# шаблонов (нет DNS провайдера или --no-isp-dns) не выводит вообще ничего.
+} | awk -v ispfile="$ISP_DNS_FILE" '
+    BEGIN { while ((getline line < ispfile) > 0) isp[line] = 1 }
+    $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !($1 in isp) && !seen[$1]++ { print $1, $2 }
+' > "$PLAIN_CANDIDATES"
 
-log "Проверяю, какие DNS отвечают по обычному 53 порту"
-PROBE_DIR="$TMP_DIR/probe"
-mkdir -p "$PROBE_DIR"
-n=0
-while IFS= read -r dns; do
-    n=$((n + 1))
-    (
-        if timeout 4 nslookup openwrt.org "$dns" >/dev/null 2>&1; then
-            : > "$PROBE_DIR/$n"
-        fi
-    ) &
-done < "$PLAIN_CANDIDATES"
-wait
+# Первые PLAIN_PICK строк в порядке списка: сначала по одному адресу на
+# оператора, затем вторые адреса тех же операторов. Порядок servers.txt
+# задаёт приоритет, задержку установщик не замеряет.
+pick_plain() {
+    awk -v n="$PLAIN_PICK" '
+        { a[++c] = $1; g[c] = $2 }
+        END {
+            k = 0
+            for (i = 1; i <= c && k < n; i++)
+                if (!(g[i] in used)) { used[g[i]] = 1; p[i] = 1; k++ }
+            for (i = 1; i <= c && k < n; i++)
+                if (!(i in p)) { p[i] = 1; k++ }
+            for (i = 1; i <= c; i++)
+                if (i in p) print a[i]
+        }
+    ' "$1"
+}
 
+# Проверка пачками по 8 параллельных nslookup: целиком список проходит за
+# несколько секунд, а одновременно живут лишь несколько крошечных процессов.
+# Таймаут — собственный у nslookup (-timeout): отдельной команды timeout в
+# стоковом OpenWrt нет, она приходит только с пакетом coreutils-timeout.
+# Статус каждого запроса забирается через wait PID, без подоболочек и
+# файлов-маркеров.
 PLAIN_OK="$TMP_DIR/plain-ok.list"
 : > "$PLAIN_OK"
-n=0
-while IFS= read -r dns; do
-    n=$((n + 1))
-    if [ -e "$PROBE_DIR/$n" ]; then
-        printf '%s\n' "$dns" >> "$PLAIN_OK"
-        log "  + $dns"
-    else
-        log "  - $dns (не ответил)"
-    fi
-done < "$PLAIN_CANDIDATES"
+PLAIN_DEAD=""
+PROBE_JOBS=""
 
-if [ ! -s "$PLAIN_OK" ]; then
+collect_probe_jobs() {
+    for job in $PROBE_JOBS; do
+        pid="${job%%/*}"
+        rest="${job#*/}"
+        if wait "$pid"; then
+            printf '%s %s\n' "${rest%%/*}" "${rest#*/}" >> "$PLAIN_OK"
+        else
+            PLAIN_DEAD="$PLAIN_DEAD ${rest%%/*}"
+        fi
+    done
+    PROBE_JOBS=""
+}
+
+if nslookup 2>&1 | grep -q 'type='; then
+    log "Проверяю, какие DNS отвечают по обычному 53 порту"
+    batch=0
+    while read -r dns grp; do
+        nslookup -type=a -timeout=2 openwrt.org "$dns" </dev/null >/dev/null 2>&1 &
+        PROBE_JOBS="$PROBE_JOBS $!/$dns/$grp"
+        batch=$((batch + 1))
+        if [ "$batch" -ge 8 ]; then
+            collect_probe_jobs
+            batch=0
+        fi
+    done < "$PLAIN_CANDIDATES"
+    collect_probe_jobs
+
+    PLAIN_OK_SHOWN="$(awk '{ printf "%s ", $1 }' "$PLAIN_OK")"
+    log "Ответили: ${PLAIN_OK_SHOWN:-никто}"
+    [ -z "$PLAIN_DEAD" ] || log "Не ответили:$PLAIN_DEAD"
+else
+    warn "nslookup без поддержки -timeout (урезанный busybox), проверку пропускаю"
+fi
+
+PLAIN_PICKED="$TMP_DIR/plain-picked.list"
+if [ -s "$PLAIN_OK" ]; then
+    pick_plain "$PLAIN_OK" > "$PLAIN_PICKED"
+else
     # Ни один не ответил: скорее всего, сеть сейчас вообще недоступна, а не
     # заблокированы все сразу. Пустой список хуже непроверенного.
     warn "Ни один публичный DNS не ответил — записываю список без проверки"
-    cp "$PLAIN_CANDIDATES" "$PLAIN_OK"
+    pick_plain "$PLAIN_CANDIDATES" > "$PLAIN_PICKED"
 fi
 
 BOOTSTRAP_FILE="$TMP_DIR/bootstrap.list"
 FALLBACK_FILE="$TMP_DIR/fallback.list"
-cat "$PLAIN_OK" "$ISP_DNS_FILE" | awk 'NF && !seen[$0]++' > "$BOOTSTRAP_FILE"
+cat "$PLAIN_PICKED" "$ISP_DNS_FILE" | awk 'NF && !seen[$0]++' > "$BOOTSTRAP_FILE"
 cp "$BOOTSTRAP_FILE" "$FALLBACK_FILE"
 
 # Конфиг минимальный намеренно. На роутерах с ~256 МБ RAM dnsproxy с HTTP/3
@@ -710,6 +790,11 @@ cp "$BOOTSTRAP_FILE" "$FALLBACK_FILE"
 # upstream в режиме parallel: кеширует уже dnsmasq, второй кеш не нужен, а
 # QUIC для DoH ничего не даёт, зато стоит памяти. Секции перечислены явно с
 # enabled '0', чтобы LuCI и повторный запуск видели, что они выключены.
+#
+# timeout 5s вместо умолчальных 10s: когда связь пропадает, каждый запрос
+# висит в dnsproxy таймаут upstream и ещё один таймаут fallback, и висящие
+# запросы копятся в памяти. Ответ позже 5 с клиенты всё равно уже не ждут, а
+# fallback включается вдвое быстрее.
 DNSPROXY_CONFIG_TMP="$TMP_DIR/dnsproxy.config"
 cat > "$DNSPROXY_CONFIG_TMP" <<EOF
 config dnsproxy 'global'
@@ -721,6 +806,7 @@ config dnsproxy 'global'
 	option enabled '1'
 	option verbose '0'
 	option upstream_mode 'parallel'
+	option timeout '5s'
 
 config dnsproxy 'bogus_nxdomain'
 
@@ -783,12 +869,38 @@ config dnsproxy 'tls'
 	option enabled '0'
 EOF
 
+# Секции, которые скрипт не пишет, переносятся из старого конфига как есть.
+# Это, например, пресеты новых luci-app-dnsproxy (config profile 'preset_…'):
+# пакет создаёт их один раз при установке, и раньше перезапись файла целиком
+# убирала их из LuCI насовсем.
+if [ -f /etc/config/dnsproxy ]; then
+    awk -v ours=" global bogus_nxdomain cache dns64 edns hosts private_rdns servers tls " '
+        function out(l) { print l; lastblank = (l ~ /^[ \t]*$/) }
+        /^[ \t]*package[ \t]/ { next }
+        /^[ \t]*config[ \t]/ {
+            name = $3
+            gsub(/["\047]/, "", name)
+            keep = (name == "" || index(ours, " " name " ") == 0)
+            if (keep && !lastblank) out("")
+        }
+        keep { out($0) }
+    ' /etc/config/dnsproxy >> "$DNSPROXY_CONFIG_TMP"
+fi
+
+# Собранный конфиг сначала разбирает сам uci во временном каталоге: при
+# ошибке синтаксиса рабочий конфиг не трогается вовсе.
+mkdir -p "$TMP_DIR/uci-check"
+cp "$DNSPROXY_CONFIG_TMP" "$TMP_DIR/uci-check/dnsproxy"
+if ! uci -c "$TMP_DIR/uci-check" show dnsproxy >/dev/null 2>&1; then
+    cp "$DNSPROXY_CONFIG_TMP" "$BACKUP_DIR/dnsproxy.config.rejected"
+    die "Собранный конфиг не разбирается uci, рабочий не изменён. Разбор: $BACKUP_DIR/dnsproxy.config.rejected"
+fi
+
 mkdir -p /etc/config
 cp "$DNSPROXY_CONFIG_TMP" /etc/config/dnsproxy
 chmod 0600 /etc/config/dnsproxy
 
-log "Настроенные fallback DNS:"
-sed 's/^/  - /' "$FALLBACK_FILE"
+log "Bootstrap и Fallback DNS: $(awk '{ printf "%s ", $1 }' "$FALLBACK_FILE")"
 
 /etc/init.d/dnsproxy enable >/dev/null 2>&1 || true
 if ! /etc/init.d/dnsproxy restart; then
@@ -804,7 +916,7 @@ dns_up=0
 tries=0
 while [ "$tries" -lt 10 ]; do
     sleep 2
-    if nslookup openwrt.org "$LISTEN_ADDR" >/dev/null 2>&1; then
+    if nslookup -type=a -timeout=2 openwrt.org "$LISTEN_ADDR" >/dev/null 2>&1; then
         dns_up=1
         break
     fi
@@ -851,21 +963,37 @@ fi
 # Веб-интерфейс ставится последним, когда DNS уже настроен и проверен, а Podkop
 # переключён. Так неудача с ним не может оставить роутер в промежуточном
 # состоянии: он либо появится, либо нет, и это ни на что не повлияет.
+luci_app_present() {
+    case "$PKG_MANAGER" in
+        apk)  apk info -e luci-app-dnsproxy >/dev/null 2>&1 ;;
+        opkg) opkg list-installed 2>/dev/null | grep -q '^luci-app-dnsproxy ' ;;
+    esac
+}
+
+# Повторный запуск не перекачивает уже стоящий веб-интерфейс: это лишние
+# загрузки и записи во флеш, а нового он ничего не даёт.
 LUCI_INSTALLED=0
 if [ "$INSTALL_PACKAGES" = "1" ] && [ "$INSTALL_LUCI" = "1" ]; then
-    log "Устанавливаю luci-app-dnsproxy"
-    if install_luci_package; then
+    if luci_app_present; then
+        log "luci-app-dnsproxy уже установлен"
         LUCI_INSTALLED=1
     else
-        warn "Не удалось установить luci-app-dnsproxy"
-        warn "DNS настроен и продолжит работать без веб-интерфейса"
+        log "Устанавливаю luci-app-dnsproxy"
+        if install_luci_package; then
+            LUCI_INSTALLED=1
+            # Сброс кешей и перезапуск rpcd/uhttpd нужны, только чтобы новый
+            # пакет появился в меню. Без установки они лишь выкинули бы из
+            # LuCI всех, кто сейчас в нём работает.
+            rm -f /tmp/luci-indexcache* 2>/dev/null || true
+            rm -rf /tmp/luci-modulecache 2>/dev/null || true
+            /etc/init.d/rpcd restart >/dev/null 2>&1 || true
+            /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+        else
+            warn "Не удалось установить luci-app-dnsproxy"
+            warn "DNS настроен и продолжит работать без веб-интерфейса"
+        fi
     fi
 fi
-
-rm -f /tmp/luci-indexcache* 2>/dev/null || true
-rm -rf /tmp/luci-modulecache 2>/dev/null || true
-/etc/init.d/rpcd restart >/dev/null 2>&1 || true
-/etc/init.d/uhttpd restart >/dev/null 2>&1 || true
 
 # Итоговая проверка. Промежуточные проверки уже были, но между ними и этим
 # местом успели произойти установка LuCI-пакета и перезапуски сервисов, а с
@@ -875,7 +1003,7 @@ rm -rf /tmp/luci-modulecache 2>/dev/null || true
 verify_final() {
     tries=0
     while [ "$tries" -lt 3 ]; do
-        if nslookup openwrt.org "$LISTEN_ADDR" >/dev/null 2>&1; then
+        if nslookup -type=a -timeout=2 openwrt.org "$LISTEN_ADDR" >/dev/null 2>&1; then
             break
         fi
         tries=$((tries + 1))
@@ -949,7 +1077,14 @@ remove_trafficctl
 # Если со временем стабильно растёт до 50–100 МБ, это утечка, которую надо
 # разбирать отдельно, а не заливать swap.
 show_dnsproxy_diag() {
-    PID="$(pidof dnsproxy 2>/dev/null | awk '{print $1}')"
+    # pidof находит и сам dnsproxy, и обёртку ujail, которую procd называет
+    # так же. Нужен процесс, у которого запущен именно бинарь dnsproxy.
+    PID=""
+    for p in $(pidof dnsproxy 2>/dev/null); do
+        case "$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)" in
+            */dnsproxy\ *|dnsproxy\ *) PID="$p"; break ;;
+        esac
+    done
     if [ -z "$PID" ] || [ ! -r "/proc/$PID/cmdline" ]; then
         warn "Процесс dnsproxy не найден, диагностика пропущена"
         return 0
@@ -960,8 +1095,10 @@ show_dnsproxy_diag() {
     echo "$CMDLINE"
     echo "===== DNSPROXY MEMORY ====="
     grep -E '^(VmRSS|RssAnon|RssFile|VmData|VmSwap|Threads):' "/proc/$PID/status"
+    # free из busybox не знает ни -h, ни -m и печатает килобайты, а главное
+    # здесь — MemAvailable, поэтому читается прямо /proc/meminfo.
     echo "===== SYSTEM MEMORY ====="
-    free -h 2>/dev/null || free
+    awk '/^(MemTotal|MemAvailable|SwapTotal):/ { printf "%-14s %6d MB\n", $1, $2 / 1024 }' /proc/meminfo
 
     case " $CMDLINE " in
         *" --http3 "*) warn "В командной строке dnsproxy есть --http3 — HTTP/3 должен быть выключен" ;;
@@ -996,7 +1133,7 @@ if [ "$TEST_SERVERS" = "1" ]; then
         TEST_DOH_PATH="$SCRIPT_DIR/test-doh.sh"
     else
         TEST_DOH_PATH="$TMP_DIR/test-doh.sh"
-        if ! wget -q -O "$TEST_DOH_PATH" "$RAW_BASE/test-doh.sh"; then
+        if ! wget -q -T 15 -O "$TEST_DOH_PATH" "$RAW_BASE/test-doh.sh"; then
             warn "Не удалось скачать test-doh.sh, тест пропущен"
             TEST_DOH_PATH=""
         fi
@@ -1009,7 +1146,7 @@ if [ "$TEST_SERVERS" = "1" ]; then
             SERVERS_LIST_PATH="$SCRIPT_DIR/servers.txt"
         else
             SERVERS_LIST_PATH="$TMP_DIR/servers.txt"
-            if ! wget -q -O "$SERVERS_LIST_PATH" "$RAW_BASE/servers.txt"; then
+            if ! wget -q -T 15 -O "$SERVERS_LIST_PATH" "$RAW_BASE/servers.txt"; then
                 warn "Не удалось скачать servers.txt, тест пропущен"
                 SERVERS_LIST_PATH=""
             fi
@@ -1022,8 +1159,16 @@ if [ "$TEST_SERVERS" = "1" ]; then
 fi
 
 # Инструкция печатается последней, чтобы остаться на экране: сам по себе
-# dnsproxy работает вхолостую, пока в него никто не ходит.
-if [ "$PODKOP_PRESENT" = "1" ] && [ "$CONFIGURE_PODKOP" != "1" ]; then
+# dnsproxy работает вхолостую, пока в него никто не ходит. При повторном
+# запуске Podkop обычно уже направлен сюда, и инструкция была бы лишней.
+PODKOP_ALREADY_SET=0
+if [ "$PODKOP_DNS_TYPE_OLD" = "udp" ] && [ "$PODKOP_DNS_SERVER_OLD" = "$LISTEN_ADDR" ]; then
+    PODKOP_ALREADY_SET=1
+fi
+
+if [ "$PODKOP_PRESENT" = "1" ] && [ "$CONFIGURE_PODKOP" != "1" ] && [ "$PODKOP_ALREADY_SET" = "1" ]; then
+    log "Podkop уже направлен на dnsproxy ($LISTEN_ADDR)"
+elif [ "$PODKOP_PRESENT" = "1" ] && [ "$CONFIGURE_PODKOP" != "1" ]; then
     cat <<EOF
 
 Осталось направить Podkop на dnsproxy. Скрипт этого не делает — вы делаете это

@@ -750,9 +750,9 @@ This way a direct request from the router and an external subscription client lo
 
 ## Optional: DNS via dnsproxy
 
-A separate, optional script (`install-dnsproxy.sh`, version **1.8.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53` and adds hardened upstream servers. Podkop's config is left alone: on completion the script prints a short set of steps for pointing Podkop's DNS at dnsproxy by hand. Podkop's DNS server field takes the address without a port, `127.0.0.10`: a udp resolver is queried on 53 anyway, and Podkop's diagnostics report an error when the field carries one.
+A separate, optional script (`install-dnsproxy.sh`, version **1.9.0**) unrelated to subscriptions themselves. It carries its own version number, independent of the Podkop Subscriptions release. It installs and configures AdGuard dnsproxy on `127.0.0.10:53` and adds hardened upstream servers. Podkop's config is left alone: if Podkop does not point at dnsproxy yet, on completion the script prints a short set of steps for doing that by hand. Podkop's DNS server field takes the address without a port, `127.0.0.10`: a udp resolver is queried on 53 anyway, and Podkop's diagnostics report an error when the field carries one.
 
-The script prints its own version on completion, as `Версия установщика: 1.8.0`.
+The script prints its own version on completion, as `Версия установщика: 1.9.0`.
 
 ```sh
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
@@ -783,9 +783,17 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 sh test-doh.sh
 ```
 
-It needs nothing beyond `dnsproxy` and `nslookup`, both already required to install dnsproxy in the first place — it works standalone on a router that never got the Python subscriptions component installed, as long as `install-dnsproxy.sh` has run. Each query is capped at 1000ms (`--timeout-ms`), so slow upstream servers don't stretch out the whole run — a server that misses the deadline is scored FAIL on that query instead of GOOD-but-slow. When `test-doh.sh` runs in a terminal and at least one server scored 3/3, it ends by showing two lists and asking whether to apply both at once: Upstream DNS Server gets the five fastest DoH servers, Bootstrap DNS Server and Fallback DNS Server get up to eight of the fastest plain DNS servers (bare IPv4 lines in `servers.txt`), followed by the ISP's DNS servers, which are always added without a test. `y` applies them, anything else leaves the config untouched. A list where nothing scored 3/3 stays as it was, and `[/domain/]address` rules in upstream are kept. Before writing, the current `/etc/config/dnsproxy` is backed up to `/root`; after restarting dnsproxy it's verified with a lookup for `openwrt.org`, and a failed lookup rolls the change back automatically.
+It needs nothing beyond `dnsproxy` and `nslookup`, both already required to install dnsproxy in the first place — it works standalone on a router that never got the Python subscriptions component installed, as long as `install-dnsproxy.sh` has run. The candidates come from `servers.txt`, one server per line: `ADDRESS [OPERATOR]`. A URL (`https://`, `tls://`, `quic://`) is an Upstream DNS Server candidate, a bare IPv4 address is a Bootstrap and Fallback DNS Server candidate. The operator tag keeps five Cloudflare addresses from filling a list: the best server of each operator is taken first, and second addresses of the same operators only after that. Without a tag the operator is the second-level domain, and for an IP the address itself.
 
-Re-running is safe: configs are backed up to `/root` first. When dnsproxy is already installed the package lists are left alone, so a single unreachable feed can no longer abort a re-run.
+Plain DNS servers are tested first, DoH after them. The best plain servers plus the ISP's resolvers serve as bootstrap for the DoH test, so when an ISP blocks some public resolvers on port 53, DoH servers are still tested fairly instead of failing to resolve their own host names.
+
+Each query is capped at 1000ms (`--timeout-ms`): a server that misses the deadline is scored FAIL on that query instead of GOOD-but-slow. A server that fails once is not queried further, since it can no longer reach 3/3. The load on the router stays minimal: servers are tested one at a time, waiting relies on `nslookup`'s own timeout with no polling loops, and at most one test dnsproxy runs at any moment.
+
+When `test-doh.sh` runs in a terminal and at least one server scored 3/3, it ends by showing two lists and asking whether to apply both at once: Upstream DNS Server gets up to five DoH servers by latency, Bootstrap DNS Server and Fallback DNS Server get up to four plain DNS servers, followed by the ISP's DNS servers, which are always added without a test. `y` applies them, anything else leaves the config untouched. A list where nothing scored 3/3 stays as it was, and `[/domain/]address` rules in upstream are kept. Before writing, the current `/etc/config/dnsproxy` is backed up to `/root`; after restarting dnsproxy it's verified with a lookup for `openwrt.org`, and a failed lookup rolls the change back automatically.
+
+Re-running is safe: configs are backed up to `/root` first. When dnsproxy is already installed the package lists are left alone, so a single unreachable feed can no longer abort a re-run, and an already installed `luci-app-dnsproxy` is not downloaded again.
+
+Re-running is also how a router set up by an older version of the script gets the current configuration. The config is minimal on purpose: HTTP/3, dnsproxy's own cache (dnsmasq already caches), DNS64, EDNS Client Subnet, verbose logging and the local DoH/DoT server are off, and the upstream timeout is 5 s instead of 10. On a router with 256 MB of RAM, dnsproxy with HTTP/3 and its cache grew to about 60 MB RSS; without them it stays at a few megabytes. Previously chosen upstreams and `[/domain/]address` rules are kept (`--reset-servers` resets them to the defaults), while bootstrap and fallback are rebuilt from plain DNS servers that actually answer from this router. Sections the script does not write, such as the presets of newer `luci-app-dnsproxy` versions (`config profile 'preset_…'`), are carried over from the old config as is. At the end the script prints the running dnsproxy's command line and memory: a few megabytes of RSS is the expected figure right after a fresh start.
 
 Only one instance runs at a time, guarded by `/tmp/install-dnsproxy.lock`. Running the script again while a previous run is still going (say, after reconnecting following a dropped SSH session) does not just fail: in a terminal it asks whether to kill the earlier run or leave it alone and follow its output — from `/tmp/install-dnsproxy.log`, which every run appends to — until it finishes. Without a terminal it follows rather than kills. A lock left behind by a run that died without reaching its cleanup (crash, `kill -9`) is detected and cleared automatically.
 
@@ -828,9 +836,11 @@ They do not live in `/etc/config/podkop-subscriptions` but in the `servers` sect
 
 The split matters. `upstream` runs in `parallel` mode: every server is queried at once and the first answer wins, so one slow server costs nothing and one unreachable server simply never wins the race.
 
-`fallback` is the last line. Demanding encryption from it defeats its purpose — it exists precisely for the case where the encrypted addresses are unreachable. So it should hold whatever survives blocking: your ISP's own resolvers (the script adds them automatically; `--no-isp-dns` turns that off) and a large local operator. The cost is that those queries leave in plain text.
+`fallback` is the last line. Demanding encryption from it defeats its purpose — it exists precisely for the case where the encrypted addresses are unreachable. The cost is that those queries leave in plain text.
 
-`bootstrap` is the non-obvious failure point. If it contains only addresses that might themselves become unreachable, the upstreams fail to come up — not because they are blocked, but because nothing can resolve their host names. That is why the script appends the ISP resolvers to the **end** of this list as well: they are only consulted when the earlier ones stay silent, so priorities are unchanged.
+`bootstrap` is the non-obvious failure point. If it contains only addresses that might themselves become unreachable, the upstreams fail to come up — not because they are blocked, but because nothing can resolve their host names.
+
+That is why the script does not hard-code either list: it tests the plain DNS servers from `servers.txt` with a query from the router itself and writes four responding addresses from different operators, followed by your ISP's resolvers without a test (`--no-isp-dns` turns that off). Order in these lists is not a priority: dnsproxy queries every `bootstrap` and every `fallback` address at once and takes the first answer. Hence the short lists: while the upstreams are unreachable, each query holds a goroutine in dnsproxy for every fallback address.
 
 ### Tuning the servers for your ISP
 
@@ -840,7 +850,7 @@ The defaults are a reasonable starting point, but the speed and reachability of 
 dnsproxy --listen 127.0.0.1 --port 15353 \
          --upstream https://dns.quad9.net/dns-query \
          --bootstrap 8.8.4.4 --timeout 5s &
-nslookup openwrt.org 127.0.0.1 -port=15353
+nslookup -port=15353 openwrt.org 127.0.0.1
 ```
 
 Look at the share of answered queries, not just the average time: a resolver that answers a third of the time is worse than a slow but steady one. Port `15353` is arbitrary; the live dnsproxy on `127.0.0.10:53` is left untouched.

@@ -1,106 +1,124 @@
-# Список DoH-серверов для проверки. Одна строка = один сервер.
+# Список серверов для test-doh.sh и install-dnsproxy.sh. Одна строка = один сервер.
 # Файл подхватывается автоматически, если лежит рядом со скриптом.
-# DoH/DoT/DoQ пишутся полным URL (https://, tls://, quic://) — это кандидаты
-# в Upstream DNS Server. Голый IPv4-адрес — кандидат в Bootstrap DNS Server
-# и Fallback DNS Server (обычный DNS на 53 порту).
+#
+# Формат: АДРЕС [ОПЕРАТОР]
+#   https://… tls://… quic://…  кандидат в Upstream DNS Server (DoH/DoT/DoQ)
+#   голый IPv4                  кандидат в Bootstrap и Fallback DNS Server
+#
+# ОПЕРАТОР — кто держит сервер. В итоговые списки сначала берётся лучший
+# адрес каждого оператора и только потом вторые адреса тех же операторов:
+# пять адресов Cloudflare — это не пять независимых upstream. Без метки
+# оператором считается домен второго уровня, а для IP — сам адрес.
+# Разные имена одного оператора оставлены намеренно: блокируют часто по
+# имени (SNI), и одно имя может работать, когда другое закрыто.
+#
+# Родительских (family) фильтров здесь нет: в режиме parallel побеждает самый
+# быстрый ответ, и фильтр 18+ в общем пуле блокировал бы сайты случайным
+# образом. Фильтры вредоносного и рекламы (Quad9, AdGuard и т. п.) срабатывают
+# так же случайно, но это безобидно.
 # Строки с # игнорируются.
 
+# =====================================================================
+# Upstream DNS Server — DoH/DoT/DoQ
+# =====================================================================
+
 # --- крупные глобальные ---
-https://dns.google/dns-query
-https://cloudflare-dns.com/dns-query
-https://dns.cloudflare.com/dns-query
-https://one.one.one.one/dns-query
-https://mozilla.cloudflare-dns.com/dns-query
-https://security.cloudflare-dns.com/dns-query
-https://dns.quad9.net/dns-query
-https://dns10.quad9.net/dns-query
-https://dns11.quad9.net/dns-query
-https://doh.opendns.com/dns-query
+https://dns.google/dns-query                         google
+https://cloudflare-dns.com/dns-query                 cloudflare
+https://dns.cloudflare.com/dns-query                 cloudflare
+https://one.one.one.one/dns-query                    cloudflare
+https://mozilla.cloudflare-dns.com/dns-query         cloudflare
+https://security.cloudflare-dns.com/dns-query        cloudflare
+https://dns.quad9.net/dns-query                      quad9
+https://dns10.quad9.net/dns-query                    quad9
+https://dns11.quad9.net/dns-query                    quad9
+https://dns12.quad9.net/dns-query                    quad9
+https://doh.opendns.com/dns-query                    cisco
+https://doh.umbrella.com/dns-query                   cisco
 
 # --- AdGuard ---
-https://dns.adguard-dns.com/dns-query
-https://unfiltered.adguard-dns.com/dns-query
-https://family.adguard-dns.com/dns-query
+https://dns.adguard-dns.com/dns-query                adguard
+https://unfiltered.adguard-dns.com/dns-query         adguard
 
 # --- Россия ---
-https://dns.yandex.net/dns-query
-https://dns.comss.one/dns-query
+# Из России Яндекс почти всегда быстрее всех и в режиме parallel будет
+# отвечать на большинство запросов. Если нужны только зарубежные upstream,
+# эти две строки можно удалить. Comss DNS не включён: он намеренно подменяет
+# ответы для части сервисов адресами своих прокси.
+https://common.dot.dns.yandex.net/dns-query          yandex
+tls://common.dot.dns.yandex.net                      yandex
 
 # --- европейские ---
-https://protective.joindns4.eu/dns-query
-https://unfiltered.joindns4.eu/dns-query
-https://dns.digitale-gesellschaft.ch/dns-query
-https://doh.libredns.gr/dns-query
-https://doh.dns.sb/dns-query
-https://anycast.uncensoreddns.org/dns-query
-https://wikimedia-dns.org/dns-query
+https://protective.joindns4.eu/dns-query             dns4eu
+https://unfiltered.joindns4.eu/dns-query             dns4eu
+https://dns.digitale-gesellschaft.ch/dns-query       digitale-gesellschaft
+https://doh.libredns.gr/dns-query                    libredns
+https://doh.dns.sb/dns-query                         dnssb
+https://anycast.uncensoreddns.org/dns-query          uncensoreddns
+https://wikimedia-dns.org/dns-query                  wikimedia
+https://odvr.nic.cz/doh                              cznic
+https://dnspub.restena.lu/dns-query                  restena
+https://doh.applied-privacy.net/query                applied-privacy
+https://doh.ffmuc.net/dns-query                      ffmuc
+https://dns.switch.ch/dns-query                      switch
+https://blank.dnsforge.de/dns-query                  dnsforge
 
 # --- азиатские (полезны для замеров из РФ: реже попадают в блок-листы) ---
-https://dns.alidns.com/dns-query
-https://doh.pub/dns-query
-https://dns.twnic.tw/dns-query
+https://dns.alidns.com/dns-query                     alidns
+https://doh.pub/dns-query                            dnspod
+https://dns.twnic.tw/dns-query                       twnic
+https://public.dns.iij.jp/dns-query                  iij
 
-# --- крупный/устойчивый, нероссийский ---
-https://freedns.controld.com/p0
-https://private.canadianshield.cira.ca/dns-query
-https://blank.dnsforge.de/dns-query
-https://dns12.quad9.net/dns-query
-https://doh.umbrella.com/dns-query
-
-
-# --- хорошие независимые/национальные/академические операторы ---
-https://odvr.nic.cz/doh
-https://dnspub.restena.lu/dns-query
-https://doh.applied-privacy.net/query
-https://doh.ffmuc.net/dns-query
-https://dns.nextdns.io
-https://ordns.he.net/dns-query
-https://public.dns.iij.jp/dns-query
-https://dns.switch.ch/dns-query
-https://doh.cleanbrowsing.org/doh/security-filter/
-https://dns.sb/dns-query
+# --- прочие крупные ---
+https://freedns.controld.com/p0                      controld
+https://private.canadianshield.cira.ca/dns-query     cira
+https://dns.nextdns.io                               nextdns
+https://ordns.he.net/dns-query                       he
+https://doh.cleanbrowsing.org/doh/security-filter/   cleanbrowsing
 
 # =====================================================================
-# Обычные DNS (IPv4, 53 порт) — кандидаты в Bootstrap и Fallback.
-# DNS провайдера сюда писать не нужно: они добавляются всегда, без теста.
+# Bootstrap и Fallback DNS Server — обычные DNS (IPv4, 53 порт)
+# DNS провайдера сюда писать не нужно: они добавляются всегда, без проверки.
+# Порядок важен для install-dnsproxy.sh: он не замеряет задержку и берёт
+# ответивших в порядке списка (по одному на оператора в первую очередь).
 # =====================================================================
 
 # --- крупные глобальные ---
-1.1.1.1
-1.0.0.1
-8.8.8.8
-8.8.4.4
-9.9.9.9
-149.112.112.112
-9.9.9.10
-94.140.14.140
-94.140.14.141
-208.67.222.222
-208.67.220.220
-76.76.2.0
-76.76.10.0
-185.228.168.9
-64.6.64.6
-4.2.2.1
-4.2.2.2
-8.26.56.26
+1.1.1.1            cloudflare
+1.0.0.1            cloudflare
+8.8.8.8            google
+8.8.4.4            google
+9.9.9.9            quad9
+149.112.112.112    quad9
+9.9.9.10           quad9
+94.140.14.140      adguard
+94.140.14.141      adguard
+208.67.222.222     cisco
+208.67.220.220     cisco
+76.76.2.0          controld
+76.76.10.0         controld
+185.228.168.9      cleanbrowsing
+64.6.64.6          ultradns
+4.2.2.1            lumen
+4.2.2.2            lumen
+8.26.56.26         comodo
 
 # --- Россия ---
-77.88.8.8
-77.88.8.1
-195.46.39.39
+77.88.8.8          yandex
+77.88.8.1          yandex
+195.46.39.39       safedns
 
 # --- Европа ---
-91.239.100.100
-89.233.43.71
-185.222.222.222
-45.11.45.11
-149.112.121.10
+91.239.100.100     uncensoreddns
+89.233.43.71       uncensoreddns
+185.222.222.222    dnssb
+45.11.45.11        dnssb
+149.112.121.10     cira
 
 # --- Азия ---
-223.5.5.5
-223.6.6.6
-119.29.29.29
-180.76.76.76
-101.101.101.101
-168.95.1.1
+223.5.5.5          alidns
+223.6.6.6          alidns
+119.29.29.29       dnspod
+180.76.76.76       baidu
+101.101.101.101    twnic
+168.95.1.1         hinet
