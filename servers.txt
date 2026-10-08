@@ -1,11 +1,15 @@
 # Список DoH-серверов для проверки. Одна строка = один сервер.
 # Файл подхватывается автоматически, если лежит рядом со скриптом.
-# Можно писать просто имя хоста или полный URL до endpoint.
+# DoH/DoT/DoQ пишутся полным URL (https://, tls://, quic://) — это кандидаты
+# в Upstream DNS Server. Голый IPv4-адрес — кандидат в Bootstrap DNS Server
+# и Fallback DNS Server (обычный DNS на 53 порту).
 # Строки с # игнорируются.
 
 # --- крупные глобальные ---
 https://dns.google/dns-query
 https://cloudflare-dns.com/dns-query
+https://dns.cloudflare.com/dns-query
+https://one.one.one.one/dns-query
 https://mozilla.cloudflare-dns.com/dns-query
 https://security.cloudflare-dns.com/dns-query
 https://dns.quad9.net/dns-query
@@ -15,7 +19,12 @@ https://doh.opendns.com/dns-query
 
 # --- AdGuard ---
 https://dns.adguard-dns.com/dns-query
+https://unfiltered.adguard-dns.com/dns-query
 https://family.adguard-dns.com/dns-query
+
+# --- Россия ---
+https://dns.yandex.net/dns-query
+https://dns.comss.one/dns-query
 
 # --- европейские ---
 https://protective.joindns4.eu/dns-query
@@ -29,6 +38,7 @@ https://wikimedia-dns.org/dns-query
 # --- азиатские (полезны для замеров из РФ: реже попадают в блок-листы) ---
 https://dns.alidns.com/dns-query
 https://doh.pub/dns-query
+https://dns.twnic.tw/dns-query
 
 # --- крупный/устойчивый, нероссийский ---
 https://freedns.controld.com/p0
@@ -47,3 +57,50 @@ https://dns.nextdns.io
 https://ordns.he.net/dns-query
 https://public.dns.iij.jp/dns-query
 https://dns.switch.ch/dns-query
+https://doh.cleanbrowsing.org/doh/security-filter/
+https://dns.sb/dns-query
+
+# =====================================================================
+# Обычные DNS (IPv4, 53 порт) — кандидаты в Bootstrap и Fallback.
+# DNS провайдера сюда писать не нужно: они добавляются всегда, без теста.
+# =====================================================================
+
+# --- крупные глобальные ---
+1.1.1.1
+1.0.0.1
+8.8.8.8
+8.8.4.4
+9.9.9.9
+149.112.112.112
+9.9.9.10
+94.140.14.140
+94.140.14.141
+208.67.222.222
+208.67.220.220
+76.76.2.0
+76.76.10.0
+185.228.168.9
+64.6.64.6
+4.2.2.1
+4.2.2.2
+8.26.56.26
+
+# --- Россия ---
+77.88.8.8
+77.88.8.1
+195.46.39.39
+
+# --- Европа ---
+91.239.100.100
+89.233.43.71
+185.222.222.222
+45.11.45.11
+149.112.121.10
+
+# --- Азия ---
+223.5.5.5
+223.6.6.6
+119.29.29.29
+180.76.76.76
+101.101.101.101
+168.95.1.1

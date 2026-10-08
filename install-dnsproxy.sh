@@ -20,7 +20,7 @@
 
 set -eu
 
-SCRIPT_VERSION="1.7.0"
+SCRIPT_VERSION="1.8.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
@@ -638,15 +638,24 @@ fi
 # перепроверяются. DNS провайдера добавляются в конец без проверки: это
 # свой резолвер сети, он нужен всегда.
 PLAIN_CANDIDATES="$TMP_DIR/plain-candidates.list"
+# Кандидаты — голые IPv4 из servers.txt (тот же список, что у test-doh.sh);
+# если его нет ни рядом, ни в репозитории — короткий встроенный набор.
+SERVERS_TXT=""
+if [ -f "$SCRIPT_DIR/servers.txt" ]; then
+    SERVERS_TXT="$SCRIPT_DIR/servers.txt"
+elif wget -q -O "$TMP_DIR/servers.txt" "$RAW_BASE/servers.txt" 2>/dev/null; then
+    SERVERS_TXT="$TMP_DIR/servers.txt"
+fi
 {
+    if [ -n "$SERVERS_TXT" ]; then
+        awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 }' "$SERVERS_TXT"
+    fi
     printf '%s\n' \
         1.1.1.1 1.0.0.1 \
         8.8.8.8 8.8.4.4 \
         9.9.9.9 149.112.112.112 \
         94.140.14.140 94.140.14.141 \
         208.67.222.222 208.67.220.220 \
-        76.76.2.0 76.76.10.0 \
-        185.228.168.9 \
         77.88.8.8 77.88.8.1
     for dns in $OLD_PLAIN; do
         printf '%s\n' "$dns"

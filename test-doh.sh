@@ -1,6 +1,8 @@
 #!/bin/sh
-# Проверка DoH/DoT/DoQ upstream-серверов: только dnsproxy и nslookup, которые
-# и так нужны install-dnsproxy.sh, никакого python3.
+# Проверка DoH/DoT/DoQ upstream-серверов и обычных DNS по IP: только dnsproxy
+# и nslookup, которые и так нужны install-dnsproxy.sh, никакого python3.
+# Итог — два списка: Upstream DNS Server и Bootstrap/Fallback DNS Server,
+# применяются оба разом.
 #
 # Тестирует список последовательно, по одному серверу за раз — без пула
 # воркеров. Полный параллелизм на busybox ash (wait -n, слежение за
@@ -49,9 +51,14 @@ root, поскольку тестовый dnsproxy слушает 127.0.0.11:53.
                     как FAIL по этому запросу — так медленные upstream не
                     держат весь прогон по несколько секунд каждый.
 
+URL (https://, tls://, quic://) в списке — кандидаты в Upstream DNS Server,
+голые IPv4 — кандидаты в Bootstrap и Fallback DNS Server.
+
 В конце, если запущено в терминале и найден хотя бы один сервер 3/3,
-скрипт спросит, не заменить ли текущий upstream dnsproxy (top-5 по задержке)
-на протестированные — ответ y/д применяет, что угодно другое пропускает.
+скрипт покажет оба списка (top-5 upstream и до 8 обычных DNS по задержке,
+к ним DNS провайдера без теста) и спросит, применить ли их разом — ответ y/д
+применяет, что угодно другое пропускает. Правила вида [/домен/]адрес в
+upstream сохраняются.
 Перед записью текущий /etc/config/dnsproxy сохраняется в /root, а после
 перезапуска dnsproxy проверяется ответом на openwrt.org: если не отвечает —
 автоматический откат к прежним серверам.
@@ -116,6 +123,9 @@ fi
 US="$(printf '\037')"
 
 URLS_FILE="/tmp/test-doh-urls.$$"
+PLAIN_FILE="/tmp/test-doh-plain.$$"
+PLAIN_RESULTS_FILE="/tmp/test-doh-plain-results.$$"
+PLAIN_SORTED_FILE="/tmp/test-doh-plain-sorted.$$"
 RESULTS_FILE="/tmp/test-doh-results.$$"
 SORTED_FILE="/tmp/test-doh-sorted.$$"
 DNS_PID=""
@@ -125,7 +135,8 @@ cleanup() {
         kill "$DNS_PID" 2>/dev/null || true
         wait "$DNS_PID" 2>/dev/null || true
     fi
-    rm -f "$URLS_FILE" "$RESULTS_FILE" "$SORTED_FILE"
+    rm -f "$URLS_FILE" "$RESULTS_FILE" "$SORTED_FILE" \
+        "$PLAIN_FILE" "$PLAIN_RESULTS_FILE" "$PLAIN_SORTED_FILE"
 }
 trap cleanup EXIT INT TERM
 
@@ -143,16 +154,20 @@ awk '
     n = split(line, parts, /[ \t]+/)
     url = parts[1]
     if (url ~ /^(https|tls|quic):\/\//) print url
+    else if (url ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !seen[url]++) print url > plain
 }
-' "$LIST" > "$URLS_FILE"
+' plain="$PLAIN_FILE" "$LIST" > "$URLS_FILE"
+[ -f "$PLAIN_FILE" ] || : > "$PLAIN_FILE"
 
 TOTAL="$(wc -l < "$URLS_FILE" | tr -d ' ')"
-[ "$TOTAL" -gt 0 ] || die "В $LIST не найдено DNS upstream"
+PLAIN_TOTAL="$(wc -l < "$PLAIN_FILE" | tr -d ' ')"
+[ "$TOTAL" -gt 0 ] || [ "$PLAIN_TOTAL" -gt 0 ] || die "В $LIST не найдено ни DNS upstream, ни обычных DNS"
 
 : > "$RESULTS_FILE"
+: > "$PLAIN_RESULTS_FILE"
 
 log "Список: $LIST"
-log "Найдено upstream: $TOTAL"
+log "Найдено upstream: $TOTAL, обычных DNS (bootstrap/fallback): $PLAIN_TOTAL"
 log "Тест последовательный, без параллелизма."
 log "Таймаут одного запроса: ${QUERY_TIMEOUT_MS}ms"
 log ""
@@ -194,7 +209,7 @@ apply_best_servers() {
     UCI_CONFIG="/etc/config/dnsproxy"
 
     if [ ! -t 0 ]; then
-        log "Неинтерактивный запуск (нет tty) — вопрос про замену upstream пропущен"
+        log "Неинтерактивный запуск (нет tty) — вопрос про применение списков пропущен"
         return 0
     fi
     if ! command -v uci >/dev/null 2>&1; then
@@ -206,35 +221,49 @@ apply_best_servers() {
         return 0
     fi
 
+    # Upstream: top-5 GOOD по задержке. Bootstrap/Fallback: до 8 GOOD обычных
+    # DNS плюс DNS провайдера (без теста — свой резолвер сети нужен всегда).
+    # Список, в котором никто не прошёл 3/3, не трогаем: остаётся прежний.
     BEST_FILE="/tmp/test-doh-best.$$"
-    awk -F"$US" '$7 == "GOOD" { print }' "$SORTED_FILE" > "$BEST_FILE"
+    PLAIN_BEST_FILE="/tmp/test-doh-plain-best.$$"
+    awk -F"$US" '$7 == "GOOD" { print $2 }' "$SORTED_FILE" | head -n 5 > "$BEST_FILE"
+    awk -F"$US" '$7 == "GOOD" { print $2 }' "$PLAIN_SORTED_FILE" | head -n 8 > "$PLAIN_BEST_FILE"
 
-    best_total="$(wc -l < "$BEST_FILE" | tr -d ' ')"
-    if [ "$best_total" -eq 0 ]; then
+    isp_dns="$(cat /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf.auto 2>/dev/null \
+        | awk '$1 == "nameserver" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ && !seen[$2]++ { print $2 }')"
+    if [ -s "$PLAIN_BEST_FILE" ]; then
+        for dns in $isp_dns; do
+            grep -qxF "$dns" "$PLAIN_BEST_FILE" || printf '%s\n' "$dns" >> "$PLAIN_BEST_FILE"
+        done
+    fi
+
+    if [ ! -s "$BEST_FILE" ] && [ ! -s "$PLAIN_BEST_FILE" ]; then
         warn "Ни один сервер не прошёл проверку 3/3 (уложился в ${QUERY_TIMEOUT_MS}ms) — применять нечего"
-        rm -f "$BEST_FILE"
+        rm -f "$BEST_FILE" "$PLAIN_BEST_FILE"
         return 0
     fi
 
-    top_n=5
-    [ "$best_total" -lt "$top_n" ] && top_n="$best_total"
+    printf '\n'
+    if [ -s "$BEST_FILE" ]; then
+        printf 'Upstream DNS Server (лучшие по задержке, 3/3):\n'
+        sed 's/^/  /' "$BEST_FILE"
+    else
+        printf 'Upstream DNS Server: ни один не прошёл 3/3 — остаются текущие\n'
+    fi
+    if [ -s "$PLAIN_BEST_FILE" ]; then
+        printf 'Bootstrap DNS Server и Fallback DNS Server (3/3, затем DNS провайдера):\n'
+        sed 's/^/  /' "$PLAIN_BEST_FILE"
+    else
+        printf 'Bootstrap/Fallback DNS Server: ни один не прошёл 3/3 — остаются текущие\n'
+    fi
 
     printf '\n'
-    printf 'Лучшие %s из %s серверов, прошедших 3/3 (по средней задержке):\n' "$top_n" "$best_total"
-    i=0
-    while IFS="$US" read -r key url t1 t2 t3 success state avg; do
-        i=$((i + 1))
-        [ "$i" -gt "$top_n" ] && break
-        printf '  %s. %s (avg=%sms)\n' "$i" "$url" "$avg"
-    done < "$BEST_FILE"
-
-    printf '\n'
-    printf 'Записать эти %s сервера(ов) в dnsproxy вместо текущих upstream? [y/N]: ' "$top_n"
+    printf 'Применить эти списки в dnsproxy? [y/N]: '
     read -r ans || ans=""
     case "$ans" in
         y|Y|yes|YES|Yes|д|Д|да|Да|ДА) ;;
         *)
-            rm -f "$BEST_FILE"
+            rm -f "$BEST_FILE" "$PLAIN_BEST_FILE"
             return 0
             ;;
     esac
@@ -243,27 +272,35 @@ apply_best_servers() {
     backup="/root/dnsproxy-servers-backup-$ts.config"
     if ! cp -p "$UCI_CONFIG" "$backup" 2>/dev/null; then
         warn "Не удалось сделать бэкап $UCI_CONFIG, отменяю"
-        rm -f "$BEST_FILE"
+        rm -f "$BEST_FILE" "$PLAIN_BEST_FILE"
         return 1
     fi
     log "Бэкап текущего конфига: $backup"
 
-    # Правила для отдельных доменов ([/nalog.ru/]адрес) — не обычные upstream,
-    # их замена на «лучшие» сломала бы резолвинг этих доменов. Переносим как есть.
-    keep_rules="$(uci -q get dnsproxy.servers.upstream 2>/dev/null | tr ' ' '\n' | grep '^\[/' || true)"
-    uci -q delete dnsproxy.servers.upstream 2>/dev/null || true
-    set -f
-    for rule in $keep_rules; do
-        uci add_list dnsproxy.servers.upstream="$rule" || true
-    done
-    set +f
-    i=0
-    while IFS="$US" read -r key url t1 t2 t3 success state avg; do
-        i=$((i + 1))
-        [ "$i" -gt "$top_n" ] && break
-        uci add_list dnsproxy.servers.upstream="$url" || true
-    done < "$BEST_FILE"
-    rm -f "$BEST_FILE"
+    if [ -s "$BEST_FILE" ]; then
+        # Правила для отдельных доменов ([/nalog.ru/]адрес) — не обычные upstream,
+        # их замена на «лучшие» сломала бы резолвинг этих доменов. Переносим как есть.
+        keep_rules="$(uci -q get dnsproxy.servers.upstream 2>/dev/null | tr ' ' '\n' | grep '^\[/' || true)"
+        uci -q delete dnsproxy.servers.upstream 2>/dev/null || true
+        while IFS= read -r url; do
+            uci add_list dnsproxy.servers.upstream="$url" || true
+        done < "$BEST_FILE"
+        set -f
+        for rule in $keep_rules; do
+            uci add_list dnsproxy.servers.upstream="$rule" || true
+        done
+        set +f
+    fi
+
+    if [ -s "$PLAIN_BEST_FILE" ]; then
+        uci -q delete dnsproxy.servers.bootstrap 2>/dev/null || true
+        uci -q delete dnsproxy.servers.fallback 2>/dev/null || true
+        while IFS= read -r dns; do
+            uci add_list dnsproxy.servers.bootstrap="$dns" || true
+            uci add_list dnsproxy.servers.fallback="$dns" || true
+        done < "$PLAIN_BEST_FILE"
+    fi
+    rm -f "$BEST_FILE" "$PLAIN_BEST_FILE"
 
     if ! uci commit dnsproxy; then
         warn "uci commit не удался, откатываю"
@@ -305,11 +342,11 @@ apply_best_servers() {
         cp -p "$backup" "$UCI_CONFIG" 2>/dev/null || true
         uci commit dnsproxy 2>/dev/null || true
         /etc/init.d/dnsproxy restart >/dev/null 2>&1 || true
-        warn "Откат выполнен, upstream остались прежними"
+        warn "Откат выполнен, серверы остались прежними"
         return 1
     fi
 
-    log "Готово: dnsproxy на $PROD_LISTEN_ADDR теперь использует $top_n протестированных сервера(ов)"
+    log "Готово: dnsproxy на $PROD_LISTEN_ADDR работает с новыми списками серверов"
     log "Бэкап предыдущей версии: $backup"
 }
 
@@ -322,9 +359,10 @@ apply_best_servers() {
 # получить не то что нет надёжного дробного таймера без this.
 run_query() {
     domain="$1"
+    server="${2:-$LISTEN_ADDR}"
     t0="$(uptime_ms)"
 
-    nslookup "$domain" "$LISTEN_ADDR" >/dev/null 2>&1 &
+    nslookup "$domain" "$server" >/dev/null 2>&1 &
     qpid=$!
 
     sleep "$DNSPROXY_TIMEOUT_S" &
@@ -429,6 +467,58 @@ while IFS= read -r url; do
 done < "$URLS_FILE"
 
 # ---------------------------------------------------------
+# Обычные DNS по IP: опрашиваются напрямую nslookup, без dnsproxy. Метрика
+# та же — прогрев и три домена с таймаутом, — чтобы GOOD означал одно и то же.
+# ---------------------------------------------------------
+
+if [ "$PLAIN_TOTAL" -gt 0 ]; then
+    log ""
+    log "Обычные DNS (кандидаты в Bootstrap/Fallback):"
+fi
+
+INDEX=0
+while IFS= read -r ip; do
+    INDEX=$((INDEX + 1))
+
+    run_query "$WARMUP_DOMAIN" "$ip" >/dev/null
+    n=0
+    for domain in $TEST_DOMAINS; do
+        n=$((n + 1))
+        latency="$(run_query "$domain" "$ip")"
+        eval "t$n=\"\$latency\""
+    done
+
+    success=0
+    [ -n "${t1:-}" ] && success=$((success + 1))
+    [ -n "${t2:-}" ] && success=$((success + 1))
+    [ -n "${t3:-}" ] && success=$((success + 1))
+
+    avg="$(awk -v a="${t1:-}" -v b="${t2:-}" -v c="${t3:-}" 'BEGIN{
+        n = 0; s = 0
+        if (a != "") { s += a; n++ }
+        if (b != "") { s += b; n++ }
+        if (c != "") { s += c; n++ }
+        if (n > 0) printf "%.0f", s / n; else printf ""
+    }')"
+
+    case "$success" in
+        3) state="GOOD" ;;
+        0) state="DEAD" ;;
+        *) state="UNSTABLE" ;;
+    esac
+
+    printf '[%02d/%02d] %-40s %s/3  %5s/%5s/%5s ms  avg=%-5s  %s\n' \
+        "$INDEX" "$PLAIN_TOTAL" "$ip" "$success" \
+        "$(fmt "${t1:-}")" "$(fmt "${t2:-}")" "$(fmt "${t3:-}")" "$(fmt "$avg")" "$state"
+
+    inv_success=$((3 - success))
+    sort_key="$(printf '%d%07d' "$inv_success" "${avg:-9999999}")"
+    printf "%s${US}%s${US}%s${US}%s${US}%s${US}%s${US}%s${US}%s\n" \
+        "$sort_key" "$ip" "${t1:-}" "${t2:-}" "${t3:-}" "$success" "$state" "${avg:-}" \
+        >> "$PLAIN_RESULTS_FILE"
+done < "$PLAIN_FILE"
+
+# ---------------------------------------------------------
 # Итоговая таблица: сортировка по числу успешных ответов (больше — лучше),
 # затем по средней задержке (меньше — лучше). Ключ в первом поле —
 # фиксированной ширины, поэтому обычной лексикографической сортировки
@@ -436,6 +526,7 @@ done < "$URLS_FILE"
 # ---------------------------------------------------------
 
 sort "$RESULTS_FILE" > "$SORTED_FILE"
+sort "$PLAIN_RESULTS_FILE" > "$PLAIN_SORTED_FILE"
 
 WIDTH=150
 SEP="$(printf '%*s' "$WIDTH" '' | tr ' ' '=')"
@@ -453,6 +544,19 @@ while IFS="$US" read -r key url t1 t2 t3 success state avg; do
     printf '%2d %-72s %s/3 %10s %10s %10s %10s %10s\n' \
         "$pos" "$url" "$success" "$(fmt "$t1")" "$(fmt "$t2")" "$(fmt "$t3")" "$(fmt "$avg")" "$state"
 done < "$SORTED_FILE"
+
+if [ -s "$PLAIN_SORTED_FILE" ]; then
+    printf '\n'
+    printf '%2s %-72s %5s %10s %10s %10s %10s %10s\n' \
+        "#" "Bootstrap/Fallback DNS (IP)" "OK" "GitHub" "Raw" "Assets" "AVG" "STATUS"
+    printf '%s\n' "$(printf '%*s' "$WIDTH" '' | tr ' ' '-')"
+    pos=0
+    while IFS="$US" read -r key url t1 t2 t3 success state avg; do
+        pos=$((pos + 1))
+        printf '%2d %-72s %s/3 %10s %10s %10s %10s %10s\n' \
+            "$pos" "$url" "$success" "$(fmt "$t1")" "$(fmt "$t2")" "$(fmt "$t3")" "$(fmt "$avg")" "$state"
+    done < "$PLAIN_SORTED_FILE"
+fi
 
 printf '\n'
 printf 'GitHub = github.com\n'
