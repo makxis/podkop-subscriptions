@@ -446,12 +446,105 @@ def test_singbox_hard_validation():
         u.run_singbox_check_for_links = original
 
 
+def test_uci_values():
+    print('Значения UCI')
+    check('одинарные кавычки', u.parse_uci_value("'abc'") == 'abc')
+    check('апостроф в записи uci', u.parse_uci_value("'a'\\''b'") == "a'b",
+          u.parse_uci_value("'a'\\''b'"))
+    check('двойные кавычки с экранированием', u.parse_uci_value('"a\\"b"') == 'a"b')
+    check('без кавычек', u.parse_uci_value('abc') == 'abc')
+    check('пробел внутри кавычек', u.parse_uci_value("'a b'") == 'a b')
+    check('решётка внутри кавычек', u.parse_uci_value("'x|#.*(YT)'") == 'x|#.*(YT)')
+    check('пустое значение', u.parse_uci_value("''") == '')
+    for value in ("Joe's #1", "a'b'c", "''", 'plain', "vless://x@h:1?a=b#На'звание"):
+        check(f'туда и обратно: {value}', u.parse_uci_value(u.uci_quote(value)) == value,
+              u.parse_uci_value(u.uci_quote(value)))
+
+
+def test_tags_follow_podkop():
+    """Теги Podkop: имя секции как есть и номер по списку с дублями."""
+    import json
+    import tempfile
+    print('Теги outbound и чистка state')
+    a = 'vless://00000000-0000-4000-8000-00000000000a@a.example.net:443?type=tcp#A'
+    b = 'vless://00000000-0000-4000-8000-00000000000b@b.example.net:443?type=tcp#B'
+    c = 'vless://00000000-0000-4000-8000-00000000000c@c.example.net:443?type=tcp#C'
+    config = (
+        "config section 'YouTube'\n"
+        "\toption connection_type 'proxy'\n"
+        "\toption proxy_config_type 'urltest'\n"
+        f"\tlist urltest_proxy_links '{a}'\n"
+        f"\tlist urltest_proxy_links '{b}'\n"
+        f"\tlist urltest_proxy_links '{a}'\n"
+        f"\tlist urltest_proxy_links '{c}'\n"
+    )
+    proxies = {
+        'YouTube-1-out': {'history': [{'delay': 100}]},
+        'YouTube-2-out': {'history': [{'delay': 0}]},
+        'YouTube-4-out': {'history': [{'delay': 150}]},
+    }
+    stale = {'url': 'vless://gone', 'name': 'gone', 'fail_count': 5}
+    original = u.load_podkop_proxies
+    try:
+        u.load_podkop_proxies = lambda path: proxies
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, 'podkop')
+            state_path = os.path.join(tmp, 'state.json')
+            with open(config_path, 'w', encoding='utf-8') as f:
+                f.write(config)
+            with open(state_path, 'w', encoding='utf-8') as f:
+                json.dump({'sections': {'youtube': {'links': {'deadbeef': stale}},
+                                        'removed_section': {'links': {'x': stale}}}}, f)
+
+            sections = u.load_current_podkop_sections(config_path)
+            check('имя секции сохранено как в конфиге', sections['youtube']['name'] == 'YouTube')
+
+            u.observe_only(config_path, state_path)
+            with open(state_path, encoding='utf-8') as f:
+                state = json.load(f)
+            links = state['sections']['youtube']['links']
+            by_name = {item['name']: item for item in links.values()}
+            check('рабочий ключ найден по тегу с регистром', by_name['A']['last_status'] == 'ok',
+                  by_name['A'].get('last_tag'))
+            check('нерабочий ключ отмечен', by_name['B']['fail_count'] == 1)
+            check('ключ после дубля взял свой номер', by_name['C']['last_tag'] == 'YouTube-4-out'
+                  and by_name['C']['last_status'] == 'ok', by_name['C'].get('last_tag'))
+            check('ключ, которого нет в конфиге, убран из state', 'deadbeef' not in links)
+            check('секция, которой нет в конфиге, убрана из state',
+                  'removed_section' not in state['sections'])
+
+            snap = u.proxy_snapshot_for_links('YouTube', sections['youtube']['links'], proxies)
+            check('снимок для отсеивателя по тем же тегам',
+                  snap[u.stable_id(c)]['tag'] == 'YouTube-4-out', snap[u.stable_id(c)]['tag'])
+    finally:
+        u.load_podkop_proxies = original
+
+    state = {'sections': {'main': {'links': {'x': stale}}}}
+    check('пустой разбор конфига ничего не удаляет',
+          u.prune_state_to_config(state, {}) == 0 and 'x' in state['sections']['main']['links'])
+
+
+def test_expand_budget():
+    print('Лимит времени на DNS')
+    original_resolve, original_budget = u.resolve_ipv4, u.EXPAND_RESOLVE_BUDGET_SECONDS
+    try:
+        calls = []
+        u.resolve_ipv4 = lambda host, timeout=4: calls.append(host) or ['198.51.100.7', '198.51.100.9']
+        u.EXPAND_RESOLVE_BUDGET_SECONDS = -1
+        link = 'vless://00000000-0000-4000-8000-000000000001@node01.example.net:443?type=tcp#Узел'
+        out = u.expand_domain_ips([link], 'тест')
+        check('после лимита DNS не опрашивается', calls == [] and out == [link], str(calls))
+    finally:
+        u.resolve_ipv4, u.EXPAND_RESOLVE_BUDGET_SECONDS = original_resolve, original_budget
+
+
 def main():
     for test in (test_clash_matches_reference, test_xray_configs, test_xray_hysteria, test_trojan_and_ss,
                  test_plain_and_base64,
                  test_refusals, test_domain_expansion, test_fingerprint_headers,
                  test_podkop_conversion_limits, test_tachyon_conversion_limits,
-                 test_singbox_check_position, test_singbox_hard_validation):
+                 test_singbox_check_position, test_singbox_hard_validation,
+                 test_uci_values, test_tags_follow_podkop, test_expand_budget):
         test()
         print()
     if failures:

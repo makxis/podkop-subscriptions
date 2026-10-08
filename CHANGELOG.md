@@ -1,9 +1,52 @@
 # Changelog
 
-## Unreleased
+## 3.8.2
+
+- Sections with capital letters in their name lost their keys. The updater
+  lowercased the section name everywhere, while Podkop builds outbound tags
+  from it as is: for a section `YouTube` it looked up `youtube-1-out`, found
+  nothing, counted every key as missing, and after 72 hourly observations the
+  fail_count cleanup removed them. Tags and `uci` calls now use the name as it
+  is in the config; Tachyon's `config urltest` points at it the same way.
+- Health was read from the wrong tag after a duplicate link. Podkop numbers
+  every entry of the list, duplicates included, while the updater counted
+  positions in the deduplicated list, so every key after the first duplicate
+  got its neighbour's state.
+- `state.json` no longer grows without bound. Keys that left a section other
+  than through the updater (edited by hand, rotated by the provider, whole
+  section deleted) stayed in it forever: on a live router 257 of about 700
+  entries were still in the config, and the 650 KB file is rewritten every
+  hour. Entries are now dropped once the key is gone from the config; an
+  unreadable or empty config drops nothing.
+- UCI values are read the way `uci` reads them. An apostrophe is stored as
+  `'a'\''b'`, and the old parser returned that literally, which broke a regex
+  or a source URL containing `'` and the names of local keys.
+- Expanding domains into IPs has a 30 s DNS budget per source. The timeout
+  passed to the resolver never applied (`getaddrinfo` ignores socket
+  timeouts), so a subscription with dozens of domains on a slow resolver could
+  stall the update for minutes.
+- The installer no longer leaves a `*.bak.<date>` copy next to every program
+  file on each upgrade, and removes the ones earlier versions left: on a
+  router upgraded 25 times they took 2.8 MB of flash in `/usr/bin` and the
+  LuCI directories. The upgrade archive in `/root` is taken before the new
+  files are copied (it used to hold the new version, so it could not roll
+  anything back), and only the three newest archives are kept.
+- The interactive setup's config backup goes to `/etc/podkop-subscriptions/`
+  instead of `/etc/config`, where uci parses every file; old copies are moved
+  there.
+- `uninstall.sh` removes `podkop-sub-clean-temp` and the old `*.bak.*` copies
+  too. README no longer promises that uninstalling restores
+  `/etc/config/podkop` from a backup: the code to do it was never called, and
+  the keys stay in the Podkop sections.
+- `podkop-sub-clean-temp` removes the `/tmp/podkop-sub-upgrade.sh` that the
+  README upgrade command downloads, and lists the current path of the local
+  links.
+- `podkop-sub-run-now` keeps the PID of the background run in its lock. A run
+  killed before its trap fired (kill -9, OOM) used to leave the lock until
+  reboot, with LuCI showing "running" and refusing to start the updater.
 
 `install-dnsproxy.sh`, `test-doh.sh` and `servers.txt` are fetched from `main`
-directly, so these changes are already live for anyone who downloads them.
+directly, so the changes below were live as soon as they were pushed.
 
 - `install-dnsproxy.sh` (installer 1.5.0 -> 1.9.0) writes a lean dnsproxy
   config, and re-running it is now how a router set up by an older version

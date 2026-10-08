@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.8.1"
+APP_VERSION="3.8.2"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
@@ -85,11 +85,28 @@ need_root() {
   [ "$(id -u)" = "0" ] || fail "run as root"
 }
 
-backup_file() {
-  file="$1"
-  [ -e "$file" ] || return 0
+# Копия пользовательского конфига перед перезаписью мастером. Кладётся в
+# $DATA_DIR, а не рядом: всё в /etc/config разбирается как UCI.
+backup_user_config() {
+  [ -e "$SUB_CFG" ] || return 0
+  mkdir -p "$DATA_DIR"
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  cp -fp "$file" "${file}.bak.${ts}"
+  cp -fp "$SUB_CFG" "$DATA_DIR/podkop_subscriptions.bak.${ts}"
+}
+
+# Наши файлы, рядом с которыми прежние версии установщика при каждом
+# обновлении клали копию *.bak.<дата>. Копии ничем не используются (всё и так
+# лежит в tar-бэкапе в /root), а на роутере после 25 обновлений они заняли
+# 2,8 МБ флеша.
+OWN_FILES="/usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now
+/etc/init.d/podkop_subscriptions /www/luci-static/resources/view/podkop/subscriptions.js
+/usr/share/luci/menu.d/luci-app-podkop-subscriptions.json
+/usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json"
+
+drop_old_file_backups() {
+  for f in $OWN_FILES; do
+    rm -f "$f".bak.* 2>/dev/null || true
+  done
 }
 
 copy_local() {
@@ -198,6 +215,13 @@ create_upgrade_backup() {
   else
     warn "backup file was not created or is empty: $backup"
   fi
+
+  # Хранятся три последних архива: каждый заново делается при обновлении, и
+  # без чистки они копились во флеше бесконечно.
+  ls -1t /root/podkop-subscriptions-upgrade-backup-*.tar.gz 2>/dev/null | tail -n +4 |
+    while IFS= read -r old; do
+      rm -f "$old"
+    done
 }
 
 migrate_legacy_config_from_podkop() {
@@ -328,10 +352,15 @@ migrate_out_of_uci_dir() {
     mv -f /etc/config/podkop-subs "$DATA_DIR/podkop-subs" && \
       say "Moved /etc/config/podkop-subs out of the uci directory"
   fi
+
+  # Копии конфига, которые мастер настройки раньше клал прямо в /etc/config.
+  for old in "$SUB_CFG".bak.*; do
+    [ -f "$old" ] || continue
+    mv -f "$old" "$DATA_DIR/" && say "Moved $old -> $DATA_DIR/"
+  done
 }
 
 prepare_upgrade_from_legacy() {
-  create_upgrade_backup
   migrate_legacy_config_from_podkop
   remove_legacy_sections_from_podkop
   cleanup_old_cron_lines
@@ -468,7 +497,7 @@ $src"
   say "  SNI-схлопывание: $dedupe_sni"
   say "  cron enabled: $schedule"
   say ""
-  backup_file "$SUB_CFG"
+  backup_user_config
   tmp="${SUB_CFG}.tmp.$$"
   {
     echo "# Podkop Subscriptions config"
@@ -514,10 +543,11 @@ install_core() {
     say "Installing Podkop subscription updater from local package: $SCRIPT_DIR"
   fi
   ensure_python
-  backup_file /usr/bin/podkop-sub-updater.py
-  backup_file /usr/bin/podkop-sub-cron-sync
-  backup_file /usr/bin/podkop-sub-run-now
-  backup_file /etc/init.d/podkop_subscriptions
+  # Архив снимается до того, как новые файлы лягут на место: раньше он
+  # делался уже после копирования и хранил новую версию программ вместо
+  # прежней, так что откатиться по нему было нельзя.
+  create_upgrade_backup
+  drop_old_file_backups
   install_file "podkop-sub-updater.py" /usr/bin/podkop-sub-updater.py
   install_file "podkop-sub-cron-sync" /usr/bin/podkop-sub-cron-sync
   install_file "podkop-sub-run-now" /usr/bin/podkop-sub-run-now
@@ -531,7 +561,7 @@ install_core() {
   fi
   chmod 0755 /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now /usr/bin/podkop-sub-clean-temp
   chmod 0755 /etc/init.d/podkop_subscriptions
-  # Backup first, migrate second: create_upgrade_backup still archives the
+  # Backup first, migrate second: create_upgrade_backup above archived the
   # legacy paths, so an interrupted migration can be recovered from it.
   prepare_upgrade_from_legacy
   migrate_out_of_uci_dir
@@ -724,10 +754,6 @@ install_panel() {
     say "Installing standalone LuCI app: Services -> Подписки Podkop"
   fi
   say "Podkop native LuCI files are not patched or replaced."
-
-  backup_file /www/luci-static/resources/view/podkop/subscriptions.js
-  backup_file /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json
-  backup_file /usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json
 
   detach_old_embedded_panel
 

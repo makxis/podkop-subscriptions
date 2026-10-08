@@ -154,7 +154,7 @@ wget -O /tmp/podkop-sub-upgrade.sh https://raw.githubusercontent.com/makxis/podk
 wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
 ```
 
-Удаляет скрипты, страницу LuCI, procd-триггер и строки cron. Конфиги и накопленное состояние остаются, а `/etc/config/podkop` восстанавливается из последнего бэкапа `*.bak.*`. Чтобы стереть и настройки (`/etc/config/podkop_subscriptions` и весь каталог `/etc/podkop-subscriptions/` вместе со своими ключами), добавьте `--purge-config`:
+Удаляет скрипты, страницу LuCI, procd-триггер и строки cron. Конфиги, накопленное состояние и ключи, уже записанные в секции Podkop, остаются на месте. Чтобы стереть и настройки (`/etc/config/podkop_subscriptions` и весь каталог `/etc/podkop-subscriptions/` вместе со своими ключами), добавьте `--purge-config`:
 
 ```sh
 sh /tmp/podkop-sub-uninstall.sh --purge-config
@@ -746,8 +746,8 @@ ubus call service list | grep -A 6 podkop_subscriptions
 
 ```text
 OpenWrt:         24.10.3–24.10.6; 25.12.4
-Podkop:          v0.7.17–v0.7.19
-LuCI App Podkop: v0.7.17–v0.7.19
+Podkop:          v0.7.17–v0.7.19; v0.7.22
+LuCI App Podkop: v0.7.17–v0.7.19; v0.7.22
 sing-box:        1.12.17; 1.12.22
 ```
 

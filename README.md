@@ -156,7 +156,7 @@ The subscriptions config, your own links and `state.json` are left alone. The pa
 wget -O /tmp/podkop-sub-uninstall.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/uninstall.sh && sh /tmp/podkop-sub-uninstall.sh
 ```
 
-Removes the scripts, the LuCI page, the procd trigger and the cron lines. Configs and accumulated state stay, and `/etc/config/podkop` is restored from the latest `*.bak.*` backup. To wipe the settings as well (`/etc/config/podkop_subscriptions` and the whole `/etc/podkop-subscriptions/` directory with your own links), add `--purge-config`:
+Removes the scripts, the LuCI page, the procd trigger and the cron lines. Configs, accumulated state and the links already written into the Podkop sections all stay in place. To wipe the settings as well (`/etc/config/podkop_subscriptions` and the whole `/etc/podkop-subscriptions/` directory with your own links), add `--purge-config`:
 
 ```sh
 sh /tmp/podkop-sub-uninstall.sh --purge-config
@@ -748,8 +748,8 @@ Since 3.8.0 it also works with [Tachyon](https://github.com/Dushnilin/tachyon), 
 
 ```text
 OpenWrt:         24.10.3–24.10.6; 25.12.4
-Podkop:          v0.7.17–v0.7.19
-LuCI App Podkop: v0.7.17–v0.7.19
+Podkop:          v0.7.17–v0.7.19; v0.7.22
+LuCI App Podkop: v0.7.17–v0.7.19; v0.7.22
 sing-box:        1.12.17; 1.12.22
 ```
 

@@ -40,6 +40,16 @@ tail_from_byte() {
   fi
 }
 
+# В лок-каталоге лежит PID фонового запуска. Если процесс убили так, что его
+# ловушка не сработала (kill -9, OOM), каталог иначе остался бы до
+# перезагрузки: LuCI показывала бы «выполняется» и не давала запустить updater.
+if [ -d "$LOCK" ]; then
+  lock_pid="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
+    rm -rf "$LOCK"
+  fi
+fi
+
 case "$1" in
   --version)
     echo "podkop-subscriptions $VERSION"
@@ -150,7 +160,7 @@ if mkdir "$LOCK" 2>/dev/null; then
 
   (
     rc="0"
-    trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+    trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT
 
     # The log is a file, so python would block-buffer print() in 4K chunks and
     # the LuCI tail would arrive in bursts instead of line by line.
@@ -173,6 +183,8 @@ if mkdir "$LOCK" 2>/dev/null; then
 
     exit "$rc"
   ) >"$LOG" 2>&1 &
+  # Если запуск уже закончился и убрал лок, записать некуда, и это нормально.
+  echo "$!" > "$LOCK/pid" 2>/dev/null || true
 
   echo "Updater запущен в фоне. Версия: $VERSION"
   echo "После завершения LuCI покажет результат."

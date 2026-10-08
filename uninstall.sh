@@ -15,15 +15,6 @@ done
 
 say() { printf '%s\n' "$*"; }
 
-restore_latest_backup() {
-  file="$1"
-  latest="$(ls -t "${file}".bak.* 2>/dev/null | head -n 1 || true)"
-  if [ -n "$latest" ]; then
-    cp -fp "$latest" "$file"
-    say "Restored $file from $latest"
-  fi
-}
-
 if [ -x /etc/init.d/podkop_subscriptions ]; then
   /etc/init.d/podkop_subscriptions stop >/dev/null 2>&1 || true
   /etc/init.d/podkop_subscriptions disable >/dev/null 2>&1 || true
@@ -40,7 +31,16 @@ if [ -f "$CRON_FILE" ]; then
   /etc/init.d/cron restart >/dev/null 2>&1 || true
 fi
 
-rm -f /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now
+rm -f /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now \
+  /usr/bin/podkop-sub-clean-temp
+# Копии *.bak.<дата>, которые прежние версии установщика клали рядом с
+# каждым нашим файлом при обновлении.
+for f in /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now \
+  /etc/init.d/podkop_subscriptions /www/luci-static/resources/view/podkop/subscriptions.js \
+  /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json \
+  /usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json; do
+  rm -f "$f".bak.* 2>/dev/null || true
+done
 rm -rf /usr/share/podkop-subscriptions
 rm -f /www/luci-static/resources/view/podkop/subscriptions.js
 rm -rf /www/luci-static/resources/view/podkop_subscriptions

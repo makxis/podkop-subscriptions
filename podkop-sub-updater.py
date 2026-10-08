@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.8.1"
+APP_VERSION_FALLBACK = "3.8.2"
 
 
 def app_version():
@@ -469,12 +469,42 @@ def unquote_percent(s):
 
 
 def parse_uci_value(raw):
+    """Значение UCI так, как его читает сам uci.
+
+    Одинарные кавычки берут всё буквально, двойные понимают обратную косую,
+    а соседние куски склеиваются: апостроф uci записывает как 'a'\\''b'.
+    Прежний разбор просто снимал внешние кавычки и возвращал такое значение с
+    мусором внутри, так что портились regex с апострофом и имена ключей.
+    """
     raw = (raw or '').strip()
-    if len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
-        return raw[1:-1]
-    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
-        return raw[1:-1].replace('\\"', '"').replace('\\\\', '\\')
-    return raw
+    out = []
+    i, n = 0, len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "'":
+            end = raw.find("'", i + 1)
+            if end < 0:
+                out.append(raw[i + 1:])
+                break
+            out.append(raw[i + 1:end])
+            i = end + 1
+        elif ch == '"':
+            i += 1
+            while i < n and raw[i] != '"':
+                if raw[i] == '\\' and i + 1 < n:
+                    i += 1
+                out.append(raw[i])
+                i += 1
+            i += 1
+        elif ch == '\\' and i + 1 < n:
+            out.append(raw[i + 1])
+            i += 2
+        elif ch.isspace():
+            break
+        else:
+            out.append(ch)
+            i += 1
+    return ''.join(out)
 
 
 def uci_quote(value):
@@ -1656,6 +1686,13 @@ def load_local_protected_ids(path=None):
         log("WARN", f"Не удалось прочитать локальные ключи для защиты от удаления: локальный список: {e}")
     return protected
 
+# Общий бюджет на DNS при разворачивании доменов одного источника. Таймаут
+# getaddrinfo задаёт резолвер системы (у musl около 5 с на имя), а
+# socket.setdefaulttimeout на него не действует. Без потолка подписка с
+# десятками доменов на медленном DNS растягивала обновление на минуты.
+EXPAND_RESOLVE_BUDGET_SECONDS = 30
+
+
 def resolve_ipv4(host, timeout=4):
     """A-записи домена. Пустой список при любой неудаче — резолв не критичен."""
     import socket
@@ -1688,6 +1725,8 @@ def expand_domain_ips(links, sec):
     seen = set(links)
     added = 0
     resolved_cache = {}
+    started = time.monotonic()
+    skipped_hosts = 0
 
     for link in links:
         m = re.match(r'^(\w+)://([^@]*@)?\[?([^\]/?#:]+)\]?:(\d+)', link)
@@ -1697,7 +1736,11 @@ def expand_domain_ips(links, sec):
         if _is_ip_literal(host):
             continue
         if host not in resolved_cache:
-            resolved_cache[host] = resolve_ipv4(host)
+            if time.monotonic() - started > EXPAND_RESOLVE_BUDGET_SECONDS:
+                resolved_cache[host] = []
+                skipped_hosts += 1
+            else:
+                resolved_cache[host] = resolve_ipv4(host)
         ips = resolved_cache[host]
         if len(ips) < 2:
             continue
@@ -1723,6 +1766,9 @@ def expand_domain_ips(links, sec):
 
     if added:
         log("INFO", f"[{sec}]: разворачивание доменов в IP добавило ссылок: {added}")
+    if skipped_hosts:
+        log("WARN", f"[{sec}]: DNS отвечал слишком долго, не развёрнуто доменов: {skipped_hosts} "
+                    f"(лимит {EXPAND_RESOLVE_BUDGET_SECONDS}s на источник)")
     return result
 
 
@@ -2915,6 +2961,11 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
             log("WARN", f"[{sec}]: После обработки внешних источников не осталось ссылок.")
 
 def load_current_podkop_sections(config_path):
+    # Ключ словаря — имя в нижнем регистре, как в target_section, а 'name' —
+    # имя ровно как в конфиге. Podkop строит теги outbound'ов как
+    # <секция>-N-out без смены регистра, и для секции YouTube поиск по тегу
+    # youtube-1-out не находил ни одного ключа: все считались пропавшими, а
+    # через 72 часа fail_count вычищал их из секции.
     result = {}
     if config_backend(config_path) == 'tachyon':
         urltest_owners = tachyon_urltest_owners(config_path)
@@ -2924,6 +2975,7 @@ def load_current_podkop_sections(config_path):
             name = s['name'].strip().lower()
             is_urltest = name in urltest_owners or s['options'].get('urltest_enabled') == '1'
             result[name] = {
+                'name': s['name'].strip(),
                 'ptype': 'urltest' if is_urltest else 'selector',
                 'links': list(s['lists'].get('selector_proxy_links', [])),
                 'section': s
@@ -2949,8 +3001,39 @@ def load_current_podkop_sections(config_path):
             elif s['lists'].get('selector_proxy_links'):
                 ptype = 'selector'
                 links = s['lists'].get('selector_proxy_links', [])
-        result[name] = {'ptype': ptype, 'links': list(links), 'section': s}
+        result[name] = {'name': s['name'].strip(), 'ptype': ptype, 'links': list(links), 'section': s}
     return result
+
+
+def prune_state_to_config(state, current_sections):
+    """Убирает из state записи ключей, которых больше нет в конфиге.
+
+    Ключ, ушедший из секции не через updater (правка руками, ротация в
+    подписке, удалённая секция), иначе оставался в state.json навсегда. На
+    живом роутере из ~700 записей в конфиге было 257, файл весил 650 КБ, а
+    переписывается он каждый час. Пустой разбор конфига (файл мог быть
+    недоступен в момент чтения) не удаляет ничего.
+    """
+    if not current_sections:
+        return 0
+    sections = state.get('sections')
+    if not isinstance(sections, dict):
+        return 0
+    removed = 0
+    for sec in list(sections):
+        st_sec = sections[sec]
+        links = st_sec.get('links') if isinstance(st_sec, dict) else None
+        if sec not in current_sections:
+            removed += len(links) if isinstance(links, dict) else 0
+            del sections[sec]
+            continue
+        if not isinstance(links, dict):
+            continue
+        keep = {stable_id(link) for link in current_sections[sec].get('links', [])}
+        for sid in [s for s in links if s not in keep]:
+            del links[sid]
+            removed += 1
+    return removed
 
 
 def default_state():
@@ -3574,6 +3657,9 @@ def observe_only(config_path, state_path):
     imported, updated = import_current_links_to_state(state, current_sections)
     if imported or updated:
         log("INFO", f"State импортирован из текущего {TARGET['title']} config: новых={imported}, обновлено={updated}")
+    pruned = prune_state_to_config(state, current_sections)
+    if pruned:
+        log("INFO", f"Из state убраны ключи, которых больше нет в конфиге: {pruned}")
     if not current_sections:
         log("WARN", f"В конфиге нет секций {TARGET['title']} с proxy-ссылками. Проверка пропущена.")
         save_state(state_path, state)
@@ -3590,12 +3676,20 @@ def observe_only(config_path, state_path):
     now = int(time.time())
     total = ok = bad = missing = 0
     for sec, data in current_sections.items():
-        links, dup_count = dedupe_links_keep_order(data.get('links', []))
         st_sec = ensure_state_section(state, sec, data.get('ptype'))
-        for idx, link in enumerate(links, 1):
+        # Номер в теге — позиция в списке как есть, с дублями: Podkop их не
+        # убирает и нумерует подряд. Счёт по списку без дублей сдвигал все
+        # теги после первого дубля, и ключам доставалось чужое состояние.
+        seen_ids = set()
+        dup_count = 0
+        for idx, link in enumerate(data.get('links', []), 1):
             sid = stable_id(link)
+            if sid in seen_ids:
+                dup_count += 1
+                continue
+            seen_ids.add(sid)
             item = st_sec['links'].setdefault(sid, {'url': link, 'name': link_name(link), 'fail_count': 0, 'first_seen': now})
-            tag = f"{sec}-{idx}-out"
+            tag = f"{data.get('name') or sec}-{idx}-out"
             status, delay = proxy_status(proxies.get(tag))
             total += 1
             item['url'] = link
@@ -3643,11 +3737,15 @@ def add_recently_removed(state, sid, sec, item, reason):
 
 
 def proxy_snapshot_for_links(sec, links, proxies):
+    # sec — имя секции как в конфиге, links — список как есть, с дублями:
+    # теги Podkop строит именно по ним (см. observe_only).
     snap = {}
     if not proxies:
         return snap
     for idx, link in enumerate(links, 1):
         sid = stable_id(link)
+        if sid in snap:
+            continue
         tag = f"{sec}-{idx}-out"
         status, delay = proxy_status(proxies.get(tag))
         snap[sid] = {'tag': tag, 'status': status, 'delay': delay}
@@ -3869,7 +3967,7 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     if skipped_endpoint_local:
         log("INFO", f"[{sec}]: IP/домен:порт-дубликатов защищённых локальных ключей пропущено: {skipped_endpoint_local}")
 
-    proxy_snap = proxy_snapshot_for_links(sec, current_unique, proxies)
+    proxy_snap = proxy_snapshot_for_links(current.get('name') or sec, current_links, proxies)
     remove = []
     remove_ids = set()
 
@@ -4072,6 +4170,8 @@ def update_uci_config_with_final_links(config_path, updates):
     current_sec = None
     current_type = None
     found_sections = set()
+    # Имя секции ровно как в файле: на него ссылается группа URLTest Tachyon.
+    found_names = {}
     skip_multiline = False
     tachyon = config_backend(config_path) == 'tachyon'
     urltest_owners = tachyon_urltest_owners(config_path) if tachyon else set()
@@ -4117,6 +4217,7 @@ def update_uci_config_with_final_links(config_path, updates):
             current_sec = m.group(2)
             if is_target(current_type, current_sec):
                 found_sections.add(current_sec.lower())
+                found_names[current_sec.lower()] = current_sec
             out_lines.append(line)
             skip_multiline = False
             continue
@@ -4140,7 +4241,7 @@ def update_uci_config_with_final_links(config_path, updates):
                 if out_lines and not out_lines[-1].endswith('\n'):
                     out_lines.append('\n')
                 out_lines.append("\nconfig urltest\n")
-                out_lines.append(f"\toption section {uci_quote(sec)}\n")
+                out_lines.append(f"\toption section {uci_quote(found_names.get(sec, sec))}\n")
                 for key, value in TACHYON_URLTEST_DEFAULTS:
                     out_lines.append(f"\toption {key} {uci_quote(value)}\n")
                 log("INFO", f"[{sec}]: в Tachyon добавлена группа URLTest 'Fastest' для секции")
@@ -4157,7 +4258,9 @@ def apply_updates_with_uci(config_path, updates):
     if os.path.abspath(config_path) != {'podkop': PODKOP_CONFIG_PATH, 'tachyon': TACHYON_CONFIG_PATH}[backend]:
         return
     changed = False
-    for sec, upd in updates.items():
+    for key, upd in updates.items():
+        # uci различает регистр: секция YouTube не найдётся как youtube.
+        sec = upd.get('name') or key
         links = upd.get('links') or []
         ptype = upd.get('ptype', 'urltest')
         exists = subprocess.run(['uci', '-q', 'get', f'{backend}.{sec}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -4286,6 +4389,9 @@ def main():
         imported, updated = import_current_links_to_state(state, current_sections)
         if imported or updated:
             log("INFO", f"State синхронизирован с текущим {TARGET['title']} config: новых={imported}, обновлено={updated}")
+        pruned = prune_state_to_config(state, current_sections)
+        if pruned:
+            log("INFO", f"Из state убраны ключи, которых больше нет в конфиге: {pruned}")
         fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints, args.subs, state)
         validate_jobs_links_for_podkop(jobs)
         protected_local_ids = load_local_protected_ids()
@@ -4321,7 +4427,8 @@ def main():
             total_removed += int(info.get('removed', 0) or 0)
             total_final_links += len(final_links)
             if info.get('changed'):
-                updates[sec] = {'ptype': job.get('ptype', 'urltest'), 'links': final_links}
+                updates[sec] = {'ptype': job.get('ptype', 'urltest'), 'links': final_links,
+                                'name': (current_sections.get(sec) or {}).get('name') or sec}
                 summary_changed = True
         if processed_sections == 0 and recent_skip_ids:
             # Подписки не дали валидных ключей / все секции пропущены.
