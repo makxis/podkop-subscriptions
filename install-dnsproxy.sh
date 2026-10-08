@@ -6,20 +6,21 @@
 #   2. Устанавливает dnsproxy из штатного репозитория OpenWrt.
 #   3. Скачивает подходящий luci-app-dnsproxy из Fantastic Packages.
 #   4. Настраивает dnsproxy на 127.0.0.10:53.
-#   5. Настраивает три списка серверов: upstream (шифрованные), bootstrap и fallback.
-#   6. Добавляет текущие IPv4 DNS-серверы провайдера в fallback и bootstrap.
+#   5. Проверяет публичные DNS (1.1.1.1, 8.8.8.8 и др.) и пишет в bootstrap и fallback только ответившие.
+#   6. Добавляет текущие IPv4 DNS-серверы провайдера в fallback и bootstrap без проверки.
 #   7. Печатает инструкцию, как направить Podkop на 127.0.0.10.
 #      Сам конфиг Podkop не изменяется, если не указан --configure-podkop.
 #
 # Повторный запуск безопасен: конфиги предварительно сохраняются в /root.
 # Он же приводит уже настроенный роутер к актуальной лёгкой конфигурации
 # (без HTTP/3, без собственного кеша и прочих лишних функций), сохраняя
-# ранее подобранные upstream/bootstrap/fallback, включая правила вида
-# [/домен/]сервер.
+# ранее подобранные upstream, включая правила вида [/домен/]сервер.
+# bootstrap/fallback каждый раз собираются из публичных DNS, которые реально
+# отвечают с этого роутера, плюс DNS провайдера.
 
 set -eu
 
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.7.0"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
@@ -72,8 +73,9 @@ usage() {
                        параметр оставлен для совместимости.
   --no-podkop-restart  С --configure-podkop: настроить Podkop, но не
                        перезапускать его.
-  --reset-servers      Не сохранять ранее настроенные upstream/bootstrap/
-                       fallback, а записать списки по умолчанию.
+  --reset-servers      Не сохранять ранее настроенные upstream, а записать
+                       список по умолчанию. bootstrap/fallback и так
+                       перепроверяются при каждом запуске.
   --no-isp-dns         Не добавлять DNS-серверы провайдера в fallback и bootstrap.
   --config-only        Не устанавливать пакеты, только записать конфиг.
   --no-luci            Не устанавливать luci-app-dnsproxy.
@@ -614,63 +616,84 @@ if [ "$ADD_ISP_DNS" = "1" ]; then
     collect_isp_dns "$ISP_DNS_FILE"
 fi
 
-# fallback — последняя линия, работает открытым текстом. Требовать здесь
-# шифрования бессмысленно: список нужен ровно тогда, когда шифрованные
-# upstream недоступны, поэтому в нём то, что переживёт блокировки.
-FALLBACK_FILE="$TMP_DIR/fallback.list"
-cat > "$FALLBACK_FILE" <<'EOF'
-8.8.4.4
-1.0.0.1
-9.9.9.9
-94.140.14.140
-77.88.8.8
-EOF
-cat "$ISP_DNS_FILE" >> "$FALLBACK_FILE"
-awk 'NF && !seen[$0]++ { print $0 }' "$FALLBACK_FILE" > "$FALLBACK_FILE.unique"
-mv "$FALLBACK_FILE.unique" "$FALLBACK_FILE"
-
-# bootstrap разрешает доменные имена самих upstream. Если он состоит только
-# из адресов, которые могут стать недоступны, upstream не поднимутся не
-# потому, что заблокированы, а потому что их имена некому разрешить.
-# DNS провайдера дописываются в конец: они опрашиваются, только если
-# предыдущие молчат, поэтому приоритеты не меняются.
-BOOTSTRAP_FILE="$TMP_DIR/bootstrap.list"
-cat > "$BOOTSTRAP_FILE" <<'EOF'
-8.8.4.4
-1.0.0.1
-9.9.9.9
-94.140.14.140
-EOF
-cat "$ISP_DNS_FILE" >> "$BOOTSTRAP_FILE"
-awk 'NF && !seen[$0]++ { print $0 }' "$BOOTSTRAP_FILE" > "$BOOTSTRAP_FILE.unique"
-mv "$BOOTSTRAP_FILE.unique" "$BOOTSTRAP_FILE"
-
-# Ранее настроенные серверы (подобранные test-doh.sh или руками, включая
+# Ранее настроенные upstream (подобранные test-doh.sh или руками, включая
 # правила вида [/nalog.ru/]адрес) при повторном запуске сохраняются: задача
 # повторного запуска — убрать лишнее, а не сбросить чужой выбор серверов.
 # Значения без пробелов, поэтому вывод uci get можно делить по словам.
 OLD_UPSTREAM=""
-OLD_BOOTSTRAP=""
-OLD_FALLBACK=""
+OLD_PLAIN=""
 if [ "$KEEP_SERVERS" = "1" ] && [ -f /etc/config/dnsproxy ]; then
     OLD_UPSTREAM="$(uci -q get dnsproxy.servers.upstream 2>/dev/null || true)"
     if [ -n "$OLD_UPSTREAM" ]; then
-        OLD_BOOTSTRAP="$(uci -q get dnsproxy.servers.bootstrap 2>/dev/null || true)"
-        OLD_FALLBACK="$(uci -q get dnsproxy.servers.fallback 2>/dev/null || true)"
-        log "Сохраняю ранее настроенные upstream/bootstrap/fallback (--reset-servers, чтобы сбросить)"
+        OLD_PLAIN="$(uci -q get dnsproxy.servers.bootstrap 2>/dev/null || true) $(uci -q get dnsproxy.servers.fallback 2>/dev/null || true)"
+        log "Сохраняю ранее настроенные upstream (--reset-servers, чтобы сбросить)"
     fi
 fi
 
-# set -f: правила вида [/домен/] не должны раскрываться как glob.
-set -f
-if [ -n "$OLD_BOOTSTRAP" ]; then
-    printf '%s\n' $OLD_BOOTSTRAP > "$BOOTSTRAP_FILE"
-fi
-if [ -n "$OLD_FALLBACK" ]; then
-    printf '%s\n' $OLD_FALLBACK > "$FALLBACK_FILE"
+# bootstrap разрешает имена самих DoH-upstream, fallback — последняя линия,
+# когда шифрованные upstream недоступны. Оба работают открытым текстом, и
+# у части провайдеров отдельные публичные адреса на 53 порту режутся, поэтому
+# список не статичный: каждый кандидат проверяется запросом с роутера, и в
+# конфиг попадают только ответившие. Ранее записанные адреса тоже
+# перепроверяются. DNS провайдера добавляются в конец без проверки: это
+# свой резолвер сети, он нужен всегда.
+PLAIN_CANDIDATES="$TMP_DIR/plain-candidates.list"
+{
+    printf '%s\n' \
+        1.1.1.1 1.0.0.1 \
+        8.8.8.8 8.8.4.4 \
+        9.9.9.9 149.112.112.112 \
+        94.140.14.140 94.140.14.141 \
+        208.67.222.222 208.67.220.220 \
+        76.76.2.0 76.76.10.0 \
+        185.228.168.9 \
+        77.88.8.8 77.88.8.1
+    for dns in $OLD_PLAIN; do
+        printf '%s\n' "$dns"
+    done
+} | awk '
+    $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !seen[$1]++ { print $1 }
+' > "$PLAIN_CANDIDATES.all"
+grep -vxF -f "$ISP_DNS_FILE" "$PLAIN_CANDIDATES.all" > "$PLAIN_CANDIDATES" || true
+
+log "Проверяю, какие DNS отвечают по обычному 53 порту"
+PROBE_DIR="$TMP_DIR/probe"
+mkdir -p "$PROBE_DIR"
+n=0
+while IFS= read -r dns; do
+    n=$((n + 1))
+    (
+        if timeout 4 nslookup openwrt.org "$dns" >/dev/null 2>&1; then
+            : > "$PROBE_DIR/$n"
+        fi
+    ) &
+done < "$PLAIN_CANDIDATES"
+wait
+
+PLAIN_OK="$TMP_DIR/plain-ok.list"
+: > "$PLAIN_OK"
+n=0
+while IFS= read -r dns; do
+    n=$((n + 1))
+    if [ -e "$PROBE_DIR/$n" ]; then
+        printf '%s\n' "$dns" >> "$PLAIN_OK"
+        log "  + $dns"
+    else
+        log "  - $dns (не ответил)"
+    fi
+done < "$PLAIN_CANDIDATES"
+
+if [ ! -s "$PLAIN_OK" ]; then
+    # Ни один не ответил: скорее всего, сеть сейчас вообще недоступна, а не
+    # заблокированы все сразу. Пустой список хуже непроверенного.
+    warn "Ни один публичный DNS не ответил — записываю список без проверки"
+    cp "$PLAIN_CANDIDATES" "$PLAIN_OK"
 fi
 
-set +f
+BOOTSTRAP_FILE="$TMP_DIR/bootstrap.list"
+FALLBACK_FILE="$TMP_DIR/fallback.list"
+cat "$PLAIN_OK" "$ISP_DNS_FILE" | awk 'NF && !seen[$0]++' > "$BOOTSTRAP_FILE"
+cp "$BOOTSTRAP_FILE" "$FALLBACK_FILE"
 
 # Конфиг минимальный намеренно. На роутерах с ~256 МБ RAM dnsproxy с HTTP/3
 # и собственным кешем разрастался до ~60 МБ RSS, без них держится в
