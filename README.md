@@ -468,7 +468,7 @@ download subscriptions
 → apply regex
 → remove duplicates
 → normalize missing type=tcp for vless/trojan
-→ Python format checks
+→ Python format checks (xhttp is decoded by sing-box decode-link, as in Podkop)
 → sing-box check on a temporary config
 → SNI / endpoint deduplication
 → apply limits, latency and fail_count
@@ -486,7 +486,7 @@ The log line:
 `отброшено 0` (rejected 0) means the validator and `sing-box check` dropped nothing, so any missing links were lost to the regex, deduplication, limits or forced cleanup. Which link failed, and on which value, is logged at DEBUG level:
 
 ```text
-[x2x]: ключ не для Podkop (🇳🇱 Нидерланды): transport не поддерживается Podkop: xhttp
+[x2x]: ключ не для Podkop (🇳🇱 Нидерланды): transport не поддерживается Podkop: httpupgrade
 ```
 
 **Why there are two checks.** They answer different questions, and the first one is not a weaker version of the second.
@@ -495,12 +495,15 @@ The link is turned into an outbound by **Podkop itself**, in `/usr/lib/podkop/si
 
 | Link | Podkop | `sing-box check` |
 |---|---|---|
-| `type=xhttp`, `type=httpupgrade` | logs `Unknown transport 'xhttp' detected.` and builds the outbound **with no transport at all**, i.e. plain TCP | passes |
+| `type=httpupgrade`, and `type=xhttp` before Podkop 0.7.23 | logs `Unknown transport 'httpupgrade' detected.` and builds the outbound **with no transport at all**, i.e. plain TCP | passes |
 | `vmess://`, `tuic://` | `Unsupported proxy vmess type. Aborted.` and exits with an error | nothing to check |
+| `type=xhttp` in Podkop 0.7.23 without podkop-engine | `The xhttp transport is not supported by the installed sing-box ... Aborted.` and exits with an error | nothing to check |
 
 In the first case the link quietly becomes a dead node sitting in URLTest while the config itself is valid and passes the second check. In the second, a single such link leaves the router with no proxy at all. Both are only catchable before conversion.
 
 The second check catches what conversion hides: an unknown shadowsocks method, reality without uTLS, and anything else that only surfaces when the finished config is parsed. The first check is also what builds the config for the second one: `sing-box check` reads JSON, not links.
+
+**xhttp.** Since 0.7.23, Podkop does not run vless and trojan links with `type=xhttp` or `splithttp` through its own converter. It hands them to `sing-box tools decode-link`, which only podkop-engine has: the sing-box build the Podkop installer offers, whose `sing-box version` prints a `Features:` line with `tools.decode-link`. The updater does the same. When both Podkop and sing-box support it, an xhttp link is decoded by the same `decode-link` and then goes through the usual `sing-box check`. A link that `decode-link` refuses is dropped, because Podkop would stop on it entirely. When either of the two lacks support, xhttp links are dropped with a reason saying which one.
 
 </details>
 
@@ -754,9 +757,9 @@ Since 3.8.0 it also works with [Tachyon](https://github.com/Dushnilin/tachyon), 
 
 ```text
 OpenWrt:         24.10.3–24.10.6; 25.12.4
-Podkop:          v0.7.17–v0.7.19; v0.7.22
-LuCI App Podkop: v0.7.17–v0.7.19; v0.7.22
-sing-box:        1.12.17; 1.12.22
+Podkop:          v0.7.17–v0.7.19; v0.7.22–v0.7.23
+LuCI App Podkop: v0.7.17–v0.7.19; v0.7.22–v0.7.23
+sing-box:        1.12.17; 1.12.22; podkop-engine 1.13.21-pdk-r12
 ```
 
 Tachyon: tested on 1.4.3 (OpenWrt 24.10.7, sing-box 1.12.22). The updater switches to it on its own; the details are in the reference.

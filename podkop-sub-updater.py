@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.8.2"
+APP_VERSION_FALLBACK = "3.9.0"
 
 
 def app_version():
@@ -1455,6 +1455,24 @@ def _find_proxy_outbound(config):
     return None
 
 
+def _xhttp_extra(settings):
+    """Параметр extra ссылки: настройки xhttp, кроме host, path и mode.
+
+    Так ссылку собирают сами панели. Xray, найдя в xhttpSettings поле extra,
+    берёт из него всё, кроме host, path и mode, а остальные поля пропускает,
+    поэтому extra из конфига идёт как есть, а без него идут поля верхнего
+    уровня. Без этого параметра терялись бы, например, xPaddingBytes и
+    downloadSettings, а decode-link их читает.
+    """
+    extra = settings.get('extra')
+    if not isinstance(extra, dict):
+        extra = {k: v for k, v in settings.items()
+                 if k not in ('host', 'path', 'mode', 'extra') and v not in (None, '', {}, [])}
+    if not extra:
+        return None
+    return json.dumps(extra, ensure_ascii=False, separators=(',', ':'))
+
+
 def xray_outbound_to_uri(config, outbound):
     """Полный конфиг Xray/V2Ray -> URI.
 
@@ -1467,7 +1485,7 @@ def xray_outbound_to_uri(config, outbound):
     reality = stream.get('realitySettings') or {}
     ws = stream.get('wsSettings') or {}
     grpc = stream.get('grpcSettings') or {}
-    xhttp = stream.get('xhttpSettings') or {}
+    xhttp = stream.get('xhttpSettings') or stream.get('splithttpSettings') or {}
     httpupgrade = stream.get('httpupgradeSettings') or {}
     tcp = stream.get('tcpSettings') or {}
 
@@ -1487,6 +1505,7 @@ def xray_outbound_to_uri(config, outbound):
         'path': xhttp.get('path') or ws.get('path') or httpupgrade.get('path') or None,
         'host': xhttp.get('host') or (ws.get('headers') or {}).get('Host') or ws.get('host') or None,
         'mode': xhttp.get('mode'),
+        'extra': _xhttp_extra(xhttp) if network in ('xhttp', 'splithttp') else None,
         'serviceName': grpc.get('serviceName'),
         'headerType': (tcp.get('header') or {}).get('type'),
     }
@@ -1836,7 +1855,8 @@ class LinkValidationError(Exception):
 # вообще; на неизвестном transport он всего лишь пишет в лог «Unknown
 # transport» и собирает outbound без транспорта, то есть обычный TCP. Такой
 # конфиг sing-box check проходит успешно, а узел не работает и молча висит в
-# URLTest. Поймать это можно только до конвертации.
+# URLTest. Поймать это можно только до конвертации. Ключи с xhttp Podkop
+# разбирает не этим конвертером, для них ниже отдельная ветка.
 VALID_TRANSPORTS = {'', 'tcp', 'raw', 'ws', 'grpc'}
 # Tachyon converts links itself (subscription/parser.uc) and knows more
 # transports than Podkop. xhttp is not in upstream sing-box: Tachyon only
@@ -1844,14 +1864,23 @@ VALID_TRANSPORTS = {'', 'tcp', 'raw', 'ws', 'grpc'}
 # tag), and so do we, otherwise the key would pass here and break the config.
 TACHYON_TRANSPORTS = VALID_TRANSPORTS | {'http', 'h2', 'httpupgrade'}
 TARGET = {'title': 'Podkop', 'transports': VALID_TRANSPORTS, 'xhttp': False}
+SING_BOX_VERSION = {}
+
+
+def sing_box_version_text():
+    """Вывод «sing-box version»: один запуск на весь прогон, и только по нужде."""
+    if 'text' not in SING_BOX_VERSION:
+        try:
+            SING_BOX_VERSION['text'] = subprocess.run(
+                ['sing-box', 'version'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                encoding='utf-8', errors='replace', timeout=15).stdout or ''
+        except Exception:
+            SING_BOX_VERSION['text'] = ''
+    return SING_BOX_VERSION['text']
 
 
 def sing_box_supports_xhttp():
-    try:
-        out = subprocess.run(['sing-box', 'version'], stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True, timeout=15).stdout
-    except Exception:
-        return False
+    out = sing_box_version_text()
     first = out.split('\n', 1)[0]
     if re.search(r'-(extended|lx)\b', first):
         return True
@@ -1867,6 +1896,112 @@ def set_link_target(config_path):
     TARGET['transports'] = TACHYON_TRANSPORTS | ({'xhttp'} if xhttp else set())
 VALID_SECURITY = {'', 'none', 'tls', 'reality'}
 SUPPORTED_SCHEMES = {'vless', 'ss', 'trojan', 'socks4', 'socks4a', 'socks5', 'hy2', 'hysteria2'}
+
+# xhttp своим конвертером Podkop не разбирает. С 0.7.23 ссылку vless или
+# trojan с type=xhttp или splithttp он целиком отдаёт «sing-box tools
+# decode-link» и кладёт в конфиг напечатанный outbound. Эта команда есть только
+# в podkop-engine (в «sing-box version» строка Features: с tools.decode-link).
+# Без неё Podkop на первом же таком ключе пишет fatal и выходит, и точно так же
+# он выходит на ключе, который decode-link не принял. Поэтому xhttp-ключ
+# пропускается, только когда умеют оба, и outbound для sing-box check берётся
+# от того же decode-link.
+PODKOP_FACADE_PATH = '/usr/lib/podkop/sing_box_config_facade.sh'
+PODKOP_DECODED_TRANSPORTS = ('xhttp', 'splithttp')
+# Как url_get_query_param в helpers.sh Podkop: последний type= в ссылке без
+# фрагмента, без раскодирования и с учётом регистра.
+PODKOP_TYPE_PARAM_RE = re.compile(r'.*[?&]type=([^&?#]*)', re.S)
+DECODE_LINK_TIMEOUT = 15
+PODKOP_XHTTP = {}
+DECODED_LINKS = {}
+
+
+def podkop_decoded_transport(link):
+    """'xhttp' или 'splithttp', если Podkop отдаст ссылку decode-link, иначе ''.
+
+    Решение повторяет case в sing_box_cf_add_proxy_outbound. Наш разбор
+    запроса для него не годится: он берёт первое значение и приводит его к
+    нижнему регистру, а type=XHTTP Podkop понесёт в свой конвертер, и тот
+    соберёт обычный TCP.
+    """
+    link = str(link or '')
+    if link.split('://', 1)[0] not in ('vless', 'trojan'):
+        return ''
+    m = PODKOP_TYPE_PARAM_RE.match(link.split('#', 1)[0])
+    if m and m.group(1) in PODKOP_DECODED_TRANSPORTS:
+        return m.group(1)
+    return ''
+
+
+def podkop_xhttp_blocker():
+    """'' если Podkop и sing-box вместе собирают xhttp, иначе причина отказа.
+
+    Считается при первом xhttp-ключе, так что прогоны без них лишний раз
+    sing-box не запускают.
+    """
+    if 'reason' not in PODKOP_XHTTP:
+        PODKOP_XHTTP['reason'] = _podkop_xhttp_blocker()
+    return PODKOP_XHTTP['reason']
+
+
+def _podkop_xhttp_blocker():
+    try:
+        with open(PODKOP_FACADE_PATH, encoding='utf-8', errors='replace') as f:
+            facade = f.read()
+    except OSError:
+        facade = ''
+    if 'decode-link' not in facade or 'xhttp' not in facade:
+        return 'xhttp_unsupported_podkop'
+    # Как sing_box_has_feature в helpers.sh Podkop: список через запятую из
+    # строки Features:, имя сравнивается целиком.
+    for line in sing_box_version_text().splitlines():
+        if line.startswith('Features:'):
+            if 'tools.decode-link' in line[len('Features:'):].strip().split(','):
+                return ''
+            break
+    return 'xhttp_needs_podkop_engine'
+
+
+def decode_link_outbound(link, tag):
+    """Outbound, который Podkop соберёт из ссылки через decode-link.
+
+    Результат запоминается: один ключ проверяется и формально, и в каждом
+    запуске sing-box check, а на слабом роутере каждый запуск sing-box заметен.
+    """
+    if link not in DECODED_LINKS:
+        DECODED_LINKS[link] = _run_decode_link(link)
+    outbound, reason, detail = DECODED_LINKS[link]
+    if reason:
+        raise LinkValidationError(reason, detail)
+    # Podkop делает то же самое: $raw_outbound + {tag: $tag}.
+    return dict(outbound, tag=tag)
+
+
+def _run_decode_link(link):
+    try:
+        result = subprocess.run(
+            ['sing-box', 'tools', 'decode-link', '--compact', link],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding='utf-8', errors='replace', timeout=DECODE_LINK_TIMEOUT)
+    except FileNotFoundError:
+        return None, 'singbox_not_found', ''
+    except (OSError, subprocess.SubprocessError):
+        return None, 'decode_link_failed', 'sing-box не ответил'
+    messages = [ln.strip() for ln in (result.stderr or '').splitlines() if ln.strip()]
+    if result.returncode != 0:
+        detail = messages[0] if messages else f'код {result.returncode}'
+        return None, 'decode_link_failed', re.sub(r'^error:\s*', '', detail)
+    try:
+        outbound = json.loads(result.stdout or '')
+    except ValueError:
+        outbound = None
+    if not isinstance(outbound, dict) or not outbound.get('type'):
+        return None, 'decode_link_failed', 'sing-box не вернул outbound'
+    # С предупреждениями Podkop ключ всё равно собирает и пишет их в лог при
+    # каждом запуске: так decode-link называет то, чего outbound не сделает.
+    name = link_name(link)
+    for message in messages:
+        log('DEBUG', 'decode-link' + (f" ({name})" if name else '') + f": {message}")
+    return outbound, '', ''
 
 
 def validation_reason_text(reason):
@@ -1892,6 +2027,9 @@ def validation_reason_text(reason):
         'normalized_missing_transport': 'добавлен type=tcp для совместимости с Podkop'
     }
     mapping['xhttp_unsupported_singbox'] = 'xhttp не поддерживается установленным sing-box (нужен extended или lx)'
+    mapping['xhttp_unsupported_podkop'] = 'xhttp собирает только Podkop 0.7.23 и новее с podkop-engine'
+    mapping['xhttp_needs_podkop_engine'] = 'Podkop собирает xhttp только с podkop-engine'
+    mapping['decode_link_failed'] = 'не принял sing-box decode-link'
     return mapping.get(reason, reason or 'неизвестная ошибка').replace('Podkop', TARGET['title'])
 
 
@@ -2208,6 +2346,13 @@ def normalize_link_for_podkop(link):
     return link, ''
 
 def proxy_link_to_singbox_outbound(link, tag):
+    transport = podkop_decoded_transport(link) if TARGET['title'] == 'Podkop' else ''
+    if transport:
+        blocker = podkop_xhttp_blocker()
+        if blocker:
+            raise LinkValidationError(blocker, transport)
+        return decode_link_outbound(link, tag)
+
     parts = _parse_link_parts(link)
     scheme = parts['scheme']
     host = parts['host']

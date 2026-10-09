@@ -312,12 +312,10 @@ def test_podkop_conversion_limits():
 
     # sing-box такой transport умеет, а конвертер Podkop про него не знает и
     # собрал бы обычный TCP, поэтому ключ отбраковывается до конвертации.
-    xhttp = f'vless://{uuid}@node.example.net:443?type=xhttp&security=tls&sni=example.net#Узел'
-    check('xhttp отбраковывается с указанием значения',
-          reject_reason(xhttp) == ('unsupported_transport', 'xhttp'), str(reject_reason(xhttp)))
-
+    # xhttp проверяется отдельно, в test_podkop_xhttp.
     upgrade = f'vless://{uuid}@node.example.net:443?type=httpupgrade&security=tls&sni=example.net#Узел'
-    check('httpupgrade отбраковывается', reject_reason(upgrade) == ('unsupported_transport', 'httpupgrade'))
+    check('httpupgrade отбраковывается с указанием значения',
+          reject_reason(upgrade) == ('unsupported_transport', 'httpupgrade'), str(reject_reason(upgrade)))
 
     # Неизвестная схема роняет podkop целиком, это самый дорогой случай.
     vmess = 'vmess://eyJhZGQiOiJub2RlLmV4YW1wbGUubmV0In0=#Узел'
@@ -373,6 +371,166 @@ def test_tachyon_conversion_limits():
         u.sing_box_supports_xhttp = original
         u.TARGET.clear()
         u.TARGET.update(saved)
+
+
+def test_podkop_xhttp():
+    """xhttp Podkop 0.7.23 отдаёт sing-box decode-link, и только с podkop-engine.
+
+    Без движка или на ключе, который decode-link не принял, Podkop выходит с
+    fatal, поэтому такие ключи не должны доходить до конфига.
+    """
+    print('xhttp в Podkop')
+    import tempfile
+
+    uuid = '00000000-0000-4000-8000-000000000001'
+    base = f'vless://{uuid}@node.example.net:443?security=tls&sni=example.net'
+    xhttp = base + '&type=xhttp&path=%2Fx#Узел'
+    split = 'trojan://secret@node.example.net:443?type=splithttp&security=tls#Узел'
+    vision = base + '&type=xhttp&flow=xtls-rprx-vision#Узел'
+    upper = base + '&type=XHTTP#Узел'
+    last_wins = base + '&type=ws&type=xhttp#Узел'
+    in_name = base + '&type=ws#type=xhttp'
+
+    calls = []
+
+    def fake_decode(link):
+        calls.append(link)
+        if 'flow=' in link:
+            return None, 'decode_link_failed', 'flow xtls-rprx-vision is not supported over the xhttp transport'
+        return {'type': 'vless', 'tag': 'имя из ссылки', 'transport': {'type': 'xhttp'}}, '', ''
+
+    def outcome(link):
+        try:
+            return None, u.proxy_link_to_singbox_outbound(link, 'тест')
+        except u.LinkValidationError as e:
+            return (e.reason, e.detail), None
+
+    def setup(facade_text, version_text):
+        with open(facade, 'w', encoding='utf-8') as f:
+            f.write(facade_text)
+        u.sing_box_version_text = lambda: version_text
+        u.PODKOP_XHTTP.clear()
+        u.DECODED_LINKS.clear()
+        del calls[:]
+
+    old_facade = 'case "$transport" in\nws) ;;\ngrpc) ;;\nesac\n'
+    new_facade = ('xhttp | splithttp)\n    _add_decoded_proxy_outbound "$config" "$section" "$url"\n'
+                  'outbound=$(sing-box tools decode-link --compact "$url" 2> "$messages")\n')
+    stock = 'sing-box version 1.12.22\n\nEnvironment: go1.24\nTags: with_quic,with_utls\n'
+    engine = ('sing-box version 1.13.21-pdk-r12\n\nTags: with_quic,with_utls,podkop_slim\n'
+              'Features: urltest.fallbacks,urltest.download_url,transport.xhttp,tools.decode-link\n')
+
+    saved = (u.PODKOP_FACADE_PATH, u.sing_box_version_text, u._run_decode_link)
+    with tempfile.TemporaryDirectory() as tmp:
+        facade = os.path.join(tmp, 'sing_box_config_facade.sh')
+        try:
+            u.PODKOP_FACADE_PATH = facade
+            u._run_decode_link = fake_decode
+
+            setup(old_facade, engine)
+            check('Podkop до 0.7.23 xhttp не собирает',
+                  outcome(xhttp)[0] == ('xhttp_unsupported_podkop', 'xhttp'), str(outcome(xhttp)[0]))
+
+            setup(new_facade, stock)
+            check('без podkop-engine ключ отбракован',
+                  outcome(split)[0] == ('xhttp_needs_podkop_engine', 'splithttp'), str(outcome(split)[0]))
+            check('и до decode-link не дошёл', not calls, str(calls))
+            check('причина называет podkop-engine',
+                  'podkop-engine' in u.validation_reason_text('xhttp_needs_podkop_engine'))
+
+            setup(new_facade, engine)
+            reason, outbound = outcome(xhttp)
+            check('с podkop-engine xhttp проходит', reason is None, str(reason))
+            check('outbound взят у decode-link, тег наш',
+                  outbound == {'type': 'vless', 'tag': 'тест', 'transport': {'type': 'xhttp'}}, str(outbound))
+            outcome(xhttp)
+            check('decode-link запускается один раз на ключ', calls.count(xhttp) == 1, str(len(calls)))
+            check('splithttp тоже идёт через decode-link', outcome(split)[0] is None and split in calls)
+            check('ключ, который decode-link не принял, отбракован',
+                  (outcome(vision)[0] or ('',))[0] == 'decode_link_failed')
+            check('type=XHTTP Podkop понесёт в свой конвертер, поэтому отбракован',
+                  outcome(upper)[0] == ('unsupported_transport', 'xhttp'), str(outcome(upper)[0]))
+            check('решает последний type=, как у Podkop',
+                  outcome(last_wins)[0] is None and last_wins in calls)
+            check('type= в имени ключа не считается', outcome(in_name)[0] is None and in_name not in calls)
+
+            u.TARGET['title'] = 'Tachyon'
+            del calls[:]
+            outcome(xhttp)
+            check('для Tachyon decode-link не используется', not calls, str(calls))
+        finally:
+            u.TARGET['title'] = 'Podkop'
+            u.PODKOP_FACADE_PATH, u.sing_box_version_text, u._run_decode_link = saved
+            u.PODKOP_XHTTP.clear()
+            u.DECODED_LINKS.clear()
+
+
+def test_decode_link_runner():
+    """Разбор ответа decode-link: код возврата, JSON, error: и warning:."""
+    print('Запуск sing-box decode-link')
+    import stat
+    import tempfile
+
+    script = '''#!/bin/sh
+[ "$1 $2 $3" = "tools decode-link --compact" ] || exit 1
+case "$4" in
+*flow=*) echo "error: flow xtls-rprx-vision is not supported over the xhttp transport" >&2; exit 2 ;;
+*broken*) echo "not json"; exit 0 ;;
+*ech=*) echo "warning: ech is not supported and is ignored" >&2 ;;
+esac
+echo '{"type":"vless","tag":"x","server":"node.example.net","transport":{"type":"xhttp"}}'
+'''
+    old_path = os.environ.get('PATH', '')
+    with tempfile.TemporaryDirectory() as tmp:
+        binary = os.path.join(tmp, 'sing-box')
+        with open(binary, 'w') as f:
+            f.write(script)
+        os.chmod(binary, stat.S_IRWXU)
+        os.environ['PATH'] = tmp + os.pathsep + old_path
+        try:
+            link = 'vless://00000000-0000-4000-8000-000000000001@node.example.net:443?type=xhttp'
+            outbound, reason, _ = u._run_decode_link(link + '#ok')
+            check('outbound разобран', reason == '' and outbound.get('transport') == {'type': 'xhttp'},
+                  str((outbound, reason)))
+            outbound, reason, _ = u._run_decode_link(link + '&ech=AEX#warn')
+            check('warning ключ не отбраковывает', reason == '' and outbound.get('type') == 'vless')
+            outbound, reason, detail = u._run_decode_link(link + '&flow=xtls-rprx-vision#bad')
+            check('код 2 отбраковывает ключ с текстом ошибки',
+                  outbound is None and reason == 'decode_link_failed'
+                  and detail == 'flow xtls-rprx-vision is not supported over the xhttp transport', detail)
+            outbound, reason, _ = u._run_decode_link(link + '#broken')
+            check('мусор вместо JSON отбраковывает ключ', outbound is None and reason == 'decode_link_failed')
+        finally:
+            os.environ['PATH'] = old_path
+
+
+def test_xray_xhttp_extra():
+    """Настройки xhttp из конфига Xray доезжают до ссылки в параметре extra."""
+    print('extra у xhttp из конфига Xray')
+    import json
+
+    def link_for(xhttp_settings):
+        config = {'remarks': 'Узел', 'outbounds': [{
+            'tag': 'proxy', 'protocol': 'vless',
+            'settings': {'vnext': [{'address': 'node.example.net', 'port': 443,
+                                    'users': [{'id': '00000000-0000-4000-8000-000000000001'}]}]},
+            'streamSettings': {'network': 'xhttp', 'security': 'tls', 'xhttpSettings': xhttp_settings}}]}
+        return u.xray_outbound_to_uri(config, config['outbounds'][0])
+
+    def extra_of(link):
+        _key, params, _name = parse_link(link)
+        return json.loads(u.unquote_percent(params['extra'])) if 'extra' in params else None
+
+    nested = {'path': '/x', 'mode': 'packet-up', 'xPaddingBytes': '1-2',
+              'extra': {'xPaddingBytes': '100-1000', 'downloadSettings': {'address': 'down.example.net', 'port': 443}}}
+    check('extra из конфига идёт как есть',
+          extra_of(link_for(nested)) == nested['extra'], str(extra_of(link_for(nested))))
+    flat = {'path': '/x', 'host': 'cdn.example.net', 'mode': 'auto', 'xPaddingBytes': '100-1000',
+            'noGRPCHeader': False, 'headers': {}}
+    check('без extra идут поля верхнего уровня, кроме host, path, mode и пустых',
+          extra_of(link_for(flat)) == {'xPaddingBytes': '100-1000', 'noGRPCHeader': False},
+          str(extra_of(link_for(flat))))
+    check('без лишних настроек extra нет', extra_of(link_for({'path': '/x', 'mode': 'auto', 'host': ''})) is None)
 
 
 def test_singbox_check_position():
@@ -543,6 +701,7 @@ def main():
                  test_plain_and_base64,
                  test_refusals, test_domain_expansion, test_fingerprint_headers,
                  test_podkop_conversion_limits, test_tachyon_conversion_limits,
+                 test_podkop_xhttp, test_decode_link_runner, test_xray_xhttp_extra,
                  test_singbox_check_position, test_singbox_hard_validation,
                  test_uci_values, test_tags_follow_podkop, test_expand_budget):
         test()

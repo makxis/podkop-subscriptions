@@ -1,5 +1,27 @@
 # Changelog
 
+## 3.9.0
+
+- xhttp links work with Podkop 0.7.23 and podkop-engine. Podkop 0.7.23 no
+  longer converts vless and trojan links with `type=xhttp` or `splithttp`
+  itself: it hands them to `sing-box tools decode-link`, which only
+  podkop-engine (the sing-box build the Podkop installer offers) has. Without
+  it, or on a link `decode-link` refuses, Podkop stops with a fatal error. The
+  updater used to drop every xhttp link. It now keeps them when Podkop's
+  converter calls `decode-link` and `sing-box version` lists
+  `tools.decode-link` on its `Features:` line, decodes each link with the same
+  command and runs the result through the usual `sing-box check`. Links
+  `decode-link` refuses, such as `flow=xtls-rprx-vision` over xhttp, are
+  dropped with that reason. Which links take this path follows Podkop's own
+  test, the last `type=` before `#`, case-sensitive: `type=XHTTP`, which
+  Podkop would build as plain TCP, is still dropped. Each link is decoded once
+  per run, and `sing-box version` only runs once the first xhttp link shows
+  up.
+- Xray JSON subscriptions keep the xhttp settings other than host, path and
+  mode (`xPaddingBytes`, `downloadSettings` and so on). They go into the
+  link's `extra` parameter, the way panels write it, instead of being lost.
+  Older configs with `splithttpSettings` are read too.
+
 ## 3.8.2
 
 - Sections with capital letters in their name lost their keys. The updater

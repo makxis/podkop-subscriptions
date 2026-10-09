@@ -466,7 +466,7 @@ sh "$(ls -d /root/dnsproxy-backup-* | tail -n 1)/rollback.sh"
 → применить regex
 → удалить дубликаты
 → нормализовать type=tcp для vless/trojan без type
-→ Python-проверка формата
+→ Python-проверка формата (xhttp разбирает sing-box decode-link, как и Podkop)
 → sing-box check на временном конфиге
 → дедупликация SNI / endpoint
 → применить лимиты, ping и fail_count
@@ -484,7 +484,7 @@ sh "$(ls -d /root/dnsproxy-backup-* | tail -n 1)/rollback.sh"
 `отброшено 0` означает, что валидатор и `sing-box check` ключи не резали: значит, ключи потерялись на regex, дедупликации, лимитах или принудительной чистке. Какой ключ и на каком значении отвалился, видно в логе на уровне DEBUG:
 
 ```text
-[x2x]: ключ не для Podkop (🇳🇱 Нидерланды): transport не поддерживается Podkop: xhttp
+[x2x]: ключ не для Podkop (🇳🇱 Нидерланды): transport не поддерживается Podkop: httpupgrade
 ```
 
 **Почему проверок две.** Они отвечают на разные вопросы, и первая не слабее второй.
@@ -493,12 +493,15 @@ sh "$(ls -d /root/dnsproxy-backup-* | tail -n 1)/rollback.sh"
 
 | Ссылка | Podkop | `sing-box check` |
 |---|---|---|
-| `type=xhttp`, `type=httpupgrade` | пишет в лог `Unknown transport 'xhttp' detected.` и собирает outbound **без транспорта**, то есть обычный TCP | проходит успешно |
+| `type=httpupgrade`, а до Podkop 0.7.23 и `type=xhttp` | пишет в лог `Unknown transport 'httpupgrade' detected.` и собирает outbound **без транспорта**, то есть обычный TCP | проходит успешно |
 | `vmess://`, `tuic://` | `Unsupported proxy vmess type. Aborted.` и выход с ошибкой | проверять нечего |
+| `type=xhttp` в Podkop 0.7.23 без podkop-engine | `The xhttp transport is not supported by the installed sing-box ... Aborted.` и выход с ошибкой | проверять нечего |
 
 В первом случае ключ молча превращается в нерабочий узел, который честно висит в URLTest, а конфиг при этом валиден и вторую проверку проходит. Во втором один такой ключ оставляет роутер вообще без proxy. Поймать оба случая можно только до конвертации.
 
 Вторая проверка ловит то, что до конвертации не видно: неизвестный метод шифрования у shadowsocks, reality без uTLS и прочее, что вылезает при разборе готового конфига. Заодно первая проверка и строит конфиг для второй: `sing-box check` читает JSON, а не ссылки.
+
+**xhttp.** С версии 0.7.23 ключи vless и trojan с `type=xhttp` или `splithttp` Podkop своим конвертером не разбирает, а отдаёт команде `sing-box tools decode-link`. Она есть только в podkop-engine, сборке sing-box, которую предлагает поставить установщик Podkop (в выводе `sing-box version` у неё строка `Features:` с `tools.decode-link`). Апдейтер поступает так же. Если и Podkop, и sing-box это умеют, xhttp-ключ разбирается тем же `decode-link` и проходит обычный `sing-box check`. Ключ, который `decode-link` не принял, отбрасывается: на нём Podkop остановился бы целиком. Если не умеет хотя бы один из двух, xhttp-ключи отбрасываются с причиной «xhttp собирает только Podkop 0.7.23 и новее с podkop-engine» или «Podkop собирает xhttp только с podkop-engine».
 
 </details>
 
@@ -752,9 +755,9 @@ ubus call service list | grep -A 6 podkop_subscriptions
 
 ```text
 OpenWrt:         24.10.3–24.10.6; 25.12.4
-Podkop:          v0.7.17–v0.7.19; v0.7.22
-LuCI App Podkop: v0.7.17–v0.7.19; v0.7.22
-sing-box:        1.12.17; 1.12.22
+Podkop:          v0.7.17–v0.7.19; v0.7.22–v0.7.23
+LuCI App Podkop: v0.7.17–v0.7.19; v0.7.22–v0.7.23
+sing-box:        1.12.17; 1.12.22; podkop-engine 1.13.21-pdk-r12
 ```
 
 Tachyon: проверено на 1.4.3 (OpenWrt 24.10.7, sing-box 1.12.22). Апдейтер переключается на него сам, особенности описаны в справочнике.
