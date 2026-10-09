@@ -148,6 +148,8 @@ wget -O /tmp/podkop-sub-upgrade.sh https://raw.githubusercontent.com/makxis/podk
 
 Конфиг подписок, свои ключи и `state.json` не трогаются. Панель обновляется так же, как была поставлена: скрытая остаётся скрытой, видимая видимой. Показать скрытую панель можно только явно, флагом `--with-panel-visible`.
 
+Перед обновлением установщик сохраняет архив прежней версии вместе с конфигами и состоянием: `/root/podkop-subscriptions-upgrade-backup-<дата>.tar.gz`. Хранятся три последних.
+
 ## Удалить
 
 ```sh
@@ -333,7 +335,7 @@ grep -E 'podkop-sub-health|podkop-sub-updater|podkop-sub-catchup' /etc/crontabs/
 ls -la /tmp/podkop-sub-updater.lock /tmp/podkop-sub-updater.flock
 ```
 
-Код выхода `75` означает, что блокировка была занята дольше 300 секунд.
+Код выхода `75` означает, что блокировка была занята дольше 300 секунд. Если фоновый запуск умер, не сняв свою блокировку (например, его убил OOM), она снимается сама при следующем вызове `podkop-sub-run-now`, в том числе по кнопке в LuCI.
 
 **Страница LuCI не открывается после установки.** Сбросьте кэш:
 
@@ -602,6 +604,8 @@ server.example.com:8443    ← оба сохраняются
 
 Ключей становится заметно больше, так что лимит `max_links` выбирается быстрее.
 
+На DNS тратится не больше 30 секунд на источник: если резолвер отвечает медленно, оставшиеся домены не разворачиваются, а в логе появляется предупреждение.
+
 Опция включена по умолчанию, в том числе для конфигов, где её нет вовсе. Выключается явным `option expand_domain_ips '0'` в группе или снятой галкой в LuCI, и это сохраняется при следующих обновлениях.
 
 </details>
@@ -719,12 +723,14 @@ ubus call service list | grep -A 6 podkop_subscriptions
 | `/etc/config/podkop_subscriptions` | Главный конфиг: группы подписок, источники, фильтры, лимиты, расписание. |
 | `/etc/config/podkop` | Родной конфиг Podkop. Updater читает из него секции и пишет туда итоговые ключи. |
 | `/etc/podkop-subscriptions/local-links` | Свои ключи, по одному на строку. Защищены от автоматической чистки. |
-| `/etc/podkop-subscriptions/state.json` | Служебное состояние: `fail_count`, последний статус, catch-up и retry, недавно удалённые ключи. |
+| `/etc/podkop-subscriptions/state.json` | Служебное состояние: `fail_count`, последний статус, catch-up и retry, недавно удалённые ключи. Хранит только ключи, которые сейчас есть в конфиге. |
+| `/etc/podkop-subscriptions/podkop.bak` | Копия конфига Podkop перед последней записью updater (для Tachyon `tachyon.bak`). |
 | `/tmp/podkop-sub-updater.log` | Лог последнего ручного запуска (`podkop-sub-run-now` или кнопка в LuCI). |
 | `/tmp/podkop-sub-updater.status` | Машиночитаемый статус ручного запуска для LuCI. |
 | `/tmp/podkop-sub-updater.flock` | Общая блокировка всех путей запуска updater. |
 | `/etc/init.d/podkop_subscriptions` | procd: синхронизирует cron по событию `config.change` и запускает catch-up после загрузки роутера. |
 | `/usr/share/podkop-subscriptions/VERSION` | Установленная версия. |
+| `/root/podkop-subscriptions-upgrade-backup-<дата>.tar.gz` | Архив перед обновлением программы: прежние файлы, конфиги, состояние. Хранятся три последних. |
 
 </details>
 

@@ -150,6 +150,8 @@ wget -O /tmp/podkop-sub-upgrade.sh https://raw.githubusercontent.com/makxis/podk
 
 The subscriptions config, your own links and `state.json` are left alone. The panel is upgraded the way it was installed: a hidden one stays hidden, a visible one stays visible. Only `--with-panel-visible` brings a hidden panel back into the menu.
 
+Before upgrading, the installer saves an archive of the previous version together with the configs and state: `/root/podkop-subscriptions-upgrade-backup-<date>.tar.gz`. The three newest are kept.
+
 ## Uninstall
 
 ```sh
@@ -335,7 +337,7 @@ grep -E 'podkop-sub-health|podkop-sub-updater|podkop-sub-catchup' /etc/crontabs/
 ls -la /tmp/podkop-sub-updater.lock /tmp/podkop-sub-updater.flock
 ```
 
-Exit code `75` means the lock stayed busy for more than 300 seconds.
+Exit code `75` means the lock stayed busy for more than 300 seconds. If a background run died without releasing its lock (say, killed by the OOM killer), the lock is cleared on the next call to `podkop-sub-run-now`, including the button in LuCI.
 
 **The LuCI page does not open after installation.** Clear the caches:
 
@@ -604,6 +606,8 @@ Only the host is substituted. `sni`, `host` and the remaining parameters keep po
 
 The number of links grows noticeably, so the `max_links` cap fills up sooner.
 
+DNS gets at most 30 seconds per source: if the resolver is slow, the remaining domains are left unexpanded and the log says so.
+
 The option is on by default, including for configs that do not carry it at all. Turn it off with an explicit `option expand_domain_ips '0'` in the group, or by clearing the checkbox in LuCI; that choice survives later upgrades.
 
 </details>
@@ -721,12 +725,14 @@ The `/tmp/podkop-sub-updater.lock` directory in `podkop-sub-run-now` only report
 | `/etc/config/podkop_subscriptions` | Main config: subscription groups, sources, filters, limits, schedule. |
 | `/etc/config/podkop` | Native Podkop config. The updater reads sections from it and writes the final links back. |
 | `/etc/podkop-subscriptions/local-links` | Your own links, one per line. Protected from automatic pruning. |
-| `/etc/podkop-subscriptions/state.json` | Service state: `fail_count`, last status, catch-up and retry, recently removed links. |
+| `/etc/podkop-subscriptions/state.json` | Service state: `fail_count`, last status, catch-up and retry, recently removed links. Only keeps links that are in the config now. |
+| `/etc/podkop-subscriptions/podkop.bak` | Copy of the Podkop config before the updater's last write (`tachyon.bak` for Tachyon). |
 | `/tmp/podkop-sub-updater.log` | Log of the last manual run (`podkop-sub-run-now` or the LuCI button). |
 | `/tmp/podkop-sub-updater.status` | Machine-readable manual-run status for LuCI. |
 | `/tmp/podkop-sub-updater.flock` | Shared lock across all updater execution paths. |
 | `/etc/init.d/podkop_subscriptions` | procd: syncs cron on `config.change` and runs the post-boot catch-up. |
 | `/usr/share/podkop-subscriptions/VERSION` | Installed version. |
+| `/root/podkop-subscriptions-upgrade-backup-<date>.tar.gz` | Archive taken before a program upgrade: previous files, configs, state. The three newest are kept. |
 
 </details>
 
