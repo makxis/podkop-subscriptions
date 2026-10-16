@@ -168,7 +168,7 @@ sh /tmp/podkop-sub-uninstall.sh --purge-config
 
 A separate script, not directly related to subscriptions. It installs AdGuard dnsproxy on `127.0.0.10:53`: DNS queries go out encrypted to several independent DoH servers at once and the first answer wins, and if all of them are unreachable, the query falls back to plain DNS. The config is lean on purpose: without HTTP/3 and its own cache, dnsproxy takes a few megabytes of RAM.
 
-The script has its own version numbering. It prints the installed version at the end of the run, as `Версия установщика: 1.9.0`.
+The script has its own version numbering. It prints the installed version at the end of the run, as `Версия установщика: 1.9.1`.
 
 ```sh
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh

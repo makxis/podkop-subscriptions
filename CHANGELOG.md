@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+`install-dnsproxy.sh` is fetched from `main` directly, so this change is live
+as soon as it is pushed.
+
+- `install-dnsproxy.sh` (installer 1.9.0 -> 1.9.1) wrote a single upstream on
+  a fresh install. The `dnsproxy` package ships its own template with
+  `tls://1.1.1.1` as upstream, `tls://8.8.8.8` as bootstrap and
+  `tls://9.9.9.9` as fallback, and the installer kept it as if someone had
+  chosen those servers, instead of writing the four default DoH upstreams.
+  That exact template is no longer treated as a previous choice. Seen on
+  dnsproxy 0.75.0-r1 from OpenWrt 24.10.8. A router already set up this way
+  gets the default list with `--reset-servers`.
+
 ## 3.9.0
 
 - xhttp links work with Podkop 0.7.23 and podkop-engine. Podkop 0.7.23 no

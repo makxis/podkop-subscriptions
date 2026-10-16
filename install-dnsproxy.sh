@@ -21,7 +21,7 @@
 
 set -eu
 
-SCRIPT_VERSION="1.9.0"
+SCRIPT_VERSION="1.9.1"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
@@ -646,6 +646,14 @@ OLD_UPSTREAM=""
 OLD_PLAIN=""
 if [ "$KEEP_SERVERS" = "1" ] && [ -f /etc/config/dnsproxy ]; then
     OLD_UPSTREAM="$(uci -q get dnsproxy.servers.upstream 2>/dev/null || true)"
+    # Свежеустановленный пакет кладёт свой шаблон с этими тремя адресами.
+    # Это не чей-то выбор, и сохранять его — оставить один upstream вместо
+    # списка по умолчанию.
+    if [ "$OLD_UPSTREAM" = "tls://1.1.1.1" ] && \
+       [ "$(uci -q get dnsproxy.servers.bootstrap 2>/dev/null || true)" = "tls://8.8.8.8" ] && \
+       [ "$(uci -q get dnsproxy.servers.fallback 2>/dev/null || true)" = "tls://9.9.9.9" ]; then
+        OLD_UPSTREAM=""
+    fi
     if [ -n "$OLD_UPSTREAM" ]; then
         OLD_PLAIN="$(uci -q get dnsproxy.servers.bootstrap 2>/dev/null || true) $(uci -q get dnsproxy.servers.fallback 2>/dev/null || true)"
         log "Сохраняю ранее настроенные upstream (--reset-servers, чтобы сбросить)"
