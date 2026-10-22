@@ -1,9 +1,26 @@
 # Changelog
 
-## Unreleased
+## 3.9.1
 
-`install-dnsproxy.sh` is fetched from `main` directly, so this change is live
-as soon as it is pushed.
+`install.sh` and `install-dnsproxy.sh` are fetched from `main` directly, so
+these changes reach a router as soon as they are pushed and the installer is
+run again.
+
+- The updater stopped fetching every subscription when `curl` was installed
+  but could not start. After `opkg upgrade curl` the binary can be newer than
+  `libcurl4`, which opkg leaves alone because the dependency carries no
+  version, and every call dies at load time with `Error relocating
+  /usr/bin/curl: curl_multi_notify_enable: symbol not found`. The updater
+  only checked that the file exists, so it retried curl three times per
+  source and left the keys unchanged. It now runs `curl --version` once per
+  run and, if that fails, fetches with `wget` (`uclient-fetch`, which does
+  not use libcurl), logging the error and suggesting
+  `opkg upgrade libcurl4`. The fingerprint is approximate on that path, as on
+  routers without curl.
+- `install.sh` now checks the same thing and repairs it: if `curl --version`
+  fails, it runs `opkg update` and `opkg upgrade curl libcurl4` (`apk upgrade`
+  on apk systems) so both come from the feed at one version, and warns if curl
+  still does not start. The installer never touches curl when it works.
 
 - `install-dnsproxy.sh` (installer 1.9.0 -> 1.9.1) wrote a single upstream on
   a fresh install. The `dnsproxy` package ships its own template with

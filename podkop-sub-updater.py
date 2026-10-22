@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.9.0"
+APP_VERSION_FALLBACK = "3.9.1"
 
 
 def app_version():
@@ -1084,8 +1084,42 @@ def resolve_fingerprint(fingerprints, name, config_path):
     return headers
 
 
+CURL_PROBE_TIMEOUT = 10
+CURL_STATUS = {}
+
+
 def have_curl():
-    return os.path.exists('/usr/bin/curl') or os.path.exists('/bin/curl')
+    return curl_status()[0]
+
+
+def curl_status():
+    """(работает ли curl, почему нет). Пустая причина значит, что curl не стоит.
+
+    Наличия файла мало. После «opkg upgrade curl» бинарник бывает новее
+    libcurl4: зависимость указана без версии, и opkg библиотеку не трогает.
+    Такой curl падает ещё при загрузке с «Error relocating ... symbol not
+    found», и все подписки разом переставали обновляться, хотя рядом был
+    рабочий wget. Поэтому curl один раз пробуется через --version.
+    """
+    if 'ok' not in CURL_STATUS:
+        CURL_STATUS['ok'], CURL_STATUS['reason'] = _probe_curl()
+    return CURL_STATUS['ok'], CURL_STATUS['reason']
+
+
+def _probe_curl():
+    if not (os.path.exists('/usr/bin/curl') or os.path.exists('/bin/curl')):
+        return False, ''
+    try:
+        result = subprocess.run(['curl', '--version'], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, timeout=CURL_PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, f"curl --version не ответил за {CURL_PROBE_TIMEOUT}s"
+    except OSError as e:
+        return False, str(e)
+    if result.returncode != 0:
+        detail = ' '.join((result.stderr or result.stdout).split())
+        return False, detail or f"curl --version завершился с кодом {result.returncode}"
+    return True, ''
 
 
 def build_fetch_command(source, pairs, timeout):
@@ -4502,8 +4536,13 @@ def main():
         else:
             log("INFO", f"Профиль запроса подписок встроенный: {SUBSCRIPTION_USER_AGENT}, {SUBSCRIPTION_DEVICE_OS}, {SUBSCRIPTION_VER_OS}, {SUBSCRIPTION_DEVICE_MODEL}")
         # Значение X-HWID в лог не пишется: по нему панель опознаёт устройство.
-        if have_curl():
+        curl_ok, curl_broken = curl_status()
+        if curl_ok:
             log("INFO", "Загрузчик подписок: curl (заголовки уходят в заданном порядке и регистре)")
+        elif curl_broken:
+            log("WARN", f"curl установлен, но не запускается: {curl_broken}")
+            log("WARN", "Загрузчик подписок: wget, отпечаток приблизительный. Обычно curl новее libcurl4; "
+                        "почините: opkg update && opkg upgrade libcurl4")
         else:
             log("INFO", "Загрузчик подписок: wget. Он ставит User-Agent последним и своим написанием; "
                         "для точного совпадения с настоящим клиентом поставьте curl: opkg install curl")

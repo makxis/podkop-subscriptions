@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.9.0"
+APP_VERSION="3.9.1"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
@@ -154,6 +154,38 @@ ensure_python() {
     apk add python3-light ca-bundle || apk add python3 ca-bundle || fail "cannot install python3"
   else
     fail "python3 is required, but neither opkg nor apk was found"
+  fi
+}
+
+# curl бывает новее libcurl4: пакет curl зависит от неё без версии, поэтому
+# «opkg install curl» или «opkg upgrade curl» обновляют только сам curl. Такой
+# curl падает при запуске с «Error relocating ... symbol not found», и updater
+# не может загрузить ни одной подписки, а Podkop без curl работает с ошибками.
+# Сам установщик curl не трогает, но поломку дешевле найти и починить здесь,
+# чем потом гадать по логу, почему подписки перестали обновляться.
+curl_broken() {
+  command -v curl >/dev/null 2>&1 || return 1
+  ! curl --version >/dev/null 2>&1
+}
+
+ensure_curl_works() {
+  curl_broken || return 0
+  warn "curl установлен, но не запускается: $(curl --version 2>&1 | head -n 1)"
+  if command -v opkg >/dev/null 2>&1; then
+    libs="$(opkg list-installed 2>/dev/null | awk '/^libcurl/ {print $1}')"
+    say "Обновляю curl и ${libs:-libcurl4} до одной версии..."
+    opkg update || warn "opkg update завершился с ошибкой; обновляю с тем, что есть"
+    opkg upgrade curl ${libs:-libcurl4} || true
+  elif command -v apk >/dev/null 2>&1; then
+    say "Обновляю curl и libcurl до одной версии..."
+    apk update || warn "apk update завершился с ошибкой; обновляю с тем, что есть"
+    apk upgrade curl libcurl4 || apk upgrade curl || true
+  fi
+  if curl_broken; then
+    warn "curl по-прежнему не запускается. Подписки будут загружаться через wget с приблизительным отпечатком."
+    warn "Сравните версии: opkg list-installed | grep curl (или apk info -v | grep curl). Они должны совпадать."
+  else
+    say "curl снова работает: $(curl --version | head -n 1)"
   fi
 }
 
@@ -543,6 +575,7 @@ install_core() {
     say "Installing Podkop subscription updater from local package: $SCRIPT_DIR"
   fi
   ensure_python
+  ensure_curl_works
   # Архив снимается до того, как новые файлы лягут на место: раньше он
   # делался уже после копирования и хранил новую версию программ вместо
   # прежней, так что откатиться по нему было нельзя.
