@@ -503,6 +503,8 @@ sh "$(ls -d /root/dnsproxy-backup-* | tail -n 1)/rollback.sh"
 
 **xhttp.** С версии 0.7.23 ключи vless и trojan с `type=xhttp` или `splithttp` Podkop своим конвертером не разбирает, а отдаёт команде `sing-box tools decode-link`. Она есть только в podkop-engine, сборке sing-box, которую предлагает поставить установщик Podkop (в выводе `sing-box version` у неё строка `Features:` с `tools.decode-link`). Апдейтер поступает так же. Если и Podkop, и sing-box это умеют, xhttp-ключ разбирается тем же `decode-link` и проходит обычный `sing-box check`. Ключ, который `decode-link` не принял, отбрасывается: на нём Podkop остановился бы целиком. Если не умеет хотя бы один из двух, xhttp-ключи отбрасываются с причиной «xhttp собирает только Podkop 0.7.23 и новее с podkop-engine» или «Podkop собирает xhttp только с podkop-engine».
 
+**Podkop 0.8 (podkop-exp).** [podkop-experimental](https://github.com/podkop-net/podkop-experimental) ставится вместо Podkop 0.7, оставляет его `/etc/config/podkop` и ту же схему секций, но это уже один бинарник `/usr/bin/podkop` с sing-box внутри: ни конвертера-скрипта, ни отдельного sing-box (podkop-engine установщик удаляет). Апдейтер узнаёт его сам (`/usr/bin/podkop` не начинается с `#!`) и проверяет ключи командой `podkop check_links`, которая отвечает ровно так, как ключ примет движок этой сборки. Поэтому таблица выше и `sing-box check` к нему не относятся: xhttp, httpupgrade и прочее, что умеет движок, проходят, а отброшенные ключи пишутся в лог с причиной от самого Podkop. Если `check_links` не ответил, ключи проверяются как для Podkop 0.7.
+
 </details>
 
 <details>
@@ -759,6 +761,8 @@ Podkop:          v0.7.17–v0.7.19; v0.7.22–v0.7.23
 LuCI App Podkop: v0.7.17–v0.7.19; v0.7.22–v0.7.23
 sing-box:        1.12.17; 1.12.22; podkop-engine 1.13.21-pdk-r12
 ```
+
+podkop-exp: проверено на v0.8.4 (OpenWrt 24.10.5 x86_64).
 
 Tachyon: проверено на 1.4.3 (OpenWrt 24.10.7, sing-box 1.12.22). Апдейтер переключается на него сам, особенности описаны в справочнике.
 

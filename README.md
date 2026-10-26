@@ -505,6 +505,8 @@ The second check catches what conversion hides: an unknown shadowsocks method, r
 
 **xhttp.** Since 0.7.23, Podkop does not run vless and trojan links with `type=xhttp` or `splithttp` through its own converter. It hands them to `sing-box tools decode-link`, which only podkop-engine has: the sing-box build the Podkop installer offers, whose `sing-box version` prints a `Features:` line with `tools.decode-link`. The updater does the same. When both Podkop and sing-box support it, an xhttp link is decoded by the same `decode-link` and then goes through the usual `sing-box check`. A link that `decode-link` refuses is dropped, because Podkop would stop on it entirely. When either of the two lacks support, xhttp links are dropped with a reason saying which one.
 
+**Podkop 0.8 (podkop-exp).** [podkop-experimental](https://github.com/podkop-net/podkop-experimental) replaces Podkop 0.7 and keeps its `/etc/config/podkop` and section schema, but it is a single `/usr/bin/podkop` binary with sing-box built in: there is no converter script and no separate sing-box (its installer removes podkop-engine). The updater detects it on its own (`/usr/bin/podkop` does not start with `#!`) and validates links with `podkop check_links`, which answers exactly as the engine of that build will take each link. The table above and `sing-box check` do not apply to it: xhttp, httpupgrade and anything else the engine supports pass, and dropped links are logged with Podkop's own reason. If `check_links` does not answer, links are validated as for Podkop 0.7.
+
 </details>
 
 <details>
@@ -761,6 +763,8 @@ Podkop:          v0.7.17–v0.7.19; v0.7.22–v0.7.23
 LuCI App Podkop: v0.7.17–v0.7.19; v0.7.22–v0.7.23
 sing-box:        1.12.17; 1.12.22; podkop-engine 1.13.21-pdk-r12
 ```
+
+podkop-exp: tested on v0.8.4 (OpenWrt 24.10.5 x86_64).
 
 Tachyon: tested on 1.4.3 (OpenWrt 24.10.7, sing-box 1.12.22). The updater switches to it on its own; the details are in the reference.
 

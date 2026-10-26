@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.9.1"
+APP_VERSION_FALLBACK = "3.10.0"
 
 
 def app_version():
@@ -1897,7 +1897,7 @@ VALID_TRANSPORTS = {'', 'tcp', 'raw', 'ws', 'grpc'}
 # accepts it when the installed build has it (extended/lx, or a with_xhttp
 # tag), and so do we, otherwise the key would pass here and break the config.
 TACHYON_TRANSPORTS = VALID_TRANSPORTS | {'http', 'h2', 'httpupgrade'}
-TARGET = {'title': 'Podkop', 'transports': VALID_TRANSPORTS, 'xhttp': False}
+TARGET = {'title': 'Podkop', 'transports': VALID_TRANSPORTS, 'xhttp': False, 'check_links': False}
 SING_BOX_VERSION = {}
 
 
@@ -1923,6 +1923,7 @@ def sing_box_supports_xhttp():
 
 def set_link_target(config_path):
     if config_backend(config_path) != 'tachyon':
+        TARGET['check_links'] = podkop_is_backend_binary()
         return
     xhttp = sing_box_supports_xhttp()
     TARGET['title'] = 'Tachyon'
@@ -2038,6 +2039,95 @@ def _run_decode_link(link):
     return outbound, '', ''
 
 
+# Podkop 0.8 (podkop-exp из podkop-net/podkop-experimental) — уже не скрипт, а
+# один бинарник /usr/bin/podkop с sing-box внутри. Ни конвертера
+# sing_box_config_facade.sh, ни отдельного sing-box у него нет (podkop-engine
+# при установке удаляется), так что проверка для Podkop 0.7 отбросила бы все
+# ключи как «sing-box не найден». Зато есть «podkop check_links»: на каждый
+# ключ он отвечает {ok, error} ровно так, как его примет движок этой сборки.
+# Отличаем по тому же признаку, что и установщик podkop-exp: у 0.7 в начале
+# файла «#!».
+PODKOP_BINARY_PATH = '/usr/bin/podkop'
+CHECK_LINKS_TIMEOUT = 120
+# Ключи идут аргументами: один запуск на пачку, чтобы не упереться в лимит
+# длины командной строки на длинных подписках.
+CHECK_LINKS_BATCH_BYTES = 64 * 1024
+
+
+def podkop_is_backend_binary():
+    try:
+        with open(PODKOP_BINARY_PATH, 'rb') as f:
+            head = f.read(2)
+    except OSError:
+        return False
+    return len(head) == 2 and head != b'#!'
+
+
+def run_podkop_check_links(links):
+    """([(ok, error), ...] по ключам, число запусков) или None, если podkop
+    check_links не ответил."""
+    results = []
+    batch, size = [], 0
+    batches = []
+    for link in links:
+        if batch and size + len(link) > CHECK_LINKS_BATCH_BYTES:
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(link)
+        size += len(link) + 1
+    if batch:
+        batches.append(batch)
+    for batch in batches:
+        try:
+            result = subprocess.run(
+                [PODKOP_BINARY_PATH, 'check_links'] + batch,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                encoding='utf-8', errors='replace', timeout=CHECK_LINKS_TIMEOUT)
+            answer = json.loads(result.stdout or '')
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        if not isinstance(answer, list) or len(answer) != len(batch):
+            return None
+        for item in answer:
+            if not isinstance(item, dict):
+                return None
+            results.append((item.get('ok') is True, str(item.get('error') or '')))
+    return results, len(batches)
+
+
+def validate_links_with_podkop_check_links(sec, links):
+    """Проверка ключей самим Podkop 0.8; None, если check_links недоступен."""
+    links, _dups = dedupe_links_keep_order(list(links or []))
+    answer = run_podkop_check_links(links)
+    if answer is None:
+        return None
+    results, runs = answer
+    valid = []
+    errors = {}
+    for link, (ok, error) in zip(links, results):
+        if ok:
+            valid.append(link)
+            continue
+        errors[error] = errors.get(error, 0) + 1
+        name = link_name(link)
+        log('DEBUG', f"[{sec}]: podkop check_links не принял ключ"
+                     + (f" ({name})" if name else '') + (f": {error}" if error else ''))
+    rejected = len(links) - len(valid)
+    stats = {
+        'input': len(links),
+        'formal_ok': len(links),
+        'rejected': rejected,
+        'rejected_by_reason': {'check_links_rejected': rejected} if rejected else {},
+        'singbox_runs': runs,
+        'hard_rejected': rejected,
+        'hard_check_ok': len(valid) > 0,
+    }
+    log('INFO', f"[{sec}]: проверка ключей podkop check_links: принято {len(valid)}, отброшено {rejected}")
+    for error, count in sorted(errors.items(), key=lambda kv: -kv[1]):
+        log('WARN', f"[{sec}]: {error or 'без причины'}: {count}")
+    return valid, stats
+
+
 def validation_reason_text(reason):
     mapping = {
         'invalid_url': 'некорректная ссылка',
@@ -2064,6 +2154,7 @@ def validation_reason_text(reason):
     mapping['xhttp_unsupported_podkop'] = 'xhttp собирает только Podkop 0.7.23 и новее с podkop-engine'
     mapping['xhttp_needs_podkop_engine'] = 'Podkop собирает xhttp только с podkop-engine'
     mapping['decode_link_failed'] = 'не принял sing-box decode-link'
+    mapping['check_links_rejected'] = 'не принял podkop check_links'
     return mapping.get(reason, reason or 'неизвестная ошибка').replace('Podkop', TARGET['title'])
 
 
@@ -2647,6 +2738,11 @@ def validate_links_for_podkop_singbox(sec, links):
         'hard_rejected': 0,
         'hard_check_ok': False,
     }
+    if TARGET['check_links']:
+        checked = validate_links_with_podkop_check_links(sec, links)
+        if checked is not None:
+            return checked
+        log('WARN', f"[{sec}]: podkop check_links не ответил, ключи проверяются как для Podkop 0.7")
     formally_ok = []
     normalized_count = 0
     for link in links or []:

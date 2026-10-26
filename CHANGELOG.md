@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.10.0
+
+- Works with Podkop 0.8 ([podkop-exp](https://github.com/podkop-net/podkop-experimental)).
+  It keeps `/etc/config/podkop` and the section schema, but `/usr/bin/podkop`
+  is a binary with sing-box built in, and its installer removes
+  podkop-engine. The updater validated links with `sing-box check`, so with
+  no `sing-box` on the router every link was refused as "sing-box не найден"
+  and no section was ever updated; with a leftover `sing-box` package, xhttp
+  and httpupgrade links were still dropped by the Podkop 0.7 rules. When
+  `/usr/bin/podkop` is not a script, links are now validated with
+  `podkop check_links`, which answers as that build's engine will take each
+  link; rejected links are logged with its reason. If the command does not
+  answer, the Podkop 0.7 validation is used as before. Podkop 0.7 and
+  Tachyon are unchanged.
+
 ## 3.9.1
 
 `install.sh` and `install-dnsproxy.sh` are fetched from `main` directly, so

@@ -696,6 +696,66 @@ def test_expand_budget():
         u.resolve_ipv4, u.EXPAND_RESOLVE_BUDGET_SECONDS = original_resolve, original_budget
 
 
+def test_podkop_check_links():
+    """Podkop 0.8 (бинарник) проверяет ключи сам; у 0.7 (скрипт) всё по-старому."""
+    print('Podkop 0.8: podkop check_links')
+    import stat
+    import tempfile
+
+    # Отвечает как podkop-exp 0.8.4: JSON-массив по ключу на аргумент.
+    script = '''#!/bin/sh
+[ "$1" = check_links ] || exit 1
+shift
+printf '['
+sep=
+for link; do
+  case "$link" in
+  *type=foo*) printf '%s{"ok":false,"error":"unsupported transport: foo"}' "$sep" ;;
+  *) printf '%s{"ok":true}' "$sep" ;;
+  esac
+  sep=,
+done
+printf ']\\n'
+'''
+    uuid = '00000000-0000-4000-8000-000000000001'
+    xhttp = f'vless://{uuid}@node.example.net:443?type=xhttp&security=tls#x'
+    upgrade = f'vless://{uuid}@node.example.net:443?type=httpupgrade&security=tls#hu'
+    bad = f'vless://{uuid}@node.example.net:443?type=foo#bad'
+    saved = (u.PODKOP_BINARY_PATH, u.CHECK_LINKS_BATCH_BYTES, dict(u.TARGET))
+    with tempfile.TemporaryDirectory() as tmp:
+        binary = os.path.join(tmp, 'podkop')
+        try:
+            u.PODKOP_BINARY_PATH = binary
+            check('без /usr/bin/podkop check_links не включается', not u.podkop_is_backend_binary())
+            with open(binary, 'w') as f:
+                f.write(script)
+            os.chmod(binary, stat.S_IRWXU)
+            check('скрипт Podkop 0.7 не считается бинарником', not u.podkop_is_backend_binary())
+            u.set_link_target('/etc/config/podkop')
+            check('для Podkop 0.7 check_links выключен', u.TARGET['check_links'] is False)
+
+            # Скрипт «#!» нужен только для подмены ответа; признак 0.8 — его отсутствие.
+            u.podkop_is_backend_binary = lambda: True
+            u.set_link_target('/etc/config/podkop')
+            check('для Podkop 0.8 check_links включён', u.TARGET['check_links'] is True)
+            u.CHECK_LINKS_BATCH_BYTES = 120
+            valid, stats = u.validate_links_for_podkop_singbox('main', [xhttp, upgrade, bad, xhttp])
+            check('xhttp и httpupgrade приняты, битый отброшен, дубль убран',
+                  valid == [xhttp, upgrade], str(valid))
+            check('статистика', stats['rejected'] == 1 and stats['hard_check_ok']
+                  and stats['rejected_by_reason'] == {'check_links_rejected': 1}, str(stats))
+            check('длинный список идёт пачками', stats['singbox_runs'] >= 2, str(stats['singbox_runs']))
+
+            with open(binary, 'w') as f:
+                f.write('#!/bin/sh\necho "unknown command" >&2\nexit 1\n')
+            check('без check_links ответа нет', u.run_podkop_check_links([xhttp]) is None)
+        finally:
+            u.PODKOP_BINARY_PATH, u.CHECK_LINKS_BATCH_BYTES = saved[0], saved[1]
+            u.TARGET.clear()
+            u.TARGET.update(saved[2])
+            del u.podkop_is_backend_binary
+
+
 def main():
     for test in (test_clash_matches_reference, test_xray_configs, test_xray_hysteria, test_trojan_and_ss,
                  test_plain_and_base64,
@@ -703,7 +763,8 @@ def main():
                  test_podkop_conversion_limits, test_tachyon_conversion_limits,
                  test_podkop_xhttp, test_decode_link_runner, test_xray_xhttp_extra,
                  test_singbox_check_position, test_singbox_hard_validation,
-                 test_uci_values, test_tags_follow_podkop, test_expand_budget):
+                 test_uci_values, test_tags_follow_podkop, test_expand_budget,
+                 test_podkop_check_links):
         test()
         print()
     if failures:
