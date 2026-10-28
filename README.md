@@ -168,7 +168,7 @@ sh /tmp/podkop-sub-uninstall.sh --purge-config
 
 A separate script, not directly related to subscriptions. It installs AdGuard dnsproxy on `127.0.0.10:53`: DNS queries go out encrypted to several independent DoH servers at once and the first answer wins, and if all of them are unreachable, the query falls back to plain DNS. The config is lean on purpose: without HTTP/3 and its own cache, dnsproxy takes a few megabytes of RAM.
 
-The script has its own version numbering. It prints the installed version at the end of the run, as `Версия установщика: 1.9.1`.
+The script has its own version numbering. It prints the installed version at the end of the run, as `Версия установщика: 1.9.2`.
 
 ```sh
 wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install-dnsproxy.sh && sh /tmp/install-dnsproxy.sh
@@ -217,7 +217,7 @@ wget -O /tmp/install-dnsproxy.sh https://raw.githubusercontent.com/makxis/podkop
 - **Sections the script does not own are kept**, such as the presets of newer `luci-app-dnsproxy` versions (`config profile 'preset_…'`). The assembled config is parsed by `uci` before it replaces the live one.
 - **The run ends** with the running dnsproxy's command line and memory. A few megabytes of RSS is the expected figure right after a fresh start. If memory keeps growing to 50–100 MB over time, that is a leak worth investigating, not a reason to add swap.
 - **`luci-app-trafficctl` is removed when SQM is enabled**: its HTB/IFB shaping on top of SQM/CAKE limited traffic a second time. Without SQM the package stays and the script only warns.
-- **The web interface**, `luci-app-dnsproxy`, is installed last, once DNS is configured and verified, and only if it is not there yet. A failure there is only a warning: DNS works without the panel. For x86 the `x86_64` directory of Fantastic Packages is tried as well, since the package is built as `_all` and does not depend on the architecture.
+- **The web interface**, `luci-app-dnsproxy`, is installed last, once DNS is configured and verified, and only if it is not there yet. A failure there is only a warning: DNS works without the panel. For x86 the `x86_64` directory of Fantastic Packages is tried as well, since the package is built as `_all` and does not depend on the architecture. OpenWrt branches that Fantastic Packages has moved off its site into the archive (24.10 and older) are taken from the `archive/<branch>` branch of their repository. If the panel still fails to install, a line at the very end of the output says so, after the `--test-servers` table.
 - Works with both opkg (OpenWrt 24.10 and older) and apk (25.12 and newer). The branch and architecture come from `/etc/openwrt_release`; if detection fails, set them with `--release` and `--arch`.
 
 </details>

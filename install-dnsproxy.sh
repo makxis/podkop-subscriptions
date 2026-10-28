@@ -4,7 +4,8 @@
 # Что делает:
 #   1. Определяет ветку OpenWrt, менеджер пакетов (apk или opkg) и архитектуру.
 #   2. Устанавливает dnsproxy из штатного репозитория OpenWrt.
-#   3. Скачивает подходящий luci-app-dnsproxy из Fantastic Packages.
+#   3. Скачивает подходящий luci-app-dnsproxy из Fantastic Packages
+#      (для веток, ушедших в архив, например 24.10, — из архивной ветки).
 #   4. Настраивает dnsproxy на 127.0.0.10:53.
 #   5. Проверяет обычные DNS из servers.txt (1.1.1.1, 8.8.8.8 и др.) и пишет
 #      в bootstrap и fallback 4 ответивших разных операторов.
@@ -21,8 +22,9 @@
 
 set -eu
 
-SCRIPT_VERSION="1.9.1"
+SCRIPT_VERSION="1.9.2"
 FANTASTIC_ROOT="https://fantastic-packages.github.io/releases"
+FANTASTIC_ARCHIVE_ROOT="https://raw.githubusercontent.com/fantastic-packages/releases/archive"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
@@ -373,17 +375,24 @@ arch_candidates() {
     esac
 }
 
-detect_package_arch() {
-    seen=""
-    for arch in $(arch_candidates); do
-        case " $seen " in *" $arch "*) continue ;; esac
-        seen="$seen $arch"
-        # index.json отдают обе ветки репозитория, поэтому проверка одна.
-        if wget -q -O "$TMP_DIR/index-$arch.json" \
-            "$FANTASTIC_ROOT/$OPENWRT_SERIES/packages/$arch/luci/index.json"; then
-            printf '%s\n' "$arch"
-            return 0
-        fi
+# Ветки, у которых закончилась поддержка OpenWrt, Fantastic Packages убирает с
+# сайта в ветку archive/<ветка> своего репозитория (24.10 — с сентября 2026).
+# Раскладка там та же, packages/<архитектура>/luci/, но без префикса ветки, и
+# отдаёт её raw.githubusercontent.com. Без второго адреса на 24.10 веб-интерфейс
+# не ставился вовсе, хотя сам dnsproxy вставал и работал.
+detect_luci_base() {
+    for root in "$FANTASTIC_ROOT/$OPENWRT_SERIES/packages" \
+                "$FANTASTIC_ARCHIVE_ROOT/$OPENWRT_SERIES/packages"; do
+        seen=""
+        for arch in $(arch_candidates); do
+            case " $seen " in *" $arch "*) continue ;; esac
+            seen="$seen $arch"
+            # index.json отдают обе ветки репозитория, поэтому проверка одна.
+            if wget -q -O "$TMP_DIR/luci-index.json" "$root/$arch/luci/index.json"; then
+                printf '%s\n' "$root/$arch/luci"
+                return 0
+            fi
+        done
     done
     return 1
 }
@@ -417,17 +426,16 @@ lookup_index_version() {
 # Fantastic Packages обрывало скрипт после установки dnsproxy, но до записи
 # конфига, и роутер оставался с пакетом без настройки.
 install_luci_package() {
-    if ! PACKAGE_ARCH="$(detect_package_arch)"; then
-        warn "Fantastic Packages не содержит LuCI-пакеты для архитектур этого роутера (ветка $OPENWRT_SERIES)"
+    if ! LUCI_BASE="$(detect_luci_base)"; then
+        warn "Fantastic Packages не содержит LuCI-пакеты для архитектур этого роутера (ветка $OPENWRT_SERIES, ни на сайте, ни в архиве)"
         return 1
     fi
-    LUCI_BASE="$FANTASTIC_ROOT/$OPENWRT_SERIES/packages/$PACKAGE_ARCH/luci"
-    log "Каталог LuCI-пакетов: $PACKAGE_ARCH"
+    log "Каталог LuCI-пакетов: $LUCI_BASE"
 
     if [ "$PKG_MANAGER" = "apk" ]; then
         # У apk индекс packages.adb бинарный, поэтому имя файла собирается
         # из версии в index.json: <имя>-<версия>.apk.
-        index_file="$TMP_DIR/index-$PACKAGE_ARCH.json"
+        index_file="$TMP_DIR/luci-index.json"
         if [ ! -s "$index_file" ]; then
             if ! wget -q -O "$index_file" "$LUCI_BASE/index.json"; then
                 warn "Не удалось скачать индекс Fantastic Packages: $LUCI_BASE"
@@ -453,7 +461,7 @@ install_luci_package() {
             fi
         fi
 
-        packages_gz="$TMP_DIR/Packages-$PACKAGE_ARCH.gz"
+        packages_gz="$TMP_DIR/Packages.gz"
         if ! wget -q -O "$packages_gz" "$LUCI_BASE/Packages.gz"; then
             warn "Не удалось скачать индекс Fantastic Packages: $LUCI_BASE"
             return 1
@@ -981,6 +989,7 @@ luci_app_present() {
 # Повторный запуск не перекачивает уже стоящий веб-интерфейс: это лишние
 # загрузки и записи во флеш, а нового он ничего не даёт.
 LUCI_INSTALLED=0
+LUCI_FAILED=0
 if [ "$INSTALL_PACKAGES" = "1" ] && [ "$INSTALL_LUCI" = "1" ]; then
     if luci_app_present; then
         log "luci-app-dnsproxy уже установлен"
@@ -997,6 +1006,7 @@ if [ "$INSTALL_PACKAGES" = "1" ] && [ "$INSTALL_LUCI" = "1" ]; then
             /etc/init.d/rpcd restart >/dev/null 2>&1 || true
             /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
         else
+            LUCI_FAILED=1
             warn "Не удалось установить luci-app-dnsproxy"
             warn "DNS настроен и продолжит работать без веб-интерфейса"
         fi
@@ -1164,6 +1174,14 @@ if [ "$TEST_SERVERS" = "1" ]; then
             sh "$TEST_DOH_PATH" "$SERVERS_LIST_PATH" || warn "Тест серверов завершился с ошибкой"
         fi
     fi
+fi
+
+# Предупреждение о веб-интерфейсе печатается в середине вывода, и с
+# --test-servers его уносит таблицей теста: DNS работает, а куда делась
+# панель — не видно. Поэтому оно повторяется здесь, перед инструкцией.
+if [ "$LUCI_FAILED" = "1" ]; then
+    warn "Веб-интерфейс luci-app-dnsproxy не установлен, причина — выше и в $LOG_FILE"
+    warn "DNS работает и без него; повторный запуск скрипта попробует поставить его снова"
 fi
 
 # Инструкция печатается последней, чтобы остаться на экране: сам по себе

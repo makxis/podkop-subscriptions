@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+`install-dnsproxy.sh` is fetched from `main` directly, so this change is live
+as soon as it is pushed.
+
+- `install-dnsproxy.sh` (installer 1.9.1 -> 1.9.2) no longer installed the
+  `luci-app-dnsproxy` web interface on OpenWrt 24.10, while dnsproxy itself
+  was installed and worked. Fantastic Packages has moved 24.10 off
+  `fantastic-packages.github.io/releases` into the `archive/24.10` branch of
+  its repository (23.05 went the same way), so every index URL returned 404.
+  When the site has no directory for the router's branch, the installer now
+  takes the package from
+  `raw.githubusercontent.com/fantastic-packages/releases/archive/<branch>/packages/<arch>/luci/`,
+  which has the same layout. The failure was easy to miss: its warning was
+  printed mid-run, and `--test-servers` pushed it off the screen with its
+  table. If the web interface is not installed, that is now repeated at the
+  very end of the output, before the Podkop instructions. Checked on OpenWrt
+  24.10.5 x86/64 with `--test-servers`. A router left without the panel gets
+  it by running the installer again.
+
 ## 3.10.0
 
 - Works with Podkop 0.8 ([podkop-exp](https://github.com/podkop-net/podkop-experimental)).
