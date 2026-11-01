@@ -373,6 +373,61 @@ def test_tachyon_conversion_limits():
         u.TARGET.update(saved)
 
 
+def test_tachyon_core_engine():
+    """Ядро Tachyon: tachyon-core вместо sing-box и xhttp по профилю ядра."""
+    import stat
+    import tempfile
+    print('Ядро tachyon-core')
+    saved_target, saved_cache = dict(u.TARGET), dict(u.SING_BOX_VERSION)
+    saved_text = u.sing_box_version_text
+    try:
+        for text, expected in (
+                ('tachyon-core 0.2.9\n', True),
+                ('sing-box version 1.13.21\n\nEnvironment: go1.26.10 linux/arm64\n', False),
+                ('sing-box version 1.13.0-tachyon.4\n', True),
+                ('sing-box version 1.14.1-extended-2\n', True),
+                ('sing-box version 1.14.1-extended-compressed-2\n', True),
+                ('sing-box version 1.14.2-lx.12\n', True),
+                ('sing-box version 1.13.21\nTags: with_quic,with_xhttp\n', True),
+                ('', False)):
+            u.sing_box_version_text = lambda text=text: text
+            got = u.sing_box_supports_xhttp()
+            check(f'xhttp для «{text.splitlines()[0] if text else "нет ответа"}»: {expected}', got == expected, str(got))
+    finally:
+        u.sing_box_version_text = saved_text
+
+    old_path = os.environ.get('PATH', '')
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, 'calls')
+        core = os.path.join(tmp, 'tachyon-core')
+        with open(core, 'w') as f:
+            f.write('#!/bin/sh\necho "$0 $*" >> ' + log + '\n'
+                    '[ "$1" = version ] && echo "tachyon-core 0.2.9"\nexit 0\n')
+        os.chmod(core, stat.S_IRWXU)
+        try:
+            os.environ['PATH'] = os.pathsep.join(('/nonexistent', '/usr/bin', '/bin'))
+            check('без tachyon-core в PATH берётся sing-box', u.tachyon_core_binary() == 'sing-box')
+            os.environ['PATH'] = tmp + os.pathsep + old_path
+            u.SING_BOX_VERSION.clear()
+            u.set_link_target('/etc/config/tachyon')
+            check('Tachyon проверяет ключи через tachyon-core', u.core_binary() == 'tachyon-core', u.core_binary())
+            check('на tachyon-core xhttp разрешён', u.TARGET['xhttp'] and 'xhttp' in u.TARGET['transports'])
+            ok, reason, _ = u.run_singbox_check_for_links(
+                ['vless://00000000-0000-4000-8000-000000000001@node.example.net:443?type=tcp#A'])
+            with open(log) as f:
+                calls = f.read()
+            check('sing-box check запущен у tachyon-core', ok and ' -c ' in calls and calls.rstrip().endswith('check'),
+                  calls + reason)
+            u.set_link_target('/etc/config/podkop')
+            check('Podkop по-прежнему проверяет через sing-box', u.core_binary() == 'sing-box')
+        finally:
+            os.environ['PATH'] = old_path
+            u.TARGET.clear()
+            u.TARGET.update(saved_target)
+            u.SING_BOX_VERSION.clear()
+            u.SING_BOX_VERSION.update(saved_cache)
+
+
 def test_podkop_xhttp():
     """xhttp Podkop 0.7.23 отдаёт sing-box decode-link, и только с podkop-engine.
 
@@ -939,7 +994,7 @@ def main():
                  test_plain_and_base64,
                  test_refusals, test_domain_expansion, test_fingerprint_headers,
                  test_podkop_conversion_limits, test_tachyon_conversion_limits,
-                 test_podkop_xhttp, test_decode_link_runner, test_xray_xhttp_extra,
+                 test_tachyon_core_engine, test_podkop_xhttp, test_decode_link_runner, test_xray_xhttp_extra,
                  test_singbox_check_position, test_singbox_hard_validation,
                  test_uci_values, test_uci_open_quote, test_rewrite_keeps_neighbours,
                  test_regex_filter, test_write_config_atomic,

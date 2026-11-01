@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.10.1"
+APP_VERSION_FALLBACK = "3.10.2"
 
 
 def app_version():
@@ -1945,36 +1945,65 @@ VALID_TRANSPORTS = {'', 'tcp', 'raw', 'ws', 'grpc'}
 # accepts it when the installed build has it (extended/lx, or a with_xhttp
 # tag), and so do we, otherwise the key would pass here and break the config.
 TACHYON_TRANSPORTS = VALID_TRANSPORTS | {'http', 'h2', 'httpupgrade'}
-TARGET = {'title': 'Podkop', 'transports': VALID_TRANSPORTS, 'xhttp': False, 'check_links': False}
+# С 1.5.16 движок Tachyon называется tachyon-core. Это либо его собственное
+# ядро на Rust, либо симлинк на sing-box, а /usr/bin/sing-box бывает обратным
+# симлинком или отсутствует. Tachyon запускает и проверяет конфиг тем, что
+# найдёт первым (command -v tachyon-core || command -v sing-box), мы так же.
+TACHYON_CORE_BINARY = 'tachyon-core'
+TARGET = {'title': 'Podkop', 'transports': VALID_TRANSPORTS, 'xhttp': False, 'check_links': False,
+          'core': 'sing-box'}
 SING_BOX_VERSION = {}
 
 
+def core_binary():
+    """Бинарник, которым проверяются ключи и спрашивается версия ядра."""
+    return TARGET.get('core') or 'sing-box'
+
+
+def tachyon_core_binary():
+    for directory in os.environ.get('PATH', '/usr/sbin:/usr/bin:/sbin:/bin').split(os.pathsep):
+        path = os.path.join(directory or '.', TACHYON_CORE_BINARY)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return TACHYON_CORE_BINARY
+    return 'sing-box'
+
+
 def sing_box_version_text():
-    """Вывод «sing-box version»: один запуск на весь прогон, и только по нужде."""
-    if 'text' not in SING_BOX_VERSION:
+    """Вывод «<ядро> version»: один запуск на весь прогон, и только по нужде."""
+    binary = core_binary()
+    if binary not in SING_BOX_VERSION:
         try:
-            SING_BOX_VERSION['text'] = subprocess.run(
-                ['sing-box', 'version'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            SING_BOX_VERSION[binary] = subprocess.run(
+                [binary, 'version'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 encoding='utf-8', errors='replace', timeout=15).stdout or ''
         except Exception:
-            SING_BOX_VERSION['text'] = ''
-    return SING_BOX_VERSION['text']
+            SING_BOX_VERSION[binary] = ''
+    return SING_BOX_VERSION[binary]
 
 
 def sing_box_supports_xhttp():
+    """Как профили ядер в core_profile.uc Tachyon: у lx, extended,
+    extended-compressed и tachyon-core xhttp есть всегда, у обычного sing-box
+    только со сборочным тегом with_xhttp."""
     out = sing_box_version_text()
-    first = out.split('\n', 1)[0]
+    first = out.split('\n', 1)[0].strip()
     if re.search(r'-(extended|lx)\b', first):
+        return True
+    # Ядро Tachyon отвечает «tachyon-core 0.2.9», его сборки sing-box несут
+    # -tachyon. в номере версии.
+    if first.startswith(TACHYON_CORE_BINARY) or '-tachyon.' in first:
         return True
     return 'with_xhttp' in re.split(r'[,:\s]+', out)
 
 
 def set_link_target(config_path):
     if config_backend(config_path) != 'tachyon':
+        TARGET['core'] = 'sing-box'
         TARGET['check_links'] = podkop_is_backend_binary()
         return
-    xhttp = sing_box_supports_xhttp()
     TARGET['title'] = 'Tachyon'
+    TARGET['core'] = tachyon_core_binary()
+    xhttp = sing_box_supports_xhttp()
     TARGET['xhttp'] = xhttp
     TARGET['transports'] = TACHYON_TRANSPORTS | ({'xhttp'} if xhttp else set())
 VALID_SECURITY = {'', 'none', 'tls', 'reality'}
@@ -2198,7 +2227,7 @@ def validation_reason_text(reason):
         'singbox_check_limit': 'превышен лимит sing-box check',
         'normalized_missing_transport': 'добавлен type=tcp для совместимости с Podkop'
     }
-    mapping['xhttp_unsupported_singbox'] = 'xhttp не поддерживается установленным sing-box (нужен extended или lx)'
+    mapping['xhttp_unsupported_singbox'] = 'xhttp не поддерживается установленным ядром (нужен sing-box extended или lx либо tachyon-core)'
     mapping['xhttp_unsupported_podkop'] = 'xhttp собирает только Podkop 0.7.23 и новее с podkop-engine'
     mapping['xhttp_needs_podkop_engine'] = 'Podkop собирает xhttp только с podkop-engine'
     mapping['decode_link_failed'] = 'не принял sing-box decode-link'
@@ -2675,7 +2704,7 @@ def run_singbox_check_for_links(links, timeout=SINGBOX_CHECK_TIMEOUT_DEFAULT):
             f.write('\n')
         try:
             result = subprocess.run(
-                ['sing-box', '-c', tmp_path, 'check'],
+                [core_binary(), '-c', tmp_path, 'check'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

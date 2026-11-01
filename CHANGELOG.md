@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.10.2
+
+- Tachyon with its own tachyon-core engine (the Rust core its README
+  recommends) lost every xhttp link. The updater took xhttp support only from
+  sing-box extended and lx builds, and tachyon-core answers `version` with
+  `tachyon-core 0.2.9`, so such links were dropped as "xhttp не
+  поддерживается установленным sing-box", although Tachyon builds them on
+  that core. Support is now read the way Tachyon's core profiles read it:
+  lx, extended, extended-compressed and tachyon-core always have xhttp, plain
+  sing-box only with the `with_xhttp` build tag.
+- Under Tachyon, links are checked with `tachyon-core` when it exists and with
+  `sing-box` otherwise, as Tachyon does itself. Since 1.5.16 one name can be a
+  symlink to the other, and with the tachyon-core core there may be no real
+  sing-box at all. Podkop is unchanged.
+- Checked on Tachyon 1.7.7 (OpenWrt 25.12.6 aarch64, installed with apk) with
+  sing-box 1.13.21 and with tachyon-core 0.2.9: links are written, URLTest is
+  built, health is read from `tachyon clash_api`, and xhttp links work on
+  tachyon-core. The Tachyon section of the README now describes 1.7's link
+  sources and the copy its migration leaves in `src_links_<section>`, which
+  the updater does not maintain.
+
 ## 3.10.1
 
 `install-dnsproxy.sh` is fetched from `main` directly, so its change below

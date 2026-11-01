@@ -749,9 +749,13 @@ Since 3.8.0 it also works with [Tachyon](https://github.com/Dushnilin/tachyon), 
 - When `/etc/config/podkop` is missing and `/etc/config/tachyon` exists, the updater switches to Tachyon on its own. Cron entries, the panel and the commands in this README stay the same.
 - Links go into the section's `selector_proxy_links` and the section gets `action 'connection'`. Podkop options (`connection_type`, `proxy_config_type`, `urltest_proxy_links`) are not written: Tachyon converts them only when its package is upgraded, and until then the section would have no links.
 - URLTest is a separate `config urltest` section pointing at the target. For `proxy_type 'urltest'` the updater adds a `Fastest` group if there is none; `proxy_type 'selector'` does not delete an existing group, since its settings belong to Tachyon.
-- The link filter follows Tachyon: `http`, `h2` and `httpupgrade` pass, and `xhttp` passes only when the installed sing-box supports it (extended or lx). On a plain build such links are dropped with a reason saying so.
+- The link filter follows Tachyon: `http`, `h2` and `httpupgrade` pass, and `xhttp` passes only when the core supports it: sing-box extended, extended-compressed or lx, or tachyon-core. On a plain sing-box such links are dropped with a reason saying so.
+- Links are checked with the core Tachyon runs the config with: `tachyon-core` when it exists, otherwise `sing-box`. Since 1.5.16 one of the two names can be a symlink to the other, and with the tachyon-core (Rust) core sing-box itself may be missing.
 - Health comes from `tachyon clash_api get_proxies`; after an update `/etc/init.d/tachyon` is restarted.
-- Do not use Tachyon's own `subscription_urls` in the same section: its outbounds shift the `<section>-N-out` numbering and the health check would mix up links.
+- Do not use Tachyon's own `subscription_urls` (in 1.7, a source of the subscription type) in the same section: its outbounds shift the `<section>-N-out` numbering and the health check would mix up links.
+- Since 1.7 Tachyon keeps links in separate sources (`config outbound_source`, the Outbounds tab) that a section refers to. The updater still writes the section's own `selector_proxy_links`: 1.7 takes links from there as well as from the sources, the section's own first. Links added to a source in the Tachyon panel are not seen or touched by the updater, like local ones.
+- When Tachyon is upgraded to 1.7, the migration copies each section's links into a `src_links_<section>` source and also keeps them in the section. The updater does not maintain that copy: a link it removes from the section keeps working through it. If the section's links came only from subscriptions, delete the `<section> (Links)` source in the Outbounds tab; the links in the section itself stay.
+- Tachyon's installer moves `/etc/config/podkop` to `/etc/config/tachyon`. The updater follows on its own, but back up the Podkop config before installing.
 
 </details>
 
@@ -766,7 +770,7 @@ sing-box:        1.12.17; 1.12.22; podkop-engine 1.13.21-pdk-r12
 
 podkop-exp: tested on v0.8.4 (OpenWrt 24.10.5 x86_64).
 
-Tachyon: tested on 1.4.3 (OpenWrt 24.10.7, sing-box 1.12.22). The updater switches to it on its own; the details are in the reference.
+Tachyon: tested on 1.4.3 (OpenWrt 24.10.7, sing-box 1.12.22) and 1.7.7 (OpenWrt 25.12.6 aarch64, sing-box 1.13.21 and tachyon-core 0.2.9). The updater switches to it on its own; the details are in the reference.
 
 ## License
 
