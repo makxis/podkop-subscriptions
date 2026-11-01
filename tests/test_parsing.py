@@ -23,7 +23,16 @@ FIXTURES = os.path.join(ROOT, 'tests', 'fixtures')
 
 spec = importlib.util.spec_from_file_location('updater', os.path.join(ROOT, 'podkop-sub-updater.py'))
 u = importlib.util.module_from_spec(spec)
+# Модули ПО находят ядро через sys.modules, как при обычном импорте.
+sys.modules['updater'] = u
 spec.loader.exec_module(u)
+sb = u.load_backend('singbox')
+pk = u.load_backend('podkop')
+pkx = u.load_backend('podkop_exp')
+ty = u.load_backend('tachyon')
+# Модуль выбирается явно: тест не должен зависеть от того, какое ПО стоит
+# на машине, где его запускают.
+u.select_backend('/etc/config/podkop', 'podkop')
 
 failures = []
 
@@ -298,7 +307,7 @@ def test_podkop_conversion_limits():
 
     def reject_reason(link):
         try:
-            u.proxy_link_to_singbox_outbound(link, 'тест')
+            sb.proxy_link_to_singbox_outbound(link, 'тест')
             return None
         except u.LinkValidationError as e:
             return (e.reason, e.detail)
@@ -339,18 +348,17 @@ def test_tachyon_conversion_limits():
 
     def reject_reason(link):
         try:
-            return None, u.proxy_link_to_singbox_outbound(link, 'тест')
+            return None, sb.proxy_link_to_singbox_outbound(link, 'тест')
         except u.LinkValidationError as e:
             return e.reason, None
 
     uuid = '00000000-0000-4000-8000-000000000001'
     xhttp = f'vless://{uuid}@node.example.net:443?type=xhttp&security=tls&sni=example.net&path=%2Fx&mode=packet-up#Узел'
     upgrade = f'vless://{uuid}@node.example.net:443?type=httpupgrade&security=tls&sni=example.net&path=%2Fu#Узел'
-    saved = dict(u.TARGET)
-    original = u.sing_box_supports_xhttp
+    original = sb.sing_box_supports_xhttp
     try:
-        u.sing_box_supports_xhttp = lambda: False
-        u.set_link_target('/etc/config/tachyon')
+        sb.sing_box_supports_xhttp = lambda: False
+        u.select_backend('/etc/config/tachyon', 'tachyon')
         check('без extended xhttp отбракован с понятной причиной',
               reject_reason(xhttp)[0] == 'xhttp_unsupported_singbox', str(reject_reason(xhttp)[0]))
         check('причина называет sing-box, а не Podkop',
@@ -359,8 +367,8 @@ def test_tachyon_conversion_limits():
         check('сообщения называют Tachyon',
               'Tachyon' in u.validation_reason_text('unsupported_transport'))
 
-        u.sing_box_supports_xhttp = lambda: True
-        u.set_link_target('/etc/config/tachyon')
+        sb.sing_box_supports_xhttp = lambda: True
+        u.select_backend('/etc/config/tachyon', 'tachyon')
         reason, outbound = reject_reason(xhttp)
         transport = (outbound or {}).get('transport') or {}
         check('с extended xhttp проходит', reason is None, str(reason))
@@ -368,9 +376,64 @@ def test_tachyon_conversion_limits():
               transport.get('type') == 'xhttp' and transport.get('mode') == 'packet-up'
               and transport.get('path') == '/x' and transport.get('host') == 'example.net', str(transport))
     finally:
-        u.sing_box_supports_xhttp = original
-        u.TARGET.clear()
-        u.TARGET.update(saved)
+        sb.sing_box_supports_xhttp = original
+        u.select_backend('/etc/config/podkop', 'podkop')
+
+
+def test_backend_modules():
+    """Ядро выбирает модуль ПО, а без модуля не трогает конфиг."""
+    import contextlib
+    import io
+    import json
+    import tempfile
+    print('Модули ПО')
+    check('Tachyon по пути конфига', u.detect_backend('/etc/config/tachyon') == 'tachyon')
+    required = ('NAME', 'TITLE', 'CONFIG_PATH', 'UCI_PACKAGE', 'CLI', 'INIT_SCRIPT', 'configure',
+                'load_sections', 'validate_links', 'rewrite_config', 'apply_uci')
+    for name in ('podkop', 'podkop_exp', 'tachyon'):
+        module = u.load_backend(name)
+        missing = [attr for attr in required if not hasattr(module, attr)]
+        check(f'{name}: контракт модуля выполнен', not missing and module.NAME == name, str(missing))
+        check(f'{name}: установщик знает его зависимости', name in u.BACKEND_MODULES
+              and u.BACKEND_MODULES[name][-1] == name and 'singbox' in u.BACKEND_MODULES[name])
+    try:
+        u.load_backend('forkop')
+        missing_raised = False
+    except u.BackendMissing as e:
+        missing_raised = e.name == 'forkop'
+    check('нет модуля — BackendMissing', missing_raised)
+
+    saved_argv, saved_detect = sys.argv, u.detect_backend
+    with tempfile.TemporaryDirectory() as tmp:
+        config = os.path.join(tmp, 'tachyon')
+        subs = os.path.join(tmp, 'podkop_subscriptions')
+        state = os.path.join(tmp, 'state.json')
+        for path, text in ((config, "config section 'main'\n\tlist selector_proxy_links 'vless://a@h:1#A'\n"),
+                           (subs, "config subscription_group 'main'\n\toption target_section 'main'\n")):
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+        try:
+            out = io.StringIO()
+            sys.argv = ['podkop-sub-updater.py', '--config', config, '--backend-modules']
+            with contextlib.redirect_stdout(out):
+                rc = u.main()
+            check('--backend-modules называет модули Tachyon', rc == 0 and out.getvalue().split() == ['singbox', 'tachyon'],
+                  out.getvalue())
+
+            u.detect_backend = lambda path: 'forkop'
+            sys.argv = ['podkop-sub-updater.py', '--config', config, '--subs', subs, '--state', state]
+            rc = u.main()
+            with open(state, encoding='utf-8') as f:
+                meta = json.load(f).get('meta', {})
+            with open(config, encoding='utf-8') as f:
+                untouched = 'vless://a@h:1#A' in f.read()
+            check('без модуля выход с кодом 3', rc == u.BACKEND_MISSING_EXIT_CODE, str(rc))
+            check('панель увидит причину и команду', meta.get('last_subscription_status') == 'backend_missing'
+                  and 'install.sh' in meta.get('last_subscription_message', ''), str(meta.get('last_subscription_status')))
+            check('конфиг не тронут', untouched)
+        finally:
+            sys.argv, u.detect_backend = saved_argv, saved_detect
+            u.select_backend('/etc/config/podkop', 'podkop')
 
 
 def test_tachyon_core_engine():
@@ -378,8 +441,8 @@ def test_tachyon_core_engine():
     import stat
     import tempfile
     print('Ядро tachyon-core')
-    saved_target, saved_cache = dict(u.TARGET), dict(u.SING_BOX_VERSION)
-    saved_text = u.sing_box_version_text
+    saved_cache = dict(sb.SING_BOX_VERSION)
+    saved_text = sb.sing_box_version_text
     try:
         for text, expected in (
                 ('tachyon-core 0.2.9\n', True),
@@ -390,11 +453,11 @@ def test_tachyon_core_engine():
                 ('sing-box version 1.14.2-lx.12\n', True),
                 ('sing-box version 1.13.21\nTags: with_quic,with_xhttp\n', True),
                 ('', False)):
-            u.sing_box_version_text = lambda text=text: text
-            got = u.sing_box_supports_xhttp()
+            sb.sing_box_version_text = lambda text=text: text
+            got = sb.sing_box_supports_xhttp()
             check(f'xhttp для «{text.splitlines()[0] if text else "нет ответа"}»: {expected}', got == expected, str(got))
     finally:
-        u.sing_box_version_text = saved_text
+        sb.sing_box_version_text = saved_text
 
     old_path = os.environ.get('PATH', '')
     with tempfile.TemporaryDirectory() as tmp:
@@ -406,26 +469,25 @@ def test_tachyon_core_engine():
         os.chmod(core, stat.S_IRWXU)
         try:
             os.environ['PATH'] = os.pathsep.join(('/nonexistent', '/usr/bin', '/bin'))
-            check('без tachyon-core в PATH берётся sing-box', u.tachyon_core_binary() == 'sing-box')
+            check('без tachyon-core в PATH берётся sing-box', ty.tachyon_core_binary() == 'sing-box')
             os.environ['PATH'] = tmp + os.pathsep + old_path
-            u.SING_BOX_VERSION.clear()
-            u.set_link_target('/etc/config/tachyon')
-            check('Tachyon проверяет ключи через tachyon-core', u.core_binary() == 'tachyon-core', u.core_binary())
-            check('на tachyon-core xhttp разрешён', u.TARGET['xhttp'] and 'xhttp' in u.TARGET['transports'])
-            ok, reason, _ = u.run_singbox_check_for_links(
+            sb.SING_BOX_VERSION.clear()
+            u.select_backend('/etc/config/tachyon')
+            check('Tachyon проверяет ключи через tachyon-core', sb.core_binary() == 'tachyon-core', sb.core_binary())
+            check('на tachyon-core xhttp разрешён', 'xhttp' in sb.PROFILE['transports'])
+            ok, reason, _ = sb.run_singbox_check_for_links(
                 ['vless://00000000-0000-4000-8000-000000000001@node.example.net:443?type=tcp#A'])
             with open(log) as f:
                 calls = f.read()
             check('sing-box check запущен у tachyon-core', ok and ' -c ' in calls and calls.rstrip().endswith('check'),
                   calls + reason)
-            u.set_link_target('/etc/config/podkop')
-            check('Podkop по-прежнему проверяет через sing-box', u.core_binary() == 'sing-box')
+            u.select_backend('/etc/config/podkop', 'podkop')
+            check('Podkop по-прежнему проверяет через sing-box', sb.core_binary() == 'sing-box')
         finally:
             os.environ['PATH'] = old_path
-            u.TARGET.clear()
-            u.TARGET.update(saved_target)
-            u.SING_BOX_VERSION.clear()
-            u.SING_BOX_VERSION.update(saved_cache)
+            u.select_backend('/etc/config/podkop', 'podkop')
+            sb.SING_BOX_VERSION.clear()
+            sb.SING_BOX_VERSION.update(saved_cache)
 
 
 def test_podkop_xhttp():
@@ -456,16 +518,16 @@ def test_podkop_xhttp():
 
     def outcome(link):
         try:
-            return None, u.proxy_link_to_singbox_outbound(link, 'тест')
+            return None, sb.proxy_link_to_singbox_outbound(link, 'тест')
         except u.LinkValidationError as e:
             return (e.reason, e.detail), None
 
     def setup(facade_text, version_text):
         with open(facade, 'w', encoding='utf-8') as f:
             f.write(facade_text)
-        u.sing_box_version_text = lambda: version_text
-        u.PODKOP_XHTTP.clear()
-        u.DECODED_LINKS.clear()
+        sb.sing_box_version_text = lambda: version_text
+        pk.PODKOP_XHTTP.clear()
+        pk.DECODED_LINKS.clear()
         del calls[:]
 
     old_facade = 'case "$transport" in\nws) ;;\ngrpc) ;;\nesac\n'
@@ -475,12 +537,12 @@ def test_podkop_xhttp():
     engine = ('sing-box version 1.13.21-pdk-r12\n\nTags: with_quic,with_utls,podkop_slim\n'
               'Features: urltest.fallbacks,urltest.download_url,transport.xhttp,tools.decode-link\n')
 
-    saved = (u.PODKOP_FACADE_PATH, u.sing_box_version_text, u._run_decode_link)
+    saved = (pk.PODKOP_FACADE_PATH, sb.sing_box_version_text, pk._run_decode_link)
     with tempfile.TemporaryDirectory() as tmp:
         facade = os.path.join(tmp, 'sing_box_config_facade.sh')
         try:
-            u.PODKOP_FACADE_PATH = facade
-            u._run_decode_link = fake_decode
+            pk.PODKOP_FACADE_PATH = facade
+            pk._run_decode_link = fake_decode
 
             setup(old_facade, engine)
             check('Podkop до 0.7.23 xhttp не собирает',
@@ -509,15 +571,15 @@ def test_podkop_xhttp():
                   outcome(last_wins)[0] is None and last_wins in calls)
             check('type= в имени ключа не считается', outcome(in_name)[0] is None and in_name not in calls)
 
-            u.TARGET['title'] = 'Tachyon'
+            u.select_backend('/etc/config/tachyon', 'tachyon')
             del calls[:]
             outcome(xhttp)
             check('для Tachyon decode-link не используется', not calls, str(calls))
         finally:
-            u.TARGET['title'] = 'Podkop'
-            u.PODKOP_FACADE_PATH, u.sing_box_version_text, u._run_decode_link = saved
-            u.PODKOP_XHTTP.clear()
-            u.DECODED_LINKS.clear()
+            u.select_backend('/etc/config/podkop', 'podkop')
+            pk.PODKOP_FACADE_PATH, sb.sing_box_version_text, pk._run_decode_link = saved
+            pk.PODKOP_XHTTP.clear()
+            pk.DECODED_LINKS.clear()
 
 
 def test_decode_link_runner():
@@ -544,16 +606,16 @@ echo '{"type":"vless","tag":"x","server":"node.example.net","transport":{"type":
         os.environ['PATH'] = tmp + os.pathsep + old_path
         try:
             link = 'vless://00000000-0000-4000-8000-000000000001@node.example.net:443?type=xhttp'
-            outbound, reason, _ = u._run_decode_link(link + '#ok')
+            outbound, reason, _ = pk._run_decode_link(link + '#ok')
             check('outbound разобран', reason == '' and outbound.get('transport') == {'type': 'xhttp'},
                   str((outbound, reason)))
-            outbound, reason, _ = u._run_decode_link(link + '&ech=AEX#warn')
+            outbound, reason, _ = pk._run_decode_link(link + '&ech=AEX#warn')
             check('warning ключ не отбраковывает', reason == '' and outbound.get('type') == 'vless')
-            outbound, reason, detail = u._run_decode_link(link + '&flow=xtls-rprx-vision#bad')
+            outbound, reason, detail = pk._run_decode_link(link + '&flow=xtls-rprx-vision#bad')
             check('код 2 отбраковывает ключ с текстом ошибки',
                   outbound is None and reason == 'decode_link_failed'
                   and detail == 'flow xtls-rprx-vision is not supported over the xhttp transport', detail)
-            outbound, reason, _ = u._run_decode_link(link + '#broken')
+            outbound, reason, _ = pk._run_decode_link(link + '#broken')
             check('мусор вместо JSON отбраковывает ключ', outbound is None and reason == 'decode_link_failed')
         finally:
             os.environ['PATH'] = old_path
@@ -594,12 +656,12 @@ def test_singbox_check_position():
     init = 'FATAL[0000] initialize outbound[1]: unknown method: rc4-nonsense'
     dup = 'FATAL[0000] decode config at /tmp/x.json: duplicate outbound/endpoint tag: podkop-sub-test-2'
 
-    check('позиция из decode', u.parse_singbox_check_position(decode, 5) == 3)
-    check('позиция из initialize', u.parse_singbox_check_position(init, 5) == 1)
-    check('позиция из тега', u.parse_singbox_check_position(dup, 5) == 1)
-    check('позиция вне списка отбрасывается', u.parse_singbox_check_position(decode, 2) is None)
-    check('без позиции None', u.parse_singbox_check_position('FATAL: something went wrong', 5) is None)
-    check('пустой ответ', u.parse_singbox_check_position('', 5) is None)
+    check('позиция из decode', sb.parse_singbox_check_position(decode, 5) == 3)
+    check('позиция из initialize', sb.parse_singbox_check_position(init, 5) == 1)
+    check('позиция из тега', sb.parse_singbox_check_position(dup, 5) == 1)
+    check('позиция вне списка отбрасывается', sb.parse_singbox_check_position(decode, 2) is None)
+    check('без позиции None', sb.parse_singbox_check_position('FATAL: something went wrong', 5) is None)
+    check('пустой ответ', sb.parse_singbox_check_position('', 5) is None)
 
 
 def test_singbox_hard_validation():
@@ -607,7 +669,7 @@ def test_singbox_hard_validation():
     links = ['vless://00000000-0000-4000-8000-00000000000%d@node%d.example.net:443?type=tcp#Узел-%d' % (i, i, i)
              for i in range(1, 9)]
     bad = {links[2], links[6]}
-    original = u.run_singbox_check_for_links
+    original = sb.run_singbox_check_for_links
 
     def fake_check(batch, timeout=None):
         """sing-box падает на первом неподходящем ключе и называет его позицию."""
@@ -622,41 +684,41 @@ def test_singbox_hard_validation():
         return ok, reason, None
 
     try:
-        u.run_singbox_check_for_links = fake_check
-        good, stats = u.hard_validate_links_with_singbox('тест', links)
+        sb.run_singbox_check_for_links = fake_check
+        good, stats = sb.hard_validate_links_with_singbox('тест', links)
         check('битые ключи отброшены', good == [l for l in links if l not in bad], str(len(good)))
         check('порядок сохранён', good == sorted(good, key=links.index))
         check('запусков на один больше, чем битых ключей', stats['runs'] == len(bad) + 1, str(stats['runs']))
         check('счётчик отброшенных верен', stats['rejected'] == len(bad))
         check('проверка признана успешной', stats['ok'] is True)
 
-        u.run_singbox_check_for_links = blind_check
-        good_blind, stats_blind = u.hard_validate_links_with_singbox('тест', links)
+        sb.run_singbox_check_for_links = blind_check
+        good_blind, stats_blind = sb.hard_validate_links_with_singbox('тест', links)
         check('без позиции результат тот же', good_blind == good, str(len(good_blind)))
         check('без позиции запусков больше', stats_blind['runs'] > stats['runs'],
               f"{stats_blind['runs']} vs {stats['runs']}")
 
         # Потолок запусков: битые ключи кончаются позже, чем разрешённые запуски.
-        u.run_singbox_check_for_links = lambda batch, timeout=None: (False, 'singbox_check_failed', 0)
-        good_limit, stats_limit = u.hard_validate_links_with_singbox('тест', links, max_runs=2)
+        sb.run_singbox_check_for_links = lambda batch, timeout=None: (False, 'singbox_check_failed', 0)
+        good_limit, stats_limit = sb.hard_validate_links_with_singbox('тест', links, max_runs=2)
         check('при исчерпании лимита секция не меняется', good_limit == [])
         check('причина названа', 'singbox_check_limit' in stats_limit['rejected_by_reason'])
         check('лимит не превышен', stats_limit['runs'] <= 2, str(stats_limit['runs']))
 
-        u.run_singbox_check_for_links = lambda batch, timeout=None: (False, 'singbox_not_found', None)
-        good_missing, stats_missing = u.hard_validate_links_with_singbox('тест', links)
+        sb.run_singbox_check_for_links = lambda batch, timeout=None: (False, 'singbox_not_found', None)
+        good_missing, stats_missing = sb.hard_validate_links_with_singbox('тест', links)
         check('без sing-box список не принимается', good_missing == [])
         check('отсутствие sing-box названо причиной',
               'singbox_not_found' in stats_missing['rejected_by_reason'])
 
-        u.run_singbox_check_for_links = lambda batch, timeout=None: (True, '', None)
-        good_all, stats_all = u.hard_validate_links_with_singbox('тест', links)
+        sb.run_singbox_check_for_links = lambda batch, timeout=None: (True, '', None)
+        good_all, stats_all = sb.hard_validate_links_with_singbox('тест', links)
         check('чистый список проходит за один запуск', good_all == links and stats_all['runs'] == 1,
               str(stats_all['runs']))
         check('пустой список не запускает sing-box',
-              u.hard_validate_links_with_singbox('тест', [])[1]['runs'] == 0)
+              sb.hard_validate_links_with_singbox('тест', [])[1]['runs'] == 0)
     finally:
-        u.run_singbox_check_for_links = original
+        sb.run_singbox_check_for_links = original
 
 
 def test_uci_values():
@@ -735,7 +797,7 @@ def test_rewrite_keeps_neighbours():
             path = os.path.join(tmp, name)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(text)
-            _, new = u.update_uci_config_with_final_links(path, upd)
+            _, new = u.load_backend(name).rewrite_config(path, upd)
             for line in kept:
                 check(f'{name}: осталось «{line}»', line in new, new)
             check(f'{name}: старые ключи и proxy_string убраны',
@@ -887,7 +949,8 @@ def test_tags_follow_podkop():
                 json.dump({'sections': {'youtube': {'links': {'deadbeef': stale}},
                                         'removed_section': {'links': {'x': stale}}}}, f)
 
-            sections = u.load_current_podkop_sections(config_path)
+            u.select_backend(config_path, 'podkop')
+            sections = u.BACKEND.load_sections(config_path)
             check('имя секции сохранено как в конфиге', sections['youtube']['name'] == 'YouTube')
 
             u.observe_only(config_path, state_path)
@@ -954,7 +1017,7 @@ printf ']\\n'
     xhttp = f'vless://{uuid}@node.example.net:443?type=xhttp&security=tls#x'
     upgrade = f'vless://{uuid}@node.example.net:443?type=httpupgrade&security=tls#hu'
     bad = f'vless://{uuid}@node.example.net:443?type=foo#bad'
-    saved = (u.PODKOP_BINARY_PATH, u.CHECK_LINKS_BATCH_BYTES, dict(u.TARGET))
+    saved = (u.PODKOP_BINARY_PATH, pkx.CHECK_LINKS_BATCH_BYTES)
     with tempfile.TemporaryDirectory() as tmp:
         binary = os.path.join(tmp, 'podkop')
         try:
@@ -964,15 +1027,14 @@ printf ']\\n'
                 f.write(script)
             os.chmod(binary, stat.S_IRWXU)
             check('скрипт Podkop 0.7 не считается бинарником', not u.podkop_is_backend_binary())
-            u.set_link_target('/etc/config/podkop')
-            check('для Podkop 0.7 check_links выключен', u.TARGET['check_links'] is False)
+            check('Podkop 0.7 определяется как podkop', u.detect_backend('/etc/config/podkop') == 'podkop')
 
             # Скрипт «#!» нужен только для подмены ответа; признак 0.8 — его отсутствие.
             u.podkop_is_backend_binary = lambda: True
-            u.set_link_target('/etc/config/podkop')
-            check('для Podkop 0.8 check_links включён', u.TARGET['check_links'] is True)
-            u.CHECK_LINKS_BATCH_BYTES = 120
-            valid, stats = u.validate_links_for_podkop_singbox('main', [xhttp, upgrade, bad, xhttp])
+            u.select_backend('/etc/config/podkop')
+            check('Podkop 0.8 определяется как podkop_exp', u.BACKEND is pkx, u.BACKEND.NAME)
+            pkx.CHECK_LINKS_BATCH_BYTES = 120
+            valid, stats = u.BACKEND.validate_links('main', [xhttp, upgrade, bad, xhttp])
             check('xhttp и httpupgrade приняты, битый отброшен, дубль убран',
                   valid == [xhttp, upgrade], str(valid))
             check('статистика', stats['rejected'] == 1 and stats['hard_check_ok']
@@ -981,12 +1043,11 @@ printf ']\\n'
 
             with open(binary, 'w') as f:
                 f.write('#!/bin/sh\necho "unknown command" >&2\nexit 1\n')
-            check('без check_links ответа нет', u.run_podkop_check_links([xhttp]) is None)
+            check('без check_links ответа нет', pkx.run_podkop_check_links([xhttp]) is None)
         finally:
-            u.PODKOP_BINARY_PATH, u.CHECK_LINKS_BATCH_BYTES = saved[0], saved[1]
-            u.TARGET.clear()
-            u.TARGET.update(saved[2])
+            u.PODKOP_BINARY_PATH, pkx.CHECK_LINKS_BATCH_BYTES = saved[0], saved[1]
             del u.podkop_is_backend_binary
+            u.select_backend('/etc/config/podkop', 'podkop')
 
 
 def main():
@@ -994,7 +1055,7 @@ def main():
                  test_plain_and_base64,
                  test_refusals, test_domain_expansion, test_fingerprint_headers,
                  test_podkop_conversion_limits, test_tachyon_conversion_limits,
-                 test_tachyon_core_engine, test_podkop_xhttp, test_decode_link_runner, test_xray_xhttp_extra,
+                 test_backend_modules, test_tachyon_core_engine, test_podkop_xhttp, test_decode_link_runner, test_xray_xhttp_extra,
                  test_singbox_check_position, test_singbox_hard_validation,
                  test_uci_values, test_uci_open_quote, test_rewrite_keeps_neighbours,
                  test_regex_filter, test_write_config_atomic,

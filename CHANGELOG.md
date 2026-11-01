@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.11.0
+
+Support for each program is now a separate module, and a router gets only the
+one it needs. The updater had grown to 4900 lines with Podkop 0.7, Podkop 0.8
+(podkop-exp) and Tachyon interleaved, and each new version of those programs
+diverges further. Nothing changes in what the updater does.
+
+- `/usr/bin/podkop-sub-updater.py` keeps everything common: downloading,
+  parsing, filters, state, health and cleanup. What differs per program lives
+  in `/usr/lib/podkop-subscriptions/psub_backends/`: `podkop` (Podkop 0.7),
+  `podkop_exp` (Podkop 0.8, built on `podkop`), `tachyon`, and `singbox`, the
+  link-to-outbound conversion and `sing-box check` shared by Podkop 0.7 and
+  Tachyon. A module says how sections are read and written, how links are
+  validated, and which CLI and init script to use.
+- The installer asks the updater which modules this router needs
+  (`podkop-sub-updater.py --backend-modules`), installs only those and removes
+  the others, so the detection rule exists in one place.
+- If the program changes later, for instance Tachyon is installed over
+  Podkop, the updater finds no module for it, leaves the config untouched,
+  exits with code 3 and logs an error pointing to the upgrade command, which
+  the panel shows in full as «не установлен модуль поддержки ПО». Running the
+  installer again installs the right module.
+- The upgrade backup now includes `/usr/lib/podkop-subscriptions`, and
+  `uninstall.sh` removes it.
+
 ## 3.10.2
 
 - Tachyon with its own tachyon-core engine (the Rust core its README

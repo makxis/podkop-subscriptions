@@ -41,7 +41,7 @@ for f in /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/p
   /usr/share/rpcd/acl.d/luci-app-podkop-subscriptions.json; do
   rm -f "$f".bak.* 2>/dev/null || true
 done
-rm -rf /usr/share/podkop-subscriptions
+rm -rf /usr/share/podkop-subscriptions /usr/lib/podkop-subscriptions
 rm -f /www/luci-static/resources/view/podkop/subscriptions.js
 rm -rf /www/luci-static/resources/view/podkop_subscriptions
 rm -f /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json

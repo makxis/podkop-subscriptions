@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_VERSION="3.10.2"
+APP_VERSION="3.11.0"
 REPO="${REPO:-makxis/podkop-subscriptions}"
 BRANCH="${BRANCH:-main}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
@@ -15,6 +15,7 @@ SUB_CFG="/etc/config/podkop_subscriptions"
 PODKOP_CFG="/etc/config/podkop"
 # Tachyon, a Podkop Plus fork, replaces Podkop and keeps its sections here.
 TACHYON_CFG="/etc/config/tachyon"
+BACKEND_LIB_DIR="/usr/lib/podkop-subscriptions"
 DATA_DIR="/etc/podkop-subscriptions"
 LOCAL_LINKS="$DATA_DIR/local-links"
 LOCAL_LINKS_LEGACY="/etc/config/podkop-local-links"
@@ -236,6 +237,7 @@ create_upgrade_backup() {
     /usr/bin/podkop-sub-cron-sync \
     /usr/bin/podkop-sub-run-now \
     /usr/share/podkop-subscriptions \
+    /usr/lib/podkop-subscriptions \
     /www/luci-static/resources/view/podkop/subscriptions.js \
     /www/luci-static/resources/view/podkop_subscriptions \
     /usr/share/luci/menu.d/luci-app-podkop-subscriptions.json \
@@ -594,6 +596,7 @@ install_core() {
   fi
   chmod 0755 /usr/bin/podkop-sub-updater.py /usr/bin/podkop-sub-cron-sync /usr/bin/podkop-sub-run-now /usr/bin/podkop-sub-clean-temp
   chmod 0755 /etc/init.d/podkop_subscriptions
+  install_backend_modules
   # Backup first, migrate second: create_upgrade_backup above archived the
   # legacy paths, so an interrupted migration can be recovered from it.
   prepare_upgrade_from_legacy
@@ -604,6 +607,33 @@ install_core() {
   /etc/init.d/podkop_subscriptions enable >/dev/null 2>&1 || true
   /etc/init.d/podkop_subscriptions restart >/dev/null 2>&1 || /etc/init.d/podkop_subscriptions start >/dev/null 2>&1 || true
   say "Core installed. Version: $APP_VERSION"
+}
+
+# Поддержка каждого ПО (Podkop 0.7, podkop-exp, Tachyon) — отдельный модуль.
+# На роутер ставятся только модули того ПО, что на нём стоит. Какие именно,
+# решает сам updater (--backend-modules), чтобы правило определения было
+# одно. Если ПО потом сменят, updater не тронет конфиг и попросит запустить
+# установщик ещё раз.
+install_backend_modules() {
+  modules="$(python3 /usr/bin/podkop-sub-updater.py --config "$PODKOP_CFG" --backend-modules 2>/dev/null)" || modules=""
+  [ -n "$modules" ] || fail "cannot tell which backend modules this router needs (podkop-sub-updater.py --backend-modules)"
+  dir="$BACKEND_LIB_DIR/psub_backends"
+  mkdir -p "$dir"
+  install_file "lib/psub_backends/__init__.py" "$dir/__init__.py"
+  keep="__init__.py"
+  for m in $modules; do
+    install_file "lib/psub_backends/$m.py" "$dir/$m.py"
+    keep="$keep $m.py"
+  done
+  for f in "$dir"/*.py; do
+    [ -e "$f" ] || continue
+    case " $keep " in
+      *" $(basename "$f") "*) ;;
+      *) rm -f "$f" ;;
+    esac
+  done
+  rm -rf "$dir/__pycache__"
+  say "Backend modules: $modules"
 }
 
 detach_old_embedded_panel() {

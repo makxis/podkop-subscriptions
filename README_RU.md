@@ -397,6 +397,7 @@ sh "$(ls -d /root/dnsproxy-backup-* | tail -n 1)/rollback.sh"
 | Команда | Что делает |
 |---|---|
 | `/usr/bin/podkop-sub-updater.py --version` | Версия updater. |
+| `/usr/bin/podkop-sub-updater.py --backend-modules` | Какие модули поддержки ПО нужны на этом роутере. Спрашивает установщик. |
 | `/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop` | Только наблюдение: обновляет `fail_count` по данным Podkop URLTest, конфиг не меняет. Запускается по cron раз в час. |
 | `/usr/bin/podkop-sub-updater.py --catch-up ...` | Обновить подписки, если последнее успешное обновление старше 24 часов. Запускается из `/etc/init.d/podkop_subscriptions` через 5 минут после загрузки роутера. |
 | `/usr/bin/podkop-sub-updater.py --catch-up-retry ...` | Повторить catch-up, только если предыдущий завершился ошибкой. Стоит в cron каждые 30 минут. |
@@ -735,6 +736,7 @@ ubus call service list | grep -A 6 podkop_subscriptions
 | `/tmp/podkop-sub-updater.flock` | Общая блокировка всех путей запуска updater. |
 | `/etc/init.d/podkop_subscriptions` | procd: синхронизирует cron по событию `config.change` и запускает catch-up после загрузки роутера. |
 | `/usr/share/podkop-subscriptions/VERSION` | Установленная версия. |
+| `/usr/lib/podkop-subscriptions/psub_backends/` | Модули поддержки ПО: `podkop` (Podkop 0.7), `podkop_exp` (Podkop 0.8), `tachyon` и общий `singbox`. Установщик кладёт только те, что нужны ПО на этом роутере (их называет `podkop-sub-updater.py --backend-modules`), и убирает остальные. Если ПО сменили, например поставили Tachyon вместо Podkop, updater конфиг не трогает, пишет ошибку с командой обновления (она же в панели), и после повторного запуска установщика всё работает. |
 | `/root/podkop-subscriptions-upgrade-backup-<дата>.tar.gz` | Архив перед обновлением программы: прежние файлы, конфиги, состояние. Хранятся три последних. |
 
 </details>
@@ -744,7 +746,7 @@ ubus call service list | grep -A 6 podkop_subscriptions
 
 С версии 3.8.0 работает и с [Tachyon](https://github.com/Dushnilin/tachyon), форком Podkop Plus, который ставится вместо Podkop. Совместимость неполная, потому что у Tachyon своя схема конфига:
 
-- Если `/etc/config/podkop` нет, а `/etc/config/tachyon` есть, апдейтер сам переключается на Tachyon. Cron, панель и команды из этого README менять не нужно.
+- Если `/etc/config/podkop` нет, а `/etc/config/tachyon` есть, апдейтер сам переключается на Tachyon. Cron, панель и команды из этого README менять не нужно. Если Tachyon поставили уже после podkop-subscriptions, один раз запустите обновление (раздел «Обновить программу»): установщик поставит модуль Tachyon, а до этого updater конфиг не трогает.
 - Ключи пишутся в `selector_proxy_links` секции, у секции ставится `action 'connection'`. Поля Podkop (`connection_type`, `proxy_config_type`, `urltest_proxy_links`) туда не пишутся: Tachyon переносит их только при обновлении своего пакета, а до этого секция осталась бы без ключей.
 - URLTest в Tachyon задаётся отдельной секцией `config urltest` со ссылкой на целевую секцию. Для `proxy_type 'urltest'` апдейтер создаёт такую группу `Fastest`, если её нет. `proxy_type 'selector'` существующую группу не удаляет: её настройки принадлежат Tachyon.
 - Фильтр ключей сверяется с возможностями Tachyon: проходят `http`, `h2`, `httpupgrade`, а `xhttp` только если его умеет ядро: sing-box extended, extended-compressed или lx либо tachyon-core. На обычном sing-box такие ключи отбрасываются с причиной «xhttp не поддерживается установленным ядром».
@@ -753,7 +755,7 @@ ubus call service list | grep -A 6 podkop_subscriptions
 - Собственные подписки Tachyon (`subscription_urls`, в 1.7 источник с типом «подписка») не используйте в той же секции: их outbound'ы сдвинут нумерацию `<секция>-N-out`, и health-check начнёт путать ключи.
 - С 1.7 Tachyon держит ключи в отдельных источниках (`config outbound_source`, вкладка Outbounds), а секция только ссылается на них. Апдейтер по-прежнему пишет в `selector_proxy_links` самой секции: 1.7 берёт ключи и оттуда, и из источников, причём ключи секции идут первыми. Ключи, добавленные в источник через панель Tachyon, апдейтер не видит и не трогает, как локальные.
 - При обновлении Tachyon до 1.7 миграция копирует ключи каждой секции в источник `src_links_<секция>` и оставляет их и в самой секции. Эту копию апдейтер не обслуживает: ключ, который он удалит из секции, продолжит работать через неё. Если ключи в секции приходили только из подписок, удалите источник `<секция> (Links)` во вкладке Outbounds. Ключи в самой секции при этом остаются.
-- Установщик Tachyon переносит `/etc/config/podkop` в `/etc/config/tachyon`. Апдейтер переключится сам, но бэкап конфига Podkop сделайте до установки.
+- Установщик Tachyon переносит `/etc/config/podkop` в `/etc/config/tachyon`. Бэкап конфига Podkop сделайте до установки.
 
 </details>
 

@@ -399,6 +399,7 @@ Details you do not need for installing and everyday use.
 | Command | What it does |
 |---|---|
 | `/usr/bin/podkop-sub-updater.py --version` | Updater version. |
+| `/usr/bin/podkop-sub-updater.py --backend-modules` | Which support modules this router needs. Asked by the installer. |
 | `/usr/bin/podkop-sub-updater.py --observe-only --config /etc/config/podkop` | Observation only: refreshes `fail_count` from Podkop URLTest data without touching the config. Runs hourly from cron. |
 | `/usr/bin/podkop-sub-updater.py --catch-up ...` | Update subscriptions if the last successful update is older than 24 hours. Started by `/etc/init.d/podkop_subscriptions` 5 minutes after boot. |
 | `/usr/bin/podkop-sub-updater.py --catch-up-retry ...` | Retry catch-up only if the previous one failed. Runs from cron every 30 minutes. |
@@ -737,6 +738,7 @@ The `/tmp/podkop-sub-updater.lock` directory in `podkop-sub-run-now` only report
 | `/tmp/podkop-sub-updater.flock` | Shared lock across all updater execution paths. |
 | `/etc/init.d/podkop_subscriptions` | procd: syncs cron on `config.change` and runs the post-boot catch-up. |
 | `/usr/share/podkop-subscriptions/VERSION` | Installed version. |
+| `/usr/lib/podkop-subscriptions/psub_backends/` | Support modules for each program: `podkop` (Podkop 0.7), `podkop_exp` (Podkop 0.8), `tachyon` and the shared `singbox`. The installer puts only the ones this router's program needs (as named by `podkop-sub-updater.py --backend-modules`) and removes the rest. If the program changes, say Tachyon replaces Podkop, the updater leaves the config alone and logs an error with the upgrade command (also shown in the panel); running the installer again fixes it. |
 | `/root/podkop-subscriptions-upgrade-backup-<date>.tar.gz` | Archive taken before a program upgrade: previous files, configs, state. The three newest are kept. |
 
 </details>
@@ -746,7 +748,7 @@ The `/tmp/podkop-sub-updater.lock` directory in `podkop-sub-run-now` only report
 
 Since 3.8.0 it also works with [Tachyon](https://github.com/Dushnilin/tachyon), a Podkop Plus fork that replaces Podkop. The support is partial, because Tachyon's config schema differs:
 
-- When `/etc/config/podkop` is missing and `/etc/config/tachyon` exists, the updater switches to Tachyon on its own. Cron entries, the panel and the commands in this README stay the same.
+- When `/etc/config/podkop` is missing and `/etc/config/tachyon` exists, the updater switches to Tachyon on its own. Cron entries, the panel and the commands in this README stay the same. If Tachyon was installed after podkop-subscriptions, run the upgrade once (see “Upgrade”): the installer adds the Tachyon module, and until then the updater leaves the config alone.
 - Links go into the section's `selector_proxy_links` and the section gets `action 'connection'`. Podkop options (`connection_type`, `proxy_config_type`, `urltest_proxy_links`) are not written: Tachyon converts them only when its package is upgraded, and until then the section would have no links.
 - URLTest is a separate `config urltest` section pointing at the target. For `proxy_type 'urltest'` the updater adds a `Fastest` group if there is none; `proxy_type 'selector'` does not delete an existing group, since its settings belong to Tachyon.
 - The link filter follows Tachyon: `http`, `h2` and `httpupgrade` pass, and `xhttp` passes only when the core supports it: sing-box extended, extended-compressed or lx, or tachyon-core. On a plain sing-box such links are dropped with a reason saying so.
@@ -755,7 +757,7 @@ Since 3.8.0 it also works with [Tachyon](https://github.com/Dushnilin/tachyon), 
 - Do not use Tachyon's own `subscription_urls` (in 1.7, a source of the subscription type) in the same section: its outbounds shift the `<section>-N-out` numbering and the health check would mix up links.
 - Since 1.7 Tachyon keeps links in separate sources (`config outbound_source`, the Outbounds tab) that a section refers to. The updater still writes the section's own `selector_proxy_links`: 1.7 takes links from there as well as from the sources, the section's own first. Links added to a source in the Tachyon panel are not seen or touched by the updater, like local ones.
 - When Tachyon is upgraded to 1.7, the migration copies each section's links into a `src_links_<section>` source and also keeps them in the section. The updater does not maintain that copy: a link it removes from the section keeps working through it. If the section's links came only from subscriptions, delete the `<section> (Links)` source in the Outbounds tab; the links in the section itself stay.
-- Tachyon's installer moves `/etc/config/podkop` to `/etc/config/tachyon`. The updater follows on its own, but back up the Podkop config before installing.
+- Tachyon's installer moves `/etc/config/podkop` to `/etc/config/tachyon`. Back up the Podkop config before installing.
 
 </details>
 

@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.10.2"
+APP_VERSION_FALLBACK = "3.11.0"
 
 
 def app_version():
@@ -72,22 +72,34 @@ LOCAL_LINKS_PATH_DEFAULT = DATA_DIR_DEFAULT + '/local-links'
 # that were never migrated.
 LOCAL_LINKS_PATH_LEGACY = '/etc/config/podkop-local-links'
 PODKOP_CONFIG_PATH = '/etc/config/podkop'
-# Tachyon (a fork of Podkop Plus) keeps its sections in its own UCI package with
-# a different schema: links always live in selector_proxy_links, URLTest is a
-# separate `config urltest` child pointing at the section, and connection_type /
-# proxy_config_type are legacy markers that Tachyon only migrates on package
-# upgrade. Writing Podkop options there leaves the section without links.
+# Tachyon ставится вместо Podkop и держит секции в своём пакете UCI.
 TACHYON_CONFIG_PATH = '/etc/config/tachyon'
-TACHYON_URLTEST_DEFAULTS = (
-    ('name', 'Fastest'),
-    ('check_interval', '3m'),
-    ('tolerance', '50'),
-    ('testing_url', 'https://www.gstatic.com/generate_204'),
-    ('filter_mode', 'disabled'),
-    ('detect_server_country', 'flag_emoji'),
-    ('interrupt_exist_connections', '1'),
-    ('pin_dashboard', '1'),
-)
+# /usr/bin/podkop у Podkop 0.7 — shell-скрипт, у Podkop 0.8 (podkop-exp) —
+# бинарник с sing-box внутри. Отличаем по тому же признаку, что и установщик
+# podkop-exp: у 0.7 в начале файла «#!».
+PODKOP_BINARY_PATH = '/usr/bin/podkop'
+
+# Всё, что зависит от конкретного ПО (схема секций, проверка ключей, чем
+# перезапускать), живёт в модулях пакета psub_backends: lib/ рядом со
+# скриптом в репозитории, /usr/lib/podkop-subscriptions на роутере. Установщик
+# ставит только модули того ПО, что стоит на роутере, а список спрашивает у
+# этого скрипта (--backend-modules), чтобы правило определения было одно.
+# Само определение здесь, а не в модулях: оно должно работать и без нужного
+# модуля, чтобы сказать, какой ставить.
+BACKEND_MODULES = {
+    'podkop': ('singbox', 'podkop'),
+    'podkop_exp': ('singbox', 'podkop', 'podkop_exp'),
+    'tachyon': ('singbox', 'tachyon'),
+}
+BACKEND_LIB_DIRS = (os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'),
+                    '/usr/lib/podkop-subscriptions')
+BACKEND_MISSING_EXIT_CODE = 3
+UPGRADE_COMMAND = ('wget -O /tmp/podkop-sub-upgrade.sh '
+                   'https://raw.githubusercontent.com/makxis/podkop-subscriptions/main/install.sh '
+                   '&& sh /tmp/podkop-sub-upgrade.sh --remote --with-panel --no-config')
+# Модуль выбранного ПО (select_backend) и заголовок для сообщений.
+BACKEND = None
+TARGET = {'title': 'Podkop'}
 
 
 def config_backend(config_path):
@@ -108,14 +120,59 @@ def resolve_config_path(config_path):
     return config_path
 
 
-def tachyon_urltest_owners(config_path):
-    owners = set()
-    for s in parse_uci_sections(config_path):
-        if s['type'].lower() == 'urltest':
-            owner = s['options'].get('section', '').strip().lower()
-            if owner:
-                owners.add(owner)
-    return owners
+def podkop_is_backend_binary():
+    try:
+        with open(PODKOP_BINARY_PATH, 'rb') as f:
+            head = f.read(2)
+    except OSError:
+        return False
+    return len(head) == 2 and head != b'#!'
+
+
+def detect_backend(config_path):
+    """Имя модуля для ПО, чей конфиг указан (после resolve_config_path)."""
+    if config_backend(config_path) == 'tachyon':
+        return 'tachyon'
+    return 'podkop_exp' if podkop_is_backend_binary() else 'podkop'
+
+
+class BackendMissing(Exception):
+    def __init__(self, name, error):
+        super().__init__(f'{name}: {error}')
+        self.name = name
+        self.error = error
+
+
+def load_backend(name):
+    """Модуль поддержки ПО; BackendMissing, если он не установлен."""
+    for directory in BACKEND_LIB_DIRS:
+        if os.path.isfile(os.path.join(directory, 'psub_backends', '__init__.py')):
+            if directory not in sys.path:
+                sys.path.insert(0, directory)
+            break
+    import importlib
+    # Без __pycache__ на флеше роутера: модули маленькие, а устаревший кеш
+    # после обновления был бы лишней сущностью.
+    sys.dont_write_bytecode = True
+    try:
+        module = importlib.import_module(f'psub_backends.{name}')
+    except ImportError as e:
+        raise BackendMissing(name, e)
+    # Модули зовут общие помощники ядра через core.<имя>.
+    this = sys.modules[__name__]
+    for mod_name, mod in list(sys.modules.items()):
+        if mod_name.startswith('psub_backends.') and hasattr(mod, 'core'):
+            mod.core = this
+    return module
+
+
+def select_backend(config_path, name=None):
+    """Загружает и готовит модуль ПО; name задают тесты, иначе он определяется."""
+    global BACKEND
+    BACKEND = load_backend(name or detect_backend(config_path))
+    TARGET['title'] = BACKEND.TITLE
+    BACKEND.configure(config_path)
+    return BACKEND
 
 
 def local_links_path():
@@ -147,25 +204,10 @@ SOURCE_TIMEOUT_MARGIN = 5
 SOURCE_RETRIES_DEFAULT = 3
 CATCHUP_AFTER_HOURS_DEFAULT = 24
 VALID_TIME_MIN_TS = 1700000000
-SINGBOX_CHECK_TIMEOUT_DEFAULT = 15
-# Потолок числа запусков sing-box check на секцию. Он не про размер подписки, а
-# про защиту от вырождения поиска битого ключа: сам sing-box называет позицию,
-# на которой споткнулся, поэтому обычно запусков ровно на один больше, чем
-# битых ключей. Потолок остаётся страховкой для случая, когда позицию
-# разобрать не удалось и приходится делить список пополам.
-SINGBOX_CHECK_MAX_RUNS_DEFAULT = 40
-SINGBOX_CHECK_TAG_PREFIX = 'podkop-sub-test-'
-# «decode config at /tmp/...: outbounds[3].transport: unknown transport type»
-# и «initialize outbound[1]: unknown method» — единственное и множественное
-# число, обе формы встречаются у sing-box 1.12.
-SINGBOX_CHECK_INDEX_RE = re.compile(r'outbounds?\[(\d+)\]')
-SINGBOX_CHECK_TAG_RE = re.compile(re.escape(SINGBOX_CHECK_TAG_PREFIX) + r'(\d+)')
 UPDATER_FLOCK_PATH = '/tmp/podkop-sub-updater.flock'
 UPDATER_LOCK_WAIT_SECONDS = 300
 UPDATER_LOCK_BUSY_EXIT_CODE = 75
 UPDATER_INHERITED_LOCK_ENV = 'PODKOP_SUB_LOCK_FD'
-
-
 
 
 def updater_mode_name(args):
@@ -250,7 +292,6 @@ def sanitize_log_message(msg):
     msg = re.sub(r'(?i)(pbk|sid|sni|password|token|uuid)=([^\s&]+)', r'\1=<hidden>', msg)
     msg = re.sub(r'(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<uuid>', msg)
     return msg
-
 
 
 REMOVE_REASON_LABELS_RU = {
@@ -391,6 +432,7 @@ def parse_args():
     parser.add_argument('--catch-up-retry', action='store_true', help='Повторять catch-up только если предыдущий catch-up завершился ошибкой')
     parser.add_argument('--status-summary', action='store_true', help='Показать краткое состояние для LuCI')
     parser.add_argument('--fail-count', action='store_true', help='Показать текущие fail_count по state.json без вывода proxy-ссылок')
+    parser.add_argument('--backend-modules', action='store_true', help='Показать, модули какого ПО нужны на этом роутере (для установщика)')
     parser.add_argument('--state', default=STATE_PATH_DEFAULT, help='Путь к state.json')
     parser.add_argument('--delete-after-fails', type=int, default=DELETE_AFTER_FAIL_COUNT_DEFAULT, help='Удалять ключ после N подряд неудачных наблюдений')
     parser.add_argument('--min-keep', type=int, default=MIN_KEEP_PER_SECTION_DEFAULT, help='Минимум ключей, которые надо оставить в секции')
@@ -675,7 +717,6 @@ def dedupe_sni_rotation_links_keep_last(links):
     return list(reversed(out_rev)), collapsed
 
 
-
 def endpoint_host_value(link):
     """Return canonical host/domain/IP for endpoint diagnostics."""
     return endpoint_host_port_value(link)[0]
@@ -731,7 +772,6 @@ def dedupe_endpoint_host_links_keep_last(links):
         out_rev.append(link)
 
     return list(reversed(out_rev)), collapsed
-
 
 
 def link_name(link):
@@ -1766,7 +1806,6 @@ def extract_links_from_payload(payload):
     return [], 'invalid' if not json_links and skipped else 'empty'
 
 
-
 def load_local_protected_ids(path=None):
     """Return stable_id set for user-managed local links.
 
@@ -1916,7 +1955,6 @@ def filter_links(links_raw, regex, match_mode, on_empty, sec, source_label):
     return filtered_links
 
 
-
 class LinkValidationError(Exception):
     def __init__(self, reason, detail=''):
         super().__init__(reason)
@@ -1924,285 +1962,7 @@ class LinkValidationError(Exception):
         self.detail = detail
 
 
-# Эти три набора — не наше представление о прекрасном и не возможности
-# sing-box, а ровно то, что разбирает конвертер Podkop в
-# /usr/lib/podkop/sing_box_config_facade.sh: case по схеме в
-# sing_box_cf_add_proxy_outbound, по security в _add_outbound_security и по
-# type в _add_outbound_transport. Podkop и есть потолок, потому что ссылку в
-# outbound превращает он, а не мы и не sing-box.
-#
-# Почему без этой проверки нельзя обойтись, хотя следом идёт sing-box check:
-# на неизвестной схеме Podkop пишет «Unsupported proxy type. Aborted.» и
-# выходит с ошибкой, то есть один такой ключ оставляет роутер без proxy
-# вообще; на неизвестном transport он всего лишь пишет в лог «Unknown
-# transport» и собирает outbound без транспорта, то есть обычный TCP. Такой
-# конфиг sing-box check проходит успешно, а узел не работает и молча висит в
-# URLTest. Поймать это можно только до конвертации. Ключи с xhttp Podkop
-# разбирает не этим конвертером, для них ниже отдельная ветка.
-VALID_TRANSPORTS = {'', 'tcp', 'raw', 'ws', 'grpc'}
-# Tachyon converts links itself (subscription/parser.uc) and knows more
-# transports than Podkop. xhttp is not in upstream sing-box: Tachyon only
-# accepts it when the installed build has it (extended/lx, or a with_xhttp
-# tag), and so do we, otherwise the key would pass here and break the config.
-TACHYON_TRANSPORTS = VALID_TRANSPORTS | {'http', 'h2', 'httpupgrade'}
-# С 1.5.16 движок Tachyon называется tachyon-core. Это либо его собственное
-# ядро на Rust, либо симлинк на sing-box, а /usr/bin/sing-box бывает обратным
-# симлинком или отсутствует. Tachyon запускает и проверяет конфиг тем, что
-# найдёт первым (command -v tachyon-core || command -v sing-box), мы так же.
-TACHYON_CORE_BINARY = 'tachyon-core'
-TARGET = {'title': 'Podkop', 'transports': VALID_TRANSPORTS, 'xhttp': False, 'check_links': False,
-          'core': 'sing-box'}
-SING_BOX_VERSION = {}
-
-
-def core_binary():
-    """Бинарник, которым проверяются ключи и спрашивается версия ядра."""
-    return TARGET.get('core') or 'sing-box'
-
-
-def tachyon_core_binary():
-    for directory in os.environ.get('PATH', '/usr/sbin:/usr/bin:/sbin:/bin').split(os.pathsep):
-        path = os.path.join(directory or '.', TACHYON_CORE_BINARY)
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            return TACHYON_CORE_BINARY
-    return 'sing-box'
-
-
-def sing_box_version_text():
-    """Вывод «<ядро> version»: один запуск на весь прогон, и только по нужде."""
-    binary = core_binary()
-    if binary not in SING_BOX_VERSION:
-        try:
-            SING_BOX_VERSION[binary] = subprocess.run(
-                [binary, 'version'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                encoding='utf-8', errors='replace', timeout=15).stdout or ''
-        except Exception:
-            SING_BOX_VERSION[binary] = ''
-    return SING_BOX_VERSION[binary]
-
-
-def sing_box_supports_xhttp():
-    """Как профили ядер в core_profile.uc Tachyon: у lx, extended,
-    extended-compressed и tachyon-core xhttp есть всегда, у обычного sing-box
-    только со сборочным тегом with_xhttp."""
-    out = sing_box_version_text()
-    first = out.split('\n', 1)[0].strip()
-    if re.search(r'-(extended|lx)\b', first):
-        return True
-    # Ядро Tachyon отвечает «tachyon-core 0.2.9», его сборки sing-box несут
-    # -tachyon. в номере версии.
-    if first.startswith(TACHYON_CORE_BINARY) or '-tachyon.' in first:
-        return True
-    return 'with_xhttp' in re.split(r'[,:\s]+', out)
-
-
-def set_link_target(config_path):
-    if config_backend(config_path) != 'tachyon':
-        TARGET['core'] = 'sing-box'
-        TARGET['check_links'] = podkop_is_backend_binary()
-        return
-    TARGET['title'] = 'Tachyon'
-    TARGET['core'] = tachyon_core_binary()
-    xhttp = sing_box_supports_xhttp()
-    TARGET['xhttp'] = xhttp
-    TARGET['transports'] = TACHYON_TRANSPORTS | ({'xhttp'} if xhttp else set())
-VALID_SECURITY = {'', 'none', 'tls', 'reality'}
 SUPPORTED_SCHEMES = {'vless', 'ss', 'trojan', 'socks4', 'socks4a', 'socks5', 'hy2', 'hysteria2'}
-
-# xhttp своим конвертером Podkop не разбирает. С 0.7.23 ссылку vless или
-# trojan с type=xhttp или splithttp он целиком отдаёт «sing-box tools
-# decode-link» и кладёт в конфиг напечатанный outbound. Эта команда есть только
-# в podkop-engine (в «sing-box version» строка Features: с tools.decode-link).
-# Без неё Podkop на первом же таком ключе пишет fatal и выходит, и точно так же
-# он выходит на ключе, который decode-link не принял. Поэтому xhttp-ключ
-# пропускается, только когда умеют оба, и outbound для sing-box check берётся
-# от того же decode-link.
-PODKOP_FACADE_PATH = '/usr/lib/podkop/sing_box_config_facade.sh'
-PODKOP_DECODED_TRANSPORTS = ('xhttp', 'splithttp')
-# Как url_get_query_param в helpers.sh Podkop: последний type= в ссылке без
-# фрагмента, без раскодирования и с учётом регистра.
-PODKOP_TYPE_PARAM_RE = re.compile(r'.*[?&]type=([^&?#]*)', re.S)
-DECODE_LINK_TIMEOUT = 15
-PODKOP_XHTTP = {}
-DECODED_LINKS = {}
-
-
-def podkop_decoded_transport(link):
-    """'xhttp' или 'splithttp', если Podkop отдаст ссылку decode-link, иначе ''.
-
-    Решение повторяет case в sing_box_cf_add_proxy_outbound. Наш разбор
-    запроса для него не годится: он берёт первое значение и приводит его к
-    нижнему регистру, а type=XHTTP Podkop понесёт в свой конвертер, и тот
-    соберёт обычный TCP.
-    """
-    link = str(link or '')
-    if link.split('://', 1)[0] not in ('vless', 'trojan'):
-        return ''
-    m = PODKOP_TYPE_PARAM_RE.match(link.split('#', 1)[0])
-    if m and m.group(1) in PODKOP_DECODED_TRANSPORTS:
-        return m.group(1)
-    return ''
-
-
-def podkop_xhttp_blocker():
-    """'' если Podkop и sing-box вместе собирают xhttp, иначе причина отказа.
-
-    Считается при первом xhttp-ключе, так что прогоны без них лишний раз
-    sing-box не запускают.
-    """
-    if 'reason' not in PODKOP_XHTTP:
-        PODKOP_XHTTP['reason'] = _podkop_xhttp_blocker()
-    return PODKOP_XHTTP['reason']
-
-
-def _podkop_xhttp_blocker():
-    try:
-        with open(PODKOP_FACADE_PATH, encoding='utf-8', errors='replace') as f:
-            facade = f.read()
-    except OSError:
-        facade = ''
-    if 'decode-link' not in facade or 'xhttp' not in facade:
-        return 'xhttp_unsupported_podkop'
-    # Как sing_box_has_feature в helpers.sh Podkop: список через запятую из
-    # строки Features:, имя сравнивается целиком.
-    for line in sing_box_version_text().splitlines():
-        if line.startswith('Features:'):
-            if 'tools.decode-link' in line[len('Features:'):].strip().split(','):
-                return ''
-            break
-    return 'xhttp_needs_podkop_engine'
-
-
-def decode_link_outbound(link, tag):
-    """Outbound, который Podkop соберёт из ссылки через decode-link.
-
-    Результат запоминается: один ключ проверяется и формально, и в каждом
-    запуске sing-box check, а на слабом роутере каждый запуск sing-box заметен.
-    """
-    if link not in DECODED_LINKS:
-        DECODED_LINKS[link] = _run_decode_link(link)
-    outbound, reason, detail = DECODED_LINKS[link]
-    if reason:
-        raise LinkValidationError(reason, detail)
-    # Podkop делает то же самое: $raw_outbound + {tag: $tag}.
-    return dict(outbound, tag=tag)
-
-
-def _run_decode_link(link):
-    try:
-        result = subprocess.run(
-            ['sing-box', 'tools', 'decode-link', '--compact', link],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            encoding='utf-8', errors='replace', timeout=DECODE_LINK_TIMEOUT)
-    except FileNotFoundError:
-        return None, 'singbox_not_found', ''
-    except (OSError, subprocess.SubprocessError):
-        return None, 'decode_link_failed', 'sing-box не ответил'
-    messages = [ln.strip() for ln in (result.stderr or '').splitlines() if ln.strip()]
-    if result.returncode != 0:
-        detail = messages[0] if messages else f'код {result.returncode}'
-        return None, 'decode_link_failed', re.sub(r'^error:\s*', '', detail)
-    try:
-        outbound = json.loads(result.stdout or '')
-    except ValueError:
-        outbound = None
-    if not isinstance(outbound, dict) or not outbound.get('type'):
-        return None, 'decode_link_failed', 'sing-box не вернул outbound'
-    # С предупреждениями Podkop ключ всё равно собирает и пишет их в лог при
-    # каждом запуске: так decode-link называет то, чего outbound не сделает.
-    name = link_name(link)
-    for message in messages:
-        log('DEBUG', 'decode-link' + (f" ({name})" if name else '') + f": {message}")
-    return outbound, '', ''
-
-
-# Podkop 0.8 (podkop-exp из podkop-net/podkop-experimental) — уже не скрипт, а
-# один бинарник /usr/bin/podkop с sing-box внутри. Ни конвертера
-# sing_box_config_facade.sh, ни отдельного sing-box у него нет (podkop-engine
-# при установке удаляется), так что проверка для Podkop 0.7 отбросила бы все
-# ключи как «sing-box не найден». Зато есть «podkop check_links»: на каждый
-# ключ он отвечает {ok, error} ровно так, как его примет движок этой сборки.
-# Отличаем по тому же признаку, что и установщик podkop-exp: у 0.7 в начале
-# файла «#!».
-PODKOP_BINARY_PATH = '/usr/bin/podkop'
-CHECK_LINKS_TIMEOUT = 120
-# Ключи идут аргументами: один запуск на пачку, чтобы не упереться в лимит
-# длины командной строки на длинных подписках.
-CHECK_LINKS_BATCH_BYTES = 64 * 1024
-
-
-def podkop_is_backend_binary():
-    try:
-        with open(PODKOP_BINARY_PATH, 'rb') as f:
-            head = f.read(2)
-    except OSError:
-        return False
-    return len(head) == 2 and head != b'#!'
-
-
-def run_podkop_check_links(links):
-    """([(ok, error), ...] по ключам, число запусков) или None, если podkop
-    check_links не ответил."""
-    results = []
-    batch, size = [], 0
-    batches = []
-    for link in links:
-        if batch and size + len(link) > CHECK_LINKS_BATCH_BYTES:
-            batches.append(batch)
-            batch, size = [], 0
-        batch.append(link)
-        size += len(link) + 1
-    if batch:
-        batches.append(batch)
-    for batch in batches:
-        try:
-            result = subprocess.run(
-                [PODKOP_BINARY_PATH, 'check_links'] + batch,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                encoding='utf-8', errors='replace', timeout=CHECK_LINKS_TIMEOUT)
-            answer = json.loads(result.stdout or '')
-        except (OSError, subprocess.SubprocessError, ValueError):
-            return None
-        if not isinstance(answer, list) or len(answer) != len(batch):
-            return None
-        for item in answer:
-            if not isinstance(item, dict):
-                return None
-            results.append((item.get('ok') is True, str(item.get('error') or '')))
-    return results, len(batches)
-
-
-def validate_links_with_podkop_check_links(sec, links):
-    """Проверка ключей самим Podkop 0.8; None, если check_links недоступен."""
-    links, _dups = dedupe_links_keep_order(list(links or []))
-    answer = run_podkop_check_links(links)
-    if answer is None:
-        return None
-    results, runs = answer
-    valid = []
-    errors = {}
-    for link, (ok, error) in zip(links, results):
-        if ok:
-            valid.append(link)
-            continue
-        errors[error] = errors.get(error, 0) + 1
-        name = link_name(link)
-        log('DEBUG', f"[{sec}]: podkop check_links не принял ключ"
-                     + (f" ({name})" if name else '') + (f": {error}" if error else ''))
-    rejected = len(links) - len(valid)
-    stats = {
-        'input': len(links),
-        'formal_ok': len(links),
-        'rejected': rejected,
-        'rejected_by_reason': {'check_links_rejected': rejected} if rejected else {},
-        'singbox_runs': runs,
-        'hard_rejected': rejected,
-        'hard_check_ok': len(valid) > 0,
-    }
-    log('INFO', f"[{sec}]: проверка ключей podkop check_links: принято {len(valid)}, отброшено {rejected}")
-    for error, count in sorted(errors.items(), key=lambda kv: -kv[1]):
-        log('WARN', f"[{sec}]: {error or 'без причины'}: {count}")
-    return valid, stats
 
 
 def validation_reason_text(reason):
@@ -2345,135 +2105,8 @@ def _port_int(port):
     raise LinkValidationError('invalid_port')
 
 
-def _validate_hysteria2_ports(port):
-    port = str(port or '').strip()
-    if not port:
-        raise LinkValidationError('missing_port')
-    if ',' not in port and '-' not in port:
-        return {'server_port': _port_int(port)}
-    items = []
-    for raw in port.split(','):
-        item = raw.strip()
-        if not item:
-            continue
-        if '-' in item:
-            a, b = item.split('-', 1)
-            ai = _port_int(a)
-            bi = _port_int(b)
-            if ai > bi:
-                raise LinkValidationError('invalid_port')
-            items.append(f'{ai}:{bi}')
-        else:
-            p = _port_int(item)
-            items.append(f'{p}:{p}')
-    if not items:
-        raise LinkValidationError('invalid_port')
-    return {'server_ports': items}
-
-
 def _split_csv(value):
     return [x.strip() for x in str(value or '').split(',') if x.strip()]
-
-
-def _build_tls_object(parts):
-    scheme = parts['scheme']
-    q = parts['query']
-    security = (q.get('security', '') or '').strip().lower()
-    if not security and scheme in ('hy2', 'hysteria2'):
-        security = 'tls'
-    if security not in VALID_SECURITY:
-        raise LinkValidationError('unsupported_security', security)
-    if security in ('', 'none'):
-        return None
-
-    tls = {'enabled': True}
-    sni = q.get('sni') or q.get('peer') or ''
-    if sni:
-        tls['server_name'] = sni
-    insecure = (q.get('allowInsecure') or q.get('insecure') or '').strip().lower()
-    if insecure in ('1', 'true', 'yes', 'on'):
-        tls['insecure'] = True
-    alpn = _split_csv(q.get('alpn', ''))
-    if alpn:
-        tls['alpn'] = alpn
-    fp = q.get('fp', '')
-    if fp and scheme not in ('hy2', 'hysteria2'):
-        tls['utls'] = {'enabled': True, 'fingerprint': fp}
-    if security == 'reality':
-        pbk = q.get('pbk', '')
-        if not pbk:
-            raise LinkValidationError('missing_reality_public_key')
-        tls['reality'] = {'enabled': True, 'public_key': pbk}
-        sid = q.get('sid', '')
-        if sid:
-            tls['reality']['short_id'] = sid
-    return tls
-
-
-def _build_transport_object(parts):
-    q = parts['query']
-    transport = (q.get('type', '') or '').strip().lower()
-    if transport == 'xhttp' and TARGET['title'] == 'Tachyon' and not TARGET['xhttp']:
-        raise LinkValidationError('xhttp_unsupported_singbox', transport)
-    if transport not in TARGET['transports']:
-        raise LinkValidationError('unsupported_transport', transport)
-    if transport in ('', 'tcp', 'raw'):
-        return None
-    if transport == 'ws':
-        ws = {'type': 'ws', 'path': q.get('path', '')}
-        host = q.get('host', '')
-        if host:
-            ws['headers'] = {'Host': host}
-        ed = q.get('ed', '')
-        if ed:
-            try:
-                ws['max_early_data'] = int(ed)
-            except Exception:
-                raise LinkValidationError('invalid_transport_param')
-        eh = q.get('eh', '') or q.get('earlyDataHeaderName', '')
-        if eh:
-            ws['early_data_header_name'] = eh
-        return ws
-    if transport == 'grpc':
-        grpc = {'type': 'grpc'}
-        service_name = q.get('serviceName', '') or q.get('service_name', '')
-        if service_name:
-            grpc['service_name'] = service_name
-        return grpc
-    # The shapes below follow Tachyon's parser, so sing-box check sees the
-    # outbound Tachyon will actually build.
-    path = q.get('path', '')
-    host = q.get('host', '')
-    if transport in ('http', 'h2'):
-        http = {'type': 'http'}
-        if path:
-            http['path'] = path
-        if host:
-            http['host'] = [h.strip() for h in host.split(',') if h.strip()]
-        return http
-    if transport == 'httpupgrade':
-        upgrade = {'type': 'httpupgrade'}
-        if path:
-            upgrade['path'] = path
-        if host:
-            upgrade['host'] = host
-        return upgrade
-    if transport == 'xhttp':
-        mode = q.get('mode', '') or 'auto'
-        if mode not in ('auto', 'packet-up', 'stream-up', 'stream-one'):
-            mode = 'auto'
-        # Tachyon's defaults; sing-box-extended refuses xhttp without
-        # x_padding_bytes ("x_padding_bytes cannot be disabled").
-        xhttp = {
-            'type': 'xhttp', 'mode': mode, 'path': path or '/',
-            'x_padding_bytes': '100-1000', 'no_grpc_header': False,
-            'sc_max_each_post_bytes': '1000000', 'sc_min_posts_interval_ms': '30'
-        }
-        host = host or q.get('sni', '')
-        if host:
-            xhttp['host'] = host
-        return xhttp
-    raise LinkValidationError('unsupported_transport', transport)
 
 
 def _parse_ss_userinfo(userinfo):
@@ -2490,395 +2123,9 @@ def _parse_ss_userinfo(userinfo):
     return method, password
 
 
-
 def _query_has_param(q, name):
     name = str(name or '').strip()
     return name in q
-
-
-def _set_query_param_preserve_fragment(link, key, value):
-    """Set or add a query parameter without touching the fragment/name.
-
-    Podkop treats an empty/missing transport type for vless/trojan as an
-    unknown transport. For common tcp links the URI often omits type=tcp,
-    while sing-box itself accepts the equivalent outbound without a transport
-    object. We normalize only the stored URI so Podkop parses it safely.
-    """
-    link = str(link or '').strip()
-    if '#' in link:
-        base, frag = link.split('#', 1)
-        frag = '#' + frag
-    else:
-        base, frag = link, ''
-
-    if '?' in base:
-        prefix, query = base.split('?', 1)
-        parts = []
-        changed = False
-        for part in query.split('&'):
-            if not part:
-                continue
-            k = part.split('=', 1)[0]
-            if unquote_percent(k).strip().lower() == key.lower():
-                parts.append(f'{k}={value}')
-                changed = True
-            else:
-                parts.append(part)
-        if not changed:
-            parts.append(f'{key}={value}')
-        return prefix + '?' + '&'.join(parts) + frag
-    return base + '?' + f'{key}={value}' + frag
-
-
-def normalize_link_for_podkop(link):
-    """Normalize URI quirks that Podkop does not tolerate but sing-box does.
-
-    Current Podkop calls _add_outbound_transport for vless/trojan and logs
-    Unknown transport '' when the `type` query parameter is missing/empty.
-    For these protocols missing type is commonly intended as plain TCP, so we
-    make it explicit before writing the link to /etc/config/podkop.
-    """
-    parts = _parse_link_parts(link)
-    scheme = parts['scheme']
-    q = parts['query']
-    if scheme in ('vless', 'trojan'):
-        transport = (q.get('type', '') or '').strip().lower()
-        if transport == '':
-            return _set_query_param_preserve_fragment(link, 'type', 'tcp'), 'normalized_missing_transport'
-    return link, ''
-
-def proxy_link_to_singbox_outbound(link, tag):
-    transport = podkop_decoded_transport(link) if TARGET['title'] == 'Podkop' else ''
-    if transport:
-        blocker = podkop_xhttp_blocker()
-        if blocker:
-            raise LinkValidationError(blocker, transport)
-        return decode_link_outbound(link, tag)
-
-    parts = _parse_link_parts(link)
-    scheme = parts['scheme']
-    host = parts['host']
-    port = parts['port']
-    userinfo = parts['userinfo']
-    q = parts['query']
-
-    if not host:
-        raise LinkValidationError('missing_host')
-    if not port:
-        raise LinkValidationError('missing_port')
-
-    outbound = {'tag': tag}
-
-    if scheme in ('socks4', 'socks4a', 'socks5'):
-        outbound.update({
-            'type': 'socks',
-            'server': host,
-            'server_port': _port_int(port),
-            'version': scheme.replace('socks', '')
-        })
-        if scheme == 'socks5' and userinfo:
-            if ':' in userinfo:
-                username, password = userinfo.split(':', 1)
-                if username:
-                    outbound['username'] = username
-                if password:
-                    outbound['password'] = password
-            else:
-                outbound['username'] = userinfo
-
-    elif scheme == 'ss':
-        method, password = _parse_ss_userinfo(userinfo)
-        outbound.update({
-            'type': 'shadowsocks',
-            'server': host,
-            'server_port': _port_int(port),
-            'method': method,
-            'password': password
-        })
-
-    elif scheme == 'vless':
-        uuid = userinfo
-        if not uuid:
-            raise LinkValidationError('missing_userinfo')
-        if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', uuid):
-            raise LinkValidationError('invalid_userinfo')
-        outbound.update({
-            'type': 'vless',
-            'server': host,
-            'server_port': _port_int(port),
-            'uuid': uuid
-        })
-        flow = q.get('flow', '')
-        if flow:
-            outbound['flow'] = flow
-        packet_encoding = q.get('packetEncoding', '')
-        if packet_encoding:
-            outbound['packet_encoding'] = packet_encoding
-
-    elif scheme == 'trojan':
-        if not userinfo:
-            raise LinkValidationError('missing_userinfo')
-        outbound.update({
-            'type': 'trojan',
-            'server': host,
-            'server_port': _port_int(port),
-            'password': userinfo
-        })
-
-    elif scheme in ('hy2', 'hysteria2'):
-        if not userinfo:
-            raise LinkValidationError('missing_userinfo')
-        outbound.update({
-            'type': 'hysteria2',
-            'server': host,
-            'password': userinfo
-        })
-        outbound.update(_validate_hysteria2_ports(port))
-        obfs_type = q.get('obfs', '')
-        obfs_password = q.get('obfs-password', '')
-        if obfs_type and obfs_password:
-            outbound['obfs'] = {'type': obfs_type, 'password': obfs_password}
-        for src, dst in (('upmbps', 'up_mbps'), ('downmbps', 'down_mbps')):
-            val = q.get(src, '')
-            if val:
-                try:
-                    outbound[dst] = int(val)
-                except Exception:
-                    raise LinkValidationError('invalid_transport_param')
-
-    else:
-        raise LinkValidationError('unsupported_scheme', parts.get('scheme', ''))
-
-    tls = _build_tls_object(parts)
-    if tls:
-        outbound['tls'] = tls
-    transport = _build_transport_object(parts)
-    if transport:
-        outbound['transport'] = transport
-    return outbound
-
-
-def _singbox_config_for_links(links):
-    outbounds = []
-    for idx, link in enumerate(links, 1):
-        outbounds.append(proxy_link_to_singbox_outbound(link, f'podkop-sub-test-{idx}'))
-    return {'log': {'disabled': True}, 'outbounds': outbounds}
-
-
-def parse_singbox_check_position(text, count):
-    """Позиция ключа, на котором sing-box check остановился, или None.
-
-    sing-box разбирает и поднимает outbound'ы по порядку и падает на первом
-    неподходящем, называя его: «outbounds[3].transport: ...» при разборе
-    конфига и «initialize outbound[1]: ...» при инициализации. Номер в
-    сообщении — индекс в том же массиве, который мы ему и передали, поэтому по
-    нему сразу видно виновника. Если индекса нет, в ход идёт тег: имена вида
-    podkop-sub-test-N мы раздаём сами, по порядку, с единицы.
-    """
-    text = text or ''
-
-    m = SINGBOX_CHECK_INDEX_RE.search(text)
-    if m:
-        idx = int(m.group(1))
-        if 0 <= idx < count:
-            return idx
-
-    m = SINGBOX_CHECK_TAG_RE.search(text)
-    if m:
-        idx = int(m.group(1)) - 1
-        if 0 <= idx < count:
-            return idx
-
-    return None
-
-
-def run_singbox_check_for_links(links, timeout=SINGBOX_CHECK_TIMEOUT_DEFAULT):
-    """Возвращает (ok, причина, позиция битого ключа или None)."""
-    if not links:
-        return True, '', None
-    tmp_path = f'/tmp/podkop-sub-singbox-check-{os.getpid()}-{int(time.time() * 1000)}.json'
-    try:
-        cfg = _singbox_config_for_links(links)
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, ensure_ascii=False, separators=(',', ':'))
-            f.write('\n')
-        try:
-            result = subprocess.run(
-                [core_binary(), '-c', tmp_path, 'check'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=timeout
-            )
-        except FileNotFoundError:
-            return False, 'singbox_not_found', None
-        except subprocess.TimeoutExpired:
-            return False, 'singbox_check_failed', None
-        if result.returncode == 0:
-            return True, '', None
-        position = parse_singbox_check_position(
-            (result.stderr or '') + '\n' + (result.stdout or ''), len(links))
-        return False, 'singbox_check_failed', position
-    finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-
-def hard_validate_links_with_singbox(sec, links, max_runs=None):
-    links = list(links or [])
-    if not links:
-        return [], {'ok': True, 'runs': 0, 'rejected': 0, 'rejected_by_reason': {}}
-
-    # Один запуск на битый ключ плюс подтверждающий, плюс запас на случай, когда
-    # позицию разобрать не вышло и список делится пополам.
-    if max_runs is None:
-        max_runs = max(SINGBOX_CHECK_MAX_RUNS_DEFAULT, len(links) + 8)
-
-    runs = {'n': 0}
-    bad_ids = set()
-    bad_reason = {}
-
-    def check(batch):
-        if not batch:
-            return True, '', None
-        if runs['n'] >= max_runs:
-            raise LinkValidationError('singbox_check_limit')
-        runs['n'] += 1
-        return run_singbox_check_for_links(batch)
-
-    def mark_bad(link, reason):
-        sid = stable_id(link)
-        bad_ids.add(sid)
-        bad_reason[sid] = reason or 'singbox_check_failed'
-
-    def isolate(batch):
-        """Запасной путь: sing-box не назвал позицию, ищем делением пополам."""
-        if not batch:
-            return
-        if len(batch) == 1:
-            mark_bad(batch[0], 'singbox_check_failed')
-            return
-        mid = len(batch) // 2
-        for part in (batch[:mid], batch[mid:]):
-            if not part:
-                continue
-            ok_part, reason_part, _position = check(part)
-            if not ok_part:
-                if reason_part == 'singbox_not_found':
-                    for link in part:
-                        mark_bad(link, 'singbox_not_found')
-                else:
-                    isolate(part)
-
-    try:
-        pending = list(links)
-        while pending:
-            ok, reason, position = check(pending)
-            if ok:
-                break
-            if reason == 'singbox_not_found':
-                return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {'singbox_not_found': len(links)}}
-
-            if position is None:
-                isolate(pending)
-                pending = [x for x in pending if stable_id(x) not in bad_ids]
-                if pending:
-                    ok_final, reason_final, _position = check(pending)
-                    if not ok_final:
-                        return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {reason_final or 'singbox_check_failed': len(links)}}
-                break
-
-            culprit = pending.pop(position)
-            mark_bad(culprit, reason)
-            name = link_name(culprit)
-            log('DEBUG', f"[{sec}]: sing-box отклонил ключ {position + 1}/{len(pending) + 1}" + (f": {name}" if name else ''))
-
-        good = [x for x in links if stable_id(x) not in bad_ids]
-        by_reason = {}
-        for sid in bad_ids:
-            r = bad_reason.get(sid, 'singbox_check_failed')
-            by_reason[r] = by_reason.get(r, 0) + 1
-        return good, {'ok': True, 'runs': runs['n'], 'rejected': len(bad_ids), 'rejected_by_reason': by_reason}
-    except LinkValidationError as e:
-        return [], {'ok': False, 'runs': runs['n'], 'rejected': len(links), 'rejected_by_reason': {e.reason: len(links)}}
-
-
-def validate_links_for_podkop_singbox(sec, links):
-    stats = {
-        'input': len(links or []),
-        'formal_ok': 0,
-        'rejected': 0,
-        'rejected_by_reason': {},
-        'singbox_runs': 0,
-        'hard_rejected': 0,
-        'hard_check_ok': False,
-    }
-    if TARGET['check_links']:
-        checked = validate_links_with_podkop_check_links(sec, links)
-        if checked is not None:
-            return checked
-        log('WARN', f"[{sec}]: podkop check_links не ответил, ключи проверяются как для Podkop 0.7")
-    formally_ok = []
-    normalized_count = 0
-    for link in links or []:
-        try:
-            normalized_link, normalize_reason = normalize_link_for_podkop(link)
-            if normalize_reason:
-                normalized_count += 1
-                stats['rejected_by_reason'][normalize_reason] = stats['rejected_by_reason'].get(normalize_reason, 0) + 1
-            # Генерация outbound сама является формальной проверкой всех поддерживаемых параметров.
-            proxy_link_to_singbox_outbound(normalized_link, 'podkop-sub-formal-test')
-            formally_ok.append(normalized_link)
-        except LinkValidationError as e:
-            stats['rejected'] += 1
-            stats['rejected_by_reason'][e.reason] = stats['rejected_by_reason'].get(e.reason, 0) + 1
-            # Одной сводки «отброшено: 1» мало, чтобы понять, придирается ли
-            # проверка или ключ и правда не для Podkop. Поэтому в лог идёт имя
-            # ключа и то самое значение, на котором разбор встал.
-            name = link_name(link)
-            detail = f": {e.detail}" if e.detail else ''
-            log('DEBUG', f"[{sec}]: ключ не для {TARGET['title']}"
-                         + (f" ({name})" if name else '')
-                         + f": {validation_reason_text(e.reason)}{detail}")
-
-    if normalized_count:
-        log('INFO', f"[{sec}]: для совместимости с {TARGET['title']} добавлен type=tcp в ключах: {normalized_count}")
-
-    # Нормализация могла сделать несколько URI одинаковыми, поэтому повторно убираем дубли.
-    formally_ok, normalized_dups = dedupe_links_keep_order(formally_ok)
-    if normalized_dups:
-        log('INFO', f"[{sec}]: после нормализации URI отброшено дублей: {normalized_dups}")
-
-    stats['formal_ok'] = len(formally_ok)
-    if stats['rejected']:
-        log('WARN', f"[{sec}]: {TARGET['title']} не умеет собрать outbound из ключей: {stats['rejected']}")
-        for reason, count in sorted(stats['rejected_by_reason'].items()):
-            if reason == 'normalized_missing_transport':
-                continue
-            log('WARN', f"[{sec}]: {validation_reason_text(reason)}: {count}")
-
-    if not formally_ok:
-        stats['hard_check_ok'] = False
-        return [], stats
-
-    valid, hard = hard_validate_links_with_singbox(sec, formally_ok)
-    stats['singbox_runs'] = int(hard.get('runs', 0) or 0)
-    stats['hard_rejected'] = int(hard.get('rejected', 0) or 0)
-    for reason, count in (hard.get('rejected_by_reason') or {}).items():
-        stats['rejected_by_reason'][reason] = stats['rejected_by_reason'].get(reason, 0) + int(count or 0)
-    stats['rejected'] += stats['hard_rejected']
-    stats['hard_check_ok'] = bool(hard.get('ok')) and len(valid) > 0
-
-    if hard.get('ok'):
-        log('INFO', f"[{sec}]: проверка совместимости {TARGET['title']}/sing-box: принято {len(valid)}, отброшено {stats['rejected']}, sing-box check запусков: {stats['singbox_runs']}")
-    else:
-        log('WARN', f"[{sec}]: проверка совместимости {TARGET['title']}/sing-box не смогла собрать безопасный список; секция не будет изменена")
-        for reason, count in sorted((hard.get('rejected_by_reason') or {}).items()):
-            log('WARN', f"[{sec}]: {validation_reason_text(reason)}: {count}")
-
-    return valid, stats
 
 
 def validate_jobs_links_for_podkop(jobs):
@@ -2895,7 +2142,7 @@ def validate_jobs_links_for_podkop(jobs):
                 'hard_check_ok': False,
             }
             continue
-        valid, stats = validate_links_for_podkop_singbox(sec, links)
+        valid, stats = BACKEND.validate_links(sec, links)
         job['validation'] = stats
         job['links'] = valid
         external_candidate_ids = set(job.get('external_candidate_ids') or set())
@@ -3321,49 +2568,6 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
         else:
             log("WARN", f"[{sec}]: После обработки внешних источников не осталось ссылок.")
 
-def load_current_podkop_sections(config_path):
-    # Ключ словаря — имя в нижнем регистре, как в target_section, а 'name' —
-    # имя ровно как в конфиге. Podkop строит теги outbound'ов как
-    # <секция>-N-out без смены регистра, и для секции YouTube поиск по тегу
-    # youtube-1-out не находил ни одного ключа: все считались пропавшими, а
-    # через 72 часа fail_count вычищал их из секции.
-    result = {}
-    if config_backend(config_path) == 'tachyon':
-        urltest_owners = tachyon_urltest_owners(config_path)
-        for s in parse_uci_sections(config_path):
-            if s['type'].lower() != 'section' or not s['name']:
-                continue
-            name = s['name'].strip().lower()
-            is_urltest = name in urltest_owners or s['options'].get('urltest_enabled') == '1'
-            result[name] = {
-                'name': s['name'].strip(),
-                'ptype': 'urltest' if is_urltest else 'selector',
-                'links': list(s['lists'].get('selector_proxy_links', [])),
-                'section': s
-            }
-        return result
-    for s in parse_uci_sections(config_path):
-        if s['type'].lower() != 'section' or not s['name']:
-            continue
-        name = s['name'].strip().lower()
-        ptype = s['options'].get('proxy_config_type', 'urltest').strip().lower()
-        if ptype not in VALID_PTYPES:
-            ptype = 'urltest'
-        links = []
-        if ptype == 'selector':
-            links = s['lists'].get('selector_proxy_links', [])
-        else:
-            links = s['lists'].get('urltest_proxy_links', [])
-        # Fallback: если тип не совпал, но ссылки есть в другом списке.
-        if not links:
-            if s['lists'].get('urltest_proxy_links'):
-                ptype = 'urltest'
-                links = s['lists'].get('urltest_proxy_links', [])
-            elif s['lists'].get('selector_proxy_links'):
-                ptype = 'selector'
-                links = s['lists'].get('selector_proxy_links', [])
-        result[name] = {'name': s['name'].strip(), 'ptype': ptype, 'links': list(links), 'section': s}
-    return result
 
 
 def prune_state_to_config(state, current_sections):
@@ -3433,7 +2637,6 @@ def save_state(path, state):
         pass
 
 
-
 def fmt_time(ts):
     try:
         ts = int(ts or 0)
@@ -3445,7 +2648,6 @@ def fmt_time(ts):
         return time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))
     except Exception:
         return str(ts)
-
 
 
 def enabled_subscription_schedules(config_path=SUBSCRIPTIONS_CONFIG_DEFAULT):
@@ -3507,6 +2709,7 @@ def status_text_for_code(code):
         'no_subscription_links': 'валидных ключей из подписок не найдено',
         'no_jobs': 'нет настроенных подписок',
         'config_write_error': 'ошибка записи конфига',
+        'backend_missing': 'не установлен модуль поддержки ПО',
         'validation_failed': 'ключи не прошли проверку совместимости с Podkop/sing-box',
         'time_not_ready': 'время роутера не синхронизировано',
         'unknown': 'нет данных'
@@ -3651,7 +2854,6 @@ def state_status_summary(state):
         lines.append('Повтор обновления активен: следующая попытка будет выполнена по cron.')
 
     return '\n'.join(lines)
-
 
 
 def print_fail_count_summary(state_path):
@@ -3978,7 +3180,7 @@ def mark_subscription_seen(state, sec, links):
 
 
 def load_podkop_proxies(config_path):
-    cmd = ['/usr/bin/' + config_backend(config_path), 'clash_api', 'get_proxies']
+    cmd = [BACKEND.CLI, 'clash_api', 'get_proxies']
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"command failed: {' '.join(cmd)}")
@@ -4023,7 +3225,7 @@ def proxy_status(proxy):
 def observe_only(config_path, state_path):
     log("INFO", "=== ЗАПУСК ПАССИВНОЙ ПРОВЕРКИ КЛЮЧЕЙ ===")
     state = load_state(state_path)
-    current_sections = load_current_podkop_sections(config_path)
+    current_sections = BACKEND.load_sections(config_path)
     imported, updated = import_current_links_to_state(state, current_sections)
     if imported or updated:
         log("INFO", f"State импортирован из текущего {TARGET['title']} config: новых={imported}, обновлено={updated}")
@@ -4093,7 +3295,6 @@ def observe_only(config_path, state_path):
     state['health']['missing'] = missing
     save_state(state_path, state)
     log("INFO", f"Проверка завершена: total={total}, ok={ok}, bad={bad}, missing={missing}. Конфиг {TARGET['title']} не изменялся.")
-
 
 
 def add_recently_removed(state, sid, sec, item, reason):
@@ -4530,7 +3731,15 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     }
     return final_links, info
 
-def update_uci_config_with_final_links(config_path, updates):
+def rewrite_managed_sections(config_path, updates, stripped_prefixes, section_lines):
+    """Меняет в текстовом конфиге ключи секций `config section` из updates.
+
+    Остальное в файле не трогается: из секции вырезаются только строки,
+    которые начинаются с stripped_prefixes (вместе с продолжением
+    многострочного значения), а в её конец дописывается section_lines(sec,
+    upd). Что вырезать и что писать, решает модуль ПО.
+    Возвращает (старый текст, новые строки, {имя в нижнем регистре: имя как в файле}).
+    """
     if not os.path.exists(config_path):
         log("ERROR", f"Конфиг {config_path} не найден. Настройте {TARGET['title']} в интерфейсе.")
         sys.exit(1)
@@ -4540,43 +3749,20 @@ def update_uci_config_with_final_links(config_path, updates):
     current_sec = None
     current_type = None
     found_sections = set()
-    # Имя секции ровно как в файле: на него ссылается группа URLTest Tachyon.
+    # Имя секции ровно как в файле: на него, например, ссылается группа
+    # URLTest Tachyon.
     found_names = {}
     # Кавычка ещё не закрытого многострочного значения, которое вырезается
     # (proxy_string в Podkop — textarea, в нём бывает несколько строк).
     open_quote = None
-    tachyon = config_backend(config_path) == 'tachyon'
-    urltest_owners = tachyon_urltest_owners(config_path) if tachyon else set()
-    if tachyon:
-        stripped_prefixes = ('list selector_proxy_links', 'option action')
-    else:
-        stripped_prefixes = (
-            'list urltest_proxy_links',
-            'list selector_proxy_links',
-            'option connection_type',
-            'option proxy_config_type',
-            'option proxy_string'
-        )
 
     def is_target(sec_type, sec_name):
         return sec_type and sec_name and sec_type.lower() == 'section' and sec_name.lower() in updates
 
     def flush_section(sec_type, sec_name):
-        if not is_target(sec_type, sec_name):
-            return
-        sec = sec_name.lower()
-        upd = updates[sec]
-        ptype = upd['ptype']
-        links = upd['links']
-        if tachyon:
-            out_lines.append(f"\toption action 'connection'\n")
-            for link in links:
-                out_lines.append(f"\tlist selector_proxy_links {uci_quote(link)}\n")
-            return
-        out_lines.append(f"\toption connection_type 'proxy'\n")
-        out_lines.append(f"\toption proxy_config_type '{ptype}'\n")
-        for link in links:
-            out_lines.append(f"\tlist {ptype}_proxy_links {uci_quote(link)}\n")
+        if is_target(sec_type, sec_name):
+            sec = sec_name.lower()
+            out_lines.extend(section_lines(sec, updates[sec]))
 
     for line in old_lines:
         # The name is optional: an anonymous section (Tachyon's `config urltest`)
@@ -4604,61 +3790,35 @@ def update_uci_config_with_final_links(config_path, updates):
         out_lines.append(line)
     if current_sec:
         flush_section(current_type, current_sec)
-    if tachyon:
-        for sec in sorted(found_sections):
-            ptype = updates[sec]['ptype']
-            if ptype == 'urltest' and sec not in urltest_owners:
-                if out_lines and not out_lines[-1].endswith('\n'):
-                    out_lines.append('\n')
-                out_lines.append("\nconfig urltest\n")
-                out_lines.append(f"\toption section {uci_quote(found_names.get(sec, sec))}\n")
-                for key, value in TACHYON_URLTEST_DEFAULTS:
-                    out_lines.append(f"\toption {key} {uci_quote(value)}\n")
-                log("INFO", f"[{sec}]: в Tachyon добавлена группа URLTest 'Fastest' для секции")
-            elif ptype == 'selector' and sec in urltest_owners:
-                log("INFO", f"[{sec}]: proxy_type=selector, но у секции в Tachyon есть группа URLTest; она оставлена как есть")
     for sec in updates:
         if sec not in found_sections:
             log("WARN", f"Секция '{sec}' собрана, но отсутствует как config section '{sec}' в {config_path}")
-    return ''.join(old_lines), ''.join(out_lines)
+    return ''.join(old_lines), out_lines, found_names
 
 
-def apply_updates_with_uci(config_path, updates):
-    backend = config_backend(config_path)
-    if os.path.abspath(config_path) != {'podkop': PODKOP_CONFIG_PATH, 'tachyon': TACHYON_CONFIG_PATH}[backend]:
+def apply_uci_updates(config_path, package, system_path, updates, section_commands):
+    """Повторяет запись ключей через uci и фиксирует её uci commit.
+
+    Только для настоящего конфига ПО (system_path): тесты и ручные запуски с
+    другим --config uci не касаются. section_commands(sec, upd) отдаёт
+    аргументы uci для одной секции, их состав решает модуль ПО.
+    """
+    if os.path.abspath(config_path) != system_path:
         return
     changed = False
     for key, upd in updates.items():
         # uci различает регистр: секция YouTube не найдётся как youtube.
         sec = upd.get('name') or key
-        links = upd.get('links') or []
-        ptype = upd.get('ptype', 'urltest')
-        exists = subprocess.run(['uci', '-q', 'get', f'{backend}.{sec}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        exists = subprocess.run(['uci', '-q', 'get', f'{package}.{sec}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
         if not exists:
             log("WARN", f"[{sec}]: секция отсутствует в {config_path}, UCI-применение пропущено")
             continue
-        if backend == 'tachyon':
-            subprocess.run(['uci', '-q', 'delete', f'tachyon.{sec}.selector_proxy_links'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(['uci', 'set', f'tachyon.{sec}.action=connection'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for link in links:
-                subprocess.run(['uci', 'add_list', f'tachyon.{sec}.selector_proxy_links={link}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            changed = True
-            continue
-        commands = [
-            ['uci', '-q', 'delete', f'podkop.{sec}.urltest_proxy_links'],
-            ['uci', '-q', 'delete', f'podkop.{sec}.selector_proxy_links'],
-            ['uci', '-q', 'delete', f'podkop.{sec}.proxy_string'],
-            ['uci', 'set', f'podkop.{sec}.connection_type=proxy'],
-            ['uci', 'set', f'podkop.{sec}.proxy_config_type={ptype}'],
-        ]
-        for cmd in commands:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for link in links:
-            subprocess.run(['uci', 'add_list', f'podkop.{sec}.{ptype}_proxy_links={link}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for cmd in section_commands(sec, upd):
+            subprocess.run(['uci'] + cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         changed = True
     if changed:
-        subprocess.run(['uci', 'commit', backend], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log("INFO", f"UCI-поля секций {backend_title(config_path)} зафиксированы через uci commit.")
+        subprocess.run(['uci', 'commit', package], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log("INFO", f"UCI-поля секций {TARGET['title']} зафиксированы через uci commit.")
 
 
 def write_config_atomic(path, content):
@@ -4708,6 +3868,24 @@ def normalize_config(text):
     return text.replace('\n', '').replace('\r', '')
 
 
+def report_backend_missing(args, missing):
+    # Обычно так бывает, когда ПО сменили после установки (Tachyon поставили
+    # поверх Podkop): установщик клал модуль только для прежнего.
+    message = (f"Нет модуля поддержки {TARGET['title']} ({missing.name}), конфиг не изменялся. "
+               f"Переустановите podkop-subscriptions, установщик поставит нужный модуль: {UPGRADE_COMMAND}")
+    # Лог прячет любые адреса (там бывают адреса подписок), поэтому команду
+    # целиком видно только в панели; в логе — где её взять.
+    log("ERROR", f"Нет модуля поддержки {TARGET['title']} ({missing.name}), конфиг не изменялся. "
+                 "Переустановите podkop-subscriptions командой из README, раздел «Обновить программу»; "
+                 "она же показана в панели.")
+    log("DEBUG", f"Причина: {missing.error}")
+    if args.observe_only or args.catch_up or args.catch_up_retry:
+        return
+    state = load_state(args.state)
+    update_subscription_meta(state, {}, 0, 0, 0, 0, 0, status='backend_missing', message=message)
+    save_state(args.state, state)
+
+
 def validate_file_argument(path, arg_name):
     if os.path.isdir(path):
         log("ERROR", f"{arg_name} должен указывать на файл, а не на директорию: {path}")
@@ -4721,11 +3899,15 @@ def main():
     setup_syslog()
     args = parse_args()
     args.config = resolve_config_path(args.config)
-    set_link_target(args.config)
+    TARGET['title'] = backend_title(args.config)
 
-    # Read-only informational commands must never be blocked by an update.
+    # Read-only informational commands must never be blocked by an update,
+    # nor by a missing backend module.
     if args.version:
         print(f"podkop-subscriptions {APP_VERSION}")
+        return 0
+    if args.backend_modules:
+        print(' '.join(BACKEND_MODULES[detect_backend(args.config)]))
         return 0
     if args.status_summary:
         print_status_summary(args.state)
@@ -4733,6 +3915,11 @@ def main():
     if args.fail_count:
         print_fail_count_summary(args.state)
         return 0
+    try:
+        select_backend(args.config)
+    except BackendMissing as e:
+        report_backend_missing(args, e)
+        return BACKEND_MISSING_EXIT_CODE
 
     lock_info = acquire_updater_lock(args)
     if lock_info is None:
@@ -4786,7 +3973,7 @@ def main():
             save_state(args.state, state)
             log("INFO", "Нет настроенных подписок. Выход без изменений.")
             return
-        current_sections = load_current_podkop_sections(args.config)
+        current_sections = BACKEND.load_sections(args.config)
         state = load_state(args.state)
 
         saved_recently_removed = state.get('recently_removed', {})
@@ -4865,7 +4052,7 @@ def main():
             else:
                 log("INFO", f"Изменений не обнаружено. Конфиг и {TARGET['title']} не трогаются.")
             return
-        old_content, new_content = update_uci_config_with_final_links(args.config, updates)
+        old_content, new_content = BACKEND.rewrite_config(args.config, updates)
         is_content_changed = normalize_config(old_content) != normalize_config(new_content)
         if not args.force and not is_content_changed:
             log("INFO", "После сборки изменений в конфиге не обнаружено. Перезапуск не требуется.")
@@ -4882,14 +4069,14 @@ def main():
             except Exception as e:
                 log("WARN", f"Не удалось создать backup {backup_path}: {e}")
             write_config_atomic(args.config, new_content)
-            apply_updates_with_uci(args.config, updates)
+            BACKEND.apply_uci(args.config, updates)
             # Tachyon's init script prints its own ubus noise ("Command failed:
             # ... tachyon-steer-zapret (Not found)"); keep only the exit code.
-            rc = subprocess.run([f"/etc/init.d/{config_backend(args.config)}", 'restart'],
+            rc = subprocess.run([BACKEND.INIT_SCRIPT, 'restart'],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
             if rc != 0:
-                log("WARN", f"/etc/init.d/{config_backend(args.config)} restart завершился с кодом {rc}")
-            log("INFO", f"Успешно завершено: конфиг обновлён, {backend_title(args.config)} перезапущен.")
+                log("WARN", f"{BACKEND.INIT_SCRIPT} restart завершился с кодом {rc}")
+            log("INFO", f"Успешно завершено: конфиг обновлён, {TARGET['title']} перезапущен.")
         except Exception as e:
             state = load_state(args.state)
             update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids), status='config_write_error', message=f'Ошибка при сохранении конфига: {e}')
