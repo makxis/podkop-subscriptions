@@ -1,10 +1,34 @@
 # Changelog
 
-## Unreleased
+## 3.10.1
 
-`install-dnsproxy.sh` is fetched from `main` directly, so this change is live
-as soon as it is pushed.
+`install-dnsproxy.sh` is fetched from `main` directly, so its change below
+has been live since it was pushed; the updater changes reach a router with
+the upgrade to 3.10.1.
 
+- An update could delete an unrelated option from a managed section. When
+  the updater cuts out the section's old keys, it found the end of a value by
+  counting apostrophes, but uci writes an apostrophe inside a value as
+  `'Tom'\''s'`, which has an odd number of them. The line after such a key
+  was taken for the rest of its value and dropped with it, so an option
+  that followed it, such as `domain_list` or `community_lists`, disappeared
+  from `/etc/config/podkop` (or `/etc/config/tachyon`). Names with an
+  apostrophe are common, since `encodeURIComponent` leaves it unencoded. A
+  multi-line `proxy_string` with an apostrophe inside could also leave its
+  tail behind as a stray line. Values are now read the way uci reads them.
+  A section that has already lost an option gets it back only by setting it
+  again in LuCI.
+- The config is written more safely: the temporary file is flushed to disk
+  before it replaces the config, so a power cut cannot leave an empty or
+  truncated one; a failed write no longer leaves the temporary file behind
+  in `/etc/config`, and it is now a hidden file there, which uci does not
+  read.
+- An invalid Regex filter is caught when the settings are read: a run logs
+  one `ERROR` per group, naming it and where the pattern breaks, instead of
+  one per source. The group's sources are no longer downloaded,
+  since without the filter their keys could not be picked. The section stays
+  as it is, as before, and the panel now says «некорректный Regex-фильтр»
+  instead of «все ключи отброшены фильтром». Other groups are unaffected.
 - `install-dnsproxy.sh` (installer 1.9.1 -> 1.9.2) no longer installed the
   `luci-app-dnsproxy` web interface on OpenWrt 24.10, while dnsproxy itself
   was installed and worked. Fantastic Packages has moved 24.10 off

@@ -543,7 +543,7 @@ Verify after changing a filter:
 grep -nE "Premium|LTE|YouTube|Финляндия|YT" /etc/config/podkop
 ```
 
-An invalid regular expression does not abort the update: the source is skipped with an `ERROR` in the log.
+An invalid regular expression does not abort the update. It is caught when the settings are read: a run logs one `ERROR` per group, naming it and where the pattern breaks. That group's sources are not downloaded, its section's keys stay as they are, and the panel status says «некорректный Regex-фильтр» (invalid Regex filter). Other groups are updated as usual.
 
 </details>
 

@@ -619,6 +619,184 @@ def test_uci_values():
               u.parse_uci_value(u.uci_quote(value)))
 
 
+def test_uci_open_quote():
+    print('Незакрытая кавычка в строке UCI')
+    cases = [
+        ("list x 'abc'", None, None),
+        ("list x 'a'\\''b'", None, None),
+        ("list x 'Tom'\\''s VPN'", None, None),
+        ("option proxy_string 'vless://a", None, "'"),
+        ("vless://b'", "'", None),
+        ("still inside", "'", "'"),
+        ("x'\\''y'", "'", None),
+        ('option x "a\\"b"', None, None),
+        ('option x "a', None, '"'),
+        ("option x 'a' # it's", None, None),
+        ("option x 'a#b'", None, None),
+        ("option x a\\'b", None, None),
+    ]
+    for text, start, expected in cases:
+        got = u.uci_open_quote(text, start)
+        check(f'{text!r} (с {start!r})', got == expected, repr(got))
+
+
+def test_rewrite_keeps_neighbours():
+    """Вырезая старые ключи секции, нельзя задеть её остальные опции."""
+    import tempfile
+    print('Перезапись ключей секции')
+    old_a = 'vless://00000000-0000-4000-8000-00000000000a@a.example.net:443#Tom%27s'
+    upd = {'main': {'ptype': 'urltest', 'name': 'main', 'links': [
+        "vless://00000000-0000-4000-8000-00000000000c@c.example.net:443#Joe's",
+        'vless://00000000-0000-4000-8000-00000000000d@d.example.net:443#D']}}
+    podkop = (
+        "config section 'main'\n"
+        "\toption connection_type 'proxy'\n"
+        "\toption proxy_config_type 'urltest'\n"
+        f"\tlist urltest_proxy_links '{old_a}'\n"
+        "\tlist urltest_proxy_links 'vless://00000000-0000-4000-8000-00000000000b@b.example.net:443#Tom'\\''s'\n"
+        "\toption domain_list 'ru'\n"
+        "\toption proxy_string 'vless://x@x.example.net:443#first\n"
+        "vless://y@y.example.net:443#Ann'\\''s\n"
+        "vless://z@z.example.net:443#last'\n"
+        "\tlist community_lists 'youtube'\n"
+        "\n"
+        "config settings 'settings'\n"
+        "\toption dns_server '1.1.1.1'\n"
+    )
+    tachyon = (
+        "config section 'main'\n"
+        "\toption action 'connection'\n"
+        "\tlist selector_proxy_links 'vless://00000000-0000-4000-8000-00000000000b@b.example.net:443#Tom'\\''s'\n"
+        "\toption domain_list 'ru'\n"
+        "\n"
+        "config urltest\n"
+        "\toption section 'main'\n"
+    )
+    for name, list_key, text, kept in (
+            ('podkop', 'urltest_proxy_links', podkop, ("option domain_list 'ru'", "list community_lists 'youtube'",
+                                "config settings 'settings'", "option dns_server '1.1.1.1'")),
+            ('tachyon', 'selector_proxy_links', tachyon, ("option domain_list 'ru'", "config urltest", "option section 'main'"))):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, name)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            _, new = u.update_uci_config_with_final_links(path, upd)
+            for line in kept:
+                check(f'{name}: осталось «{line}»', line in new, new)
+            check(f'{name}: старые ключи и proxy_string убраны',
+                  'b.example.net' not in new and 'a.example.net' not in new
+                  and 'proxy_string' not in new and 'z.example.net' not in new, new)
+            check(f'{name}: новые ключи записаны с экранированным апострофом',
+                  "c.example.net:443#Joe'\\''s'" in new and 'd.example.net' in new, new)
+            sections = {s['name']: s for s in u.parse_uci_sections(path)}
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new)
+            after = {s['name']: s for s in u.parse_uci_sections(path)}
+            check(f'{name}: разбор после перезаписи видит те же ключи',
+                  after['main']['lists'].get(list_key) == upd['main']['links'],
+                  str(after['main']['lists']))
+            check(f'{name}: опции секции не потерялись',
+                  after['main']['options'].get('domain_list') == 'ru'
+                  and set(sections) == set(after), str(after['main']['options']))
+
+
+def test_regex_filter():
+    import subprocess
+    import tempfile
+    print('Regex-фильтр')
+    links = ['vless://a@a.example.net:443#RU%20Moscow', 'vless://b@b.example.net:443#NL']
+    rx, err = u.compile_filter_regex('ru')
+    check('корректный regex собран', rx is not None and err == '', err)
+    check('совпадение без учёта регистра и по раскодированному имени',
+          u.filter_links(links, rx, 'ifmatch', 'skip', 'main', 'источник') == links[:1])
+    check('ifnotmatch', u.filter_links(links, rx, 'ifnotmatch', 'skip', 'main', 'источник') == links[1:])
+    check('пустой фильтр пропускает всё',
+          u.compile_filter_regex('') == (None, '')
+          and u.filter_links(links, None, 'ifmatch', 'skip', 'main', 'источник') == links)
+    rx, err = u.compile_filter_regex('(RU|NL')
+    check('битый regex распознан', rx is None and err, err)
+
+    config = (
+        "config subscription_group 'bad'\n"
+        "\toption target_section 'main'\n"
+        "\toption regex '(RU|NL'\n"
+        "\toption match_mode 'ifmatch'\n"
+        "\tlist source 'https://sub.example.net/a'\n"
+        "\n"
+        "config subscription_group 'good'\n"
+        "\toption target_section 'other'\n"
+        "\toption regex 'nl'\n"
+        "\tlist source 'https://sub.example.net/b'\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'podkop_subscriptions')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(config)
+        jobs = u.load_jobs_from_uci_podkop(path)
+    bad = jobs['main']['entries'][0]
+    good = jobs['other']['entries'][0]
+    check('группа с битым regex не выброшена, ошибка запомнена',
+          bad['regex'] is None and bad['regex_error'], str(bad))
+    check('соседняя группа собрана как обычно',
+          good['regex'] is not None and good['regex_error'] == '', str(good))
+
+    fetched = []
+    original = u.fetch_source_trying_fingerprints
+    try:
+        def fake_fetch(source, *args, **kwargs):
+            fetched.append(source)
+            raise subprocess.TimeoutExpired(source, 1)
+        u.fetch_source_trying_fingerprints = fake_fetch
+        only_bad = {'main': jobs['main']}
+        u.fetch_links(only_bad, 'hwid', 'model', 'kernel', config_path='/nonexistent/podkop')
+    finally:
+        u.fetch_source_trying_fingerprints = original
+    check('источник группы с битым regex не скачивается', fetched == [], str(fetched))
+    check('статус источника invalid_regex',
+          [st['status'] for st in jobs['main']['source_stats']] == ['invalid_regex'],
+          str(jobs['main']['source_stats']))
+    check('общий статус invalid_regex', u.classify_empty_status(only_bad) == 'invalid_regex',
+          u.classify_empty_status(only_bad))
+    mixed = {'main': jobs['main'], 'other': {'source_stats': [{'status': 'download_failed'}],
+                                             'source_errors': 1}}
+    check('упавшая загрузка соседа не прячется за invalid_regex',
+          u.classify_empty_status(mixed) == 'download_failed', u.classify_empty_status(mixed))
+
+
+def test_write_config_atomic():
+    import stat
+    import tempfile
+    print('Запись конфига')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'tachyon')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('old\n')
+        os.chmod(path, 0o600)
+        u.write_config_atomic(path, 'new\n')
+        with open(path, encoding='utf-8') as f:
+            check('содержимое заменено', f.read() == 'new\n')
+        check('права 0600 сохранены', stat.S_IMODE(os.stat(path).st_mode) == 0o600,
+              oct(os.stat(path).st_mode))
+        check('временного файла не осталось', os.listdir(tmp) == ['tachyon'], str(os.listdir(tmp)))
+
+        original = u.os.replace
+        try:
+            def broken_replace(src, dst):
+                raise OSError(28, 'No space left on device')
+            u.os.replace = broken_replace
+            try:
+                u.write_config_atomic(path, 'newer\n')
+                raised = False
+            except OSError:
+                raised = True
+        finally:
+            u.os.replace = original
+        check('ошибка записи пробрасывается', raised)
+        with open(path, encoding='utf-8') as f:
+            check('при ошибке конфиг не тронут', f.read() == 'new\n')
+        check('при ошибке временный файл удалён', os.listdir(tmp) == ['tachyon'], str(os.listdir(tmp)))
+
+
 def test_tags_follow_podkop():
     """Теги Podkop: имя секции как есть и номер по списку с дублями."""
     import json
@@ -763,7 +941,9 @@ def main():
                  test_podkop_conversion_limits, test_tachyon_conversion_limits,
                  test_podkop_xhttp, test_decode_link_runner, test_xray_xhttp_extra,
                  test_singbox_check_position, test_singbox_hard_validation,
-                 test_uci_values, test_tags_follow_podkop, test_expand_budget,
+                 test_uci_values, test_uci_open_quote, test_rewrite_keeps_neighbours,
+                 test_regex_filter, test_write_config_atomic,
+                 test_tags_follow_podkop, test_expand_budget,
                  test_podkop_check_links):
         test()
         print()

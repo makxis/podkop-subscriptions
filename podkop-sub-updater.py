@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.10.0"
+APP_VERSION_FALLBACK = "3.10.1"
 
 
 def app_version():
@@ -512,6 +512,48 @@ def uci_quote(value):
     return "'" + str(value).replace("'", "'\\''") + "'"
 
 
+def uci_open_quote(text, quote=None):
+    """Кавычка, оставшаяся незакрытой в конце строки конфига, или None.
+
+    Разбирает так же, как uci: в одинарных кавычках всё буквально, в двойных
+    работает обратная косая, вне кавычек она экранирует следующий символ, а
+    '#' вне кавычек начинает комментарий. quote — кавычка, открытая на
+    предыдущих строках многострочного значения.
+
+    Считать апострофы нельзя: свой апостроф uci пишет как 'a'\\''b', и в такой
+    строке их нечётное число, хотя значение закрыто.
+    """
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == '\\':
+                i += 1
+            elif ch == '"':
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == '\\':
+            i += 1
+        elif ch == '#':
+            break
+        i += 1
+    return quote
+
+
+def compile_filter_regex(pattern):
+    """(скомпилированный regex или None, текст ошибки) для Regex-фильтра группы."""
+    if not pattern:
+        return None, ''
+    try:
+        return re.compile(pattern, re.IGNORECASE), ''
+    except re.error as e:
+        return None, str(e)
+
+
 def parse_uci_sections(config_path):
     sections = []
     current = None
@@ -796,6 +838,10 @@ def load_jobs_from_uci_podkop(config_path):
         if on_empty not in VALID_ON_EMPTY:
             log("WARN", f"subscription_group '{g['name']}': недопустимый on_empty '{on_empty}'. Пропуск.")
             continue
+        regex, regex_error = compile_filter_regex(regex_pattern)
+        if regex_error:
+            log("ERROR", f"subscription_group '{g['name']}': некорректный Regex-фильтр '{regex_pattern}' ({regex_error}). "
+                         f"Её источники не загружаются, ключи секции '{sec_name}' от неё не обновляются, пока фильтр не исправлен.")
         if sec_name not in jobs:
             jobs[sec_name] = {
                 'ptype': ptype,
@@ -823,7 +869,8 @@ def load_jobs_from_uci_podkop(config_path):
                 continue
             jobs[sec_name]['entries'].append({
                 'source': source,
-                'regex': regex_pattern,
+                'regex': regex,
+                'regex_error': regex_error,
                 'match_mode': match_mode,
                 'on_empty': on_empty,
                 'fingerprint': fingerprint_name,
@@ -867,9 +914,14 @@ def load_jobs_from_flat_file(subs_path):
             if jobs[sec_name]['ptype'] != ptype:
                 log("WARN", f"Строка {line_num}: секция '{sec_name}' уже объявлена как '{jobs[sec_name]['ptype']}', нельзя смешивать с '{ptype}'. Пропуск.")
                 continue
+            regex, regex_error = compile_filter_regex(regex_pattern)
+            if regex_error:
+                log("ERROR", f"Строка {line_num}: некорректный Regex-фильтр '{regex_pattern}' ({regex_error}). "
+                             f"Источник не загружается, пока фильтр не исправлен.")
             jobs[sec_name]['entries'].append({
                 'source': source,
-                'regex': regex_pattern,
+                'regex': regex,
+                'regex_error': regex_error,
                 'match_mode': match_mode,
                 'on_empty': on_empty,
                 'line_num': line_num
@@ -1846,17 +1898,13 @@ def tag_links_with_source(links, index):
     return tagged
 
 
-def filter_links(links_raw, regex_pattern, match_mode, on_empty, sec, source_label):
-    if not regex_pattern:
+def filter_links(links_raw, regex, match_mode, on_empty, sec, source_label):
+    """regex — уже скомпилированный фильтр (compile_filter_regex) или None."""
+    if regex is None:
         return links_raw
     filtered_links = []
     for ln in links_raw:
-        target = unquote_percent(ln)
-        try:
-            is_match = bool(re.search(regex_pattern, target, re.IGNORECASE))
-        except re.error:
-            log("ERROR", f"[{sec}]: Некорректное регулярное выражение '{regex_pattern}' для {source_label}")
-            return []
+        is_match = bool(regex.search(unquote_percent(ln)))
         if (match_mode == 'ifmatch' and is_match) or (match_mode == 'ifnotmatch' and not is_match):
             filtered_links.append(ln)
     if not filtered_links:
@@ -3106,6 +3154,15 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
                 label = f'источник {external_idx}'
 
             st = {'label': label, 'raw': 0, 'filtered': 0, 'format': '', 'status': 'unknown', 'local': bool(is_local)}
+            if entry.get('regex_error'):
+                # Об ошибке сказано при чтении настроек. Без фильтра ключи из
+                # источника пришлось бы либо отбросить, либо взять все, а не
+                # те, что выбрал пользователь, так что его даже не скачиваем.
+                st['status'] = 'invalid_regex'
+                if not is_local:
+                    job['source_stats'].append(st)
+                    job['source_errors'] += 1
+                continue
             # Профили резолвятся с кешем: резолв может сгенерировать и записать
             # HWID, и делать это заново на каждый источник нельзя.
             if is_local:
@@ -3417,6 +3474,7 @@ def status_text_for_code(code):
         'empty_subscription': 'в подписке не найдено proxy-ссылок',
         'html_page': 'вместо подписки пришла веб-страница',
         'empty_after_filter': 'все ключи отброшены фильтром',
+        'invalid_regex': 'некорректный Regex-фильтр',
         'no_subscription_links': 'валидных ключей из подписок не найдено',
         'no_jobs': 'нет настроенных подписок',
         'config_write_error': 'ошибка записи конфига',
@@ -3718,7 +3776,7 @@ def catch_up(args, retry_only=False, lock_fd=None):
 def classify_empty_status(jobs):
     total_errors = total_success = total_raw = total_filtered = 0
     saw_invalid = saw_empty = saw_after_filter = saw_download_error = False
-    saw_validation_failed = False
+    saw_validation_failed = saw_invalid_regex = False
     for job in jobs.values():
         if job.get('validation_failed') or int((job.get('validation') or {}).get('rejected', 0) or 0) > 0:
             saw_validation_failed = True
@@ -3732,8 +3790,14 @@ def classify_empty_status(jobs):
             elif code in ('empty_subscription', 'empty_response'): saw_empty = True
             elif code == 'empty_after_filter': saw_after_filter = True
             elif code == 'download_failed': saw_download_error = True
+            elif code == 'invalid_regex': saw_invalid_regex = True
     if saw_validation_failed and total_success == 0:
         return 'validation_failed'
+    # Только когда других бед нет: иначе общий статус спрятал бы, например,
+    # упавшую загрузку соседней группы. По источникам видно всё и так.
+    if total_success == 0 and saw_invalid_regex and not (
+            saw_invalid or saw_empty or saw_after_filter or saw_download_error or total_raw):
+        return 'invalid_regex'
     if total_success == 0 and total_raw > 0 and total_filtered == 0:
         return 'empty_after_filter'
     if total_success == 0 and saw_invalid:
@@ -3775,6 +3839,8 @@ def update_subscription_meta(state, jobs, processed_sections, total_added, total
             message = 'Подписки загружены, но в них не найдено поддерживаемых proxy-ссылок.'
         elif status == 'validation_failed':
             message = 'Ключи из подписок загружены, но не прошли проверку совместимости с Podkop/sing-box. Текущая секция Podkop не изменялась.'
+        elif status == 'invalid_regex':
+            message = 'Regex-фильтр группы подписок некорректен, поэтому её источники не загружались и ключи не обновлялись. Исправьте фильтр в настройках группы.'
         else:
             message = 'Валидных ключей из подписок не найдено.'
     validation_rejected = 0
@@ -4447,7 +4513,9 @@ def update_uci_config_with_final_links(config_path, updates):
     found_sections = set()
     # Имя секции ровно как в файле: на него ссылается группа URLTest Tachyon.
     found_names = {}
-    skip_multiline = False
+    # Кавычка ещё не закрытого многострочного значения, которое вырезается
+    # (proxy_string в Podkop — textarea, в нём бывает несколько строк).
+    open_quote = None
     tachyon = config_backend(config_path) == 'tachyon'
     urltest_owners = tachyon_urltest_owners(config_path) if tachyon else set()
     if tachyon:
@@ -4494,17 +4562,15 @@ def update_uci_config_with_final_links(config_path, updates):
                 found_sections.add(current_sec.lower())
                 found_names[current_sec.lower()] = current_sec
             out_lines.append(line)
-            skip_multiline = False
+            open_quote = None
             continue
         if is_target(current_type, current_sec):
             sline = line.strip()
-            if skip_multiline:
-                if "'" in sline:
-                    skip_multiline = False
+            if open_quote:
+                open_quote = uci_open_quote(sline, open_quote)
                 continue
             if any(sline.startswith(prefix) for prefix in stripped_prefixes):
-                if line.count("'") % 2 != 0:
-                    skip_multiline = True
+                open_quote = uci_open_quote(sline)
                 continue
         out_lines.append(line)
     if current_sec:
@@ -4564,6 +4630,47 @@ def apply_updates_with_uci(config_path, updates):
     if changed:
         subprocess.run(['uci', 'commit', backend], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log("INFO", f"UCI-поля секций {backend_title(config_path)} зафиксированы через uci commit.")
+
+
+def write_config_atomic(path, content):
+    """Подменяет конфиг целиком: читатель видит либо старый файл, либо новый.
+
+    Временный файл лежит рядом, потому что os.replace работает только в
+    пределах одной ФС, и начинается с точки: uci читает каждый файл в
+    /etc/config, а скрытые его glob пропускает. fsync до подмены нужен, чтобы
+    при пропадании питания не остаться с пустым или обрезанным конфигом, а
+    упавшая запись не оставляет за собой временный файл.
+    """
+    directory = os.path.dirname(path) or '.'
+    tmp_path = os.path.join(directory, f".{os.path.basename(path)}.tmp.{os.getpid()}")
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        # Tachyon keeps its config 0600 (it holds bot and API tokens); a
+        # fresh temp file would silently widen that to 0644.
+        try:
+            os.chmod(tmp_path, os.stat(path).st_mode & 0o7777)
+        except OSError:
+            pass
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    # Сама подмена — запись в каталог; без его fsync она тоже может не дожить
+    # до диска.
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def normalize_config(text):
@@ -4745,16 +4852,7 @@ def main():
                     f.write(old_content)
             except Exception as e:
                 log("WARN", f"Не удалось создать backup {backup_path}: {e}")
-            tmp_path = f"{args.config}.tmp.{os.getpid()}"
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                f.write(new_content)
-            # Tachyon keeps its config 0600 (it holds bot and API tokens); a
-            # fresh temp file would silently widen that to 0644.
-            try:
-                os.chmod(tmp_path, os.stat(args.config).st_mode & 0o7777)
-            except OSError:
-                pass
-            os.replace(tmp_path, args.config)
+            write_config_atomic(args.config, new_content)
             apply_updates_with_uci(args.config, updates)
             # Tachyon's init script prints its own ubus noise ("Command failed:
             # ... tachyon-steer-zapret (Not found)"); keep only the exit code.
