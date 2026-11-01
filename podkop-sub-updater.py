@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.11.0"
+APP_VERSION_FALLBACK = "3.12.0"
 
 
 def app_version():
@@ -3254,7 +3254,7 @@ def observe_only(config_path, state_path):
         # теги после первого дубля, и ключам доставалось чужое состояние.
         seen_ids = set()
         dup_count = 0
-        for idx, link in enumerate(data.get('links', []), 1):
+        for idx, link in enumerate(data.get('links', []), 1 + int(data.get('tag_offset', 0) or 0)):
             sid = stable_id(link)
             if sid in seen_ids:
                 dup_count += 1
@@ -3307,13 +3307,14 @@ def add_recently_removed(state, sid, sec, item, reason):
     }
 
 
-def proxy_snapshot_for_links(sec, links, proxies):
+def proxy_snapshot_for_links(sec, links, proxies, tag_offset=0):
     # sec — имя секции как в конфиге, links — список как есть, с дублями:
-    # теги Podkop строит именно по ним (см. observe_only).
+    # теги Podkop строит именно по ним (см. observe_only). tag_offset —
+    # сколько outbound'ов секции ПО ставит перед нашими ключами.
     snap = {}
     if not proxies:
         return snap
-    for idx, link in enumerate(links, 1):
+    for idx, link in enumerate(links, 1 + tag_offset):
         sid = stable_id(link)
         if sid in snap:
             continue
@@ -3538,7 +3539,8 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     if skipped_endpoint_local:
         log("INFO", f"[{sec}]: IP/домен:порт-дубликатов защищённых локальных ключей пропущено: {skipped_endpoint_local}")
 
-    proxy_snap = proxy_snapshot_for_links(current.get('name') or sec, current_links, proxies)
+    proxy_snap = proxy_snapshot_for_links(current.get('name') or sec, current_links, proxies,
+                                          int(current.get('tag_offset', 0) or 0))
     remove = []
     remove_ids = set()
 
@@ -3731,14 +3733,15 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     }
     return final_links, info
 
-def rewrite_managed_sections(config_path, updates, stripped_prefixes, section_lines):
-    """Меняет в текстовом конфиге ключи секций `config section` из updates.
+def rewrite_uci_blocks(config_path, blocks, new_blocks=()):
+    """Меняет в текстовом конфиге отдельные строки отдельных блоков.
 
-    Остальное в файле не трогается: из секции вырезаются только строки,
-    которые начинаются с stripped_prefixes (вместе с продолжением
-    многострочного значения), а в её конец дописывается section_lines(sec,
-    upd). Что вырезать и что писать, решает модуль ПО.
-    Возвращает (старый текст, новые строки, {имя в нижнем регистре: имя как в файле}).
+    blocks: {(тип, имя в нижнем регистре): (stripped_prefixes, lines)}. Из
+    такого блока вырезаются строки, начинающиеся с stripped_prefixes, вместе
+    с продолжением многострочного значения, а в его конец дописываются lines.
+    Остальное в файле не трогается. new_blocks — готовые блоки, которые
+    дописываются в конец файла. Что вырезать и что писать, решает модуль ПО.
+    Возвращает (старый текст, новые строки, {(тип, имя): имя как в файле}).
     """
     if not os.path.exists(config_path):
         log("ERROR", f"Конфиг {config_path} не найден. Настройте {TARGET['title']} в интерфейсе.")
@@ -3746,54 +3749,70 @@ def rewrite_managed_sections(config_path, updates, stripped_prefixes, section_li
     with open(config_path, 'r', encoding='utf-8', errors='replace') as f:
         old_lines = f.readlines()
     out_lines = []
-    current_sec = None
-    current_type = None
-    found_sections = set()
-    # Имя секции ровно как в файле: на него, например, ссылается группа
-    # URLTest Tachyon.
-    found_names = {}
+    current = None
+    found = {}
     # Кавычка ещё не закрытого многострочного значения, которое вырезается
     # (proxy_string в Podkop — textarea, в нём бывает несколько строк).
     open_quote = None
 
-    def is_target(sec_type, sec_name):
-        return sec_type and sec_name and sec_type.lower() == 'section' and sec_name.lower() in updates
+    def key_of(sec_type, sec_name):
+        if not sec_type or not sec_name:
+            return None
+        key = (sec_type.lower(), sec_name.lower())
+        return key if key in blocks else None
 
-    def flush_section(sec_type, sec_name):
-        if is_target(sec_type, sec_name):
-            sec = sec_name.lower()
-            out_lines.extend(section_lines(sec, updates[sec]))
+    def flush(key):
+        if key:
+            # Перед пустыми строками, которые отделяют блок от следующего.
+            tail = []
+            while out_lines and not out_lines[-1].strip():
+                tail.insert(0, out_lines.pop())
+            out_lines.extend(blocks[key][1])
+            out_lines.extend(tail)
 
     for line in old_lines:
         # The name is optional: an anonymous section (Tachyon's `config urltest`)
         # still ends the previous one, or its lines would be taken for it.
         m = re.match(r"^\s*config\s+([a-zA-Z0-9_-]+)(?:\s+['\"]?([a-zA-Z0-9_-]+)['\"]?)?\s*$", line, re.IGNORECASE)
         if m:
-            if current_sec:
-                flush_section(current_type, current_sec)
-            current_type = m.group(1)
-            current_sec = m.group(2)
-            if is_target(current_type, current_sec):
-                found_sections.add(current_sec.lower())
-                found_names[current_sec.lower()] = current_sec
+            flush(current)
+            current = key_of(m.group(1), m.group(2))
+            if current:
+                found[current] = m.group(2)
             out_lines.append(line)
             open_quote = None
             continue
-        if is_target(current_type, current_sec):
+        if current:
             sline = line.strip()
             if open_quote:
                 open_quote = uci_open_quote(sline, open_quote)
                 continue
-            if any(sline.startswith(prefix) for prefix in stripped_prefixes):
+            if any(sline.startswith(prefix) for prefix in blocks[current][0]):
                 open_quote = uci_open_quote(sline)
                 continue
         out_lines.append(line)
-    if current_sec:
-        flush_section(current_type, current_sec)
+    flush(current)
+    for block in new_blocks:
+        if out_lines and not out_lines[-1].endswith('\n'):
+            out_lines.append('\n')
+        out_lines.append('\n')
+        out_lines.extend(block)
+    return ''.join(old_lines), out_lines, found
+
+
+def rewrite_managed_sections(config_path, updates, stripped_prefixes, section_lines, new_blocks=()):
+    """rewrite_uci_blocks для ключей секций `config section` из updates.
+
+    section_lines(sec, upd) — строки, дописываемые в конец секции.
+    Возвращает (старый текст, новые строки, {имя в нижнем регистре: имя как в файле}).
+    """
+    blocks = {('section', sec): (stripped_prefixes, section_lines(sec, upd)) for sec, upd in updates.items()}
+    old, out_lines, found = rewrite_uci_blocks(config_path, blocks, new_blocks)
+    found_names = {name: as_written for (kind, name), as_written in found.items() if kind == 'section'}
     for sec in updates:
-        if sec not in found_sections:
+        if sec not in found_names:
             log("WARN", f"Секция '{sec}' собрана, но отсутствует как config section '{sec}' в {config_path}")
-    return ''.join(old_lines), out_lines, found_names
+    return old, out_lines, found_names
 
 
 def apply_uci_updates(config_path, package, system_path, updates, section_commands):
@@ -4029,7 +4048,12 @@ def main():
             total_added += int(info.get('added', 0) or 0)
             total_removed += int(info.get('removed', 0) or 0)
             total_final_links += len(final_links)
-            if info.get('changed'):
+            # Модуль ПО просит переписать секцию и без новых ключей, если она
+            # хранит их по-старому (ключи Tachyon 1.7 переезжают в источник).
+            relayout = bool((current_sections.get(sec) or {}).get('relayout'))
+            if relayout and not info.get('changed'):
+                log("INFO", f"[{sec}]: секция переписывается под схему {TARGET['title']}, ключи те же")
+            if info.get('changed') or relayout:
                 updates[sec] = {'ptype': job.get('ptype', 'urltest'), 'links': final_links,
                                 'name': (current_sections.get(sec) or {}).get('name') or sec}
                 summary_changed = True

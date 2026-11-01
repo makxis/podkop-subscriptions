@@ -1,5 +1,37 @@
 # Changelog
 
+## 3.12.0
+
+- On Tachyon 1.7 links are kept the way 1.7 keeps them: in a source of their
+  own, `config outbound_source 'src_psub_<section>'` ("<section>
+  (podkop-subscriptions)" in the Outbounds tab), which the section refers to
+  through `outbound_source_refs`. Until now the updater wrote the section's
+  own `selector_proxy_links`, a field the 1.7 panel no longer shows. 1.7 is
+  recognised the way Tachyon's panel recognises it, by `modular_entities_v1`
+  in `settings.applied_migrations`; earlier Tachyon versions are unchanged.
+- Our source is put first among the section's sources. Tachyon numbers a
+  section's outbounds `<section>-N-out` in one run, the section's own lines
+  first and then the sources in the order they are referenced, so our links
+  keep the numbers the health check expects. If the source is moved down in
+  the panel, the updater counts the outbounds in front of it and puts it back
+  first on the next write. A source disabled in the panel stays disabled,
+  with a warning.
+- On the first run on 1.7 the links earlier versions wrote into the section
+  move into the source with their statistics, even when the subscription did
+  not change. The copy Tachyon's own migration made (`src_links_<section>`)
+  is left alone, but the updater now warns when it holds links that are not
+  in the subscription, since those keep working through it.
+- URLTest for a section without one is created as a 1.7 balancer
+  (`bal_psub_<section>`, as the panel wizard makes it). Existing groups of
+  either kind are kept, and a balancer that lists its sources gets ours added.
+- Lines added to a block of the config now go before the blank lines that
+  separate it from the next one. This was only cosmetic, since uci rewrites
+  the file on commit.
+- Checked on Tachyon 1.7.7 with tachyon-core 0.2.9: links moved out of two
+  sections, each `<section>-N-out` matched the N-th link of the source,
+  URLTest was built from the new balancer, and the layout survived a rerun of
+  Tachyon's package migration and a restart.
+
 ## 3.11.0
 
 Support for each program is now a separate module, and a router gets only the

@@ -468,7 +468,8 @@ def test_tachyon_core_engine():
                     '[ "$1" = version ] && echo "tachyon-core 0.2.9"\nexit 0\n')
         os.chmod(core, stat.S_IRWXU)
         try:
-            os.environ['PATH'] = os.pathsep.join(('/nonexistent', '/usr/bin', '/bin'))
+            # Без системных каталогов: на роутере с Tachyon tachyon-core лежит в /usr/bin.
+            os.environ['PATH'] = os.path.join(tmp, 'empty')
             check('без tachyon-core в PATH берётся sing-box', ty.tachyon_core_binary() == 'sing-box')
             os.environ['PATH'] = tmp + os.pathsep + old_path
             sb.SING_BOX_VERSION.clear()
@@ -755,6 +756,128 @@ def test_uci_open_quote():
     for text, start, expected in cases:
         got = u.uci_open_quote(text, start)
         check(f'{text!r} (с {start!r})', got == expected, repr(got))
+
+
+def test_tachyon_modular():
+    """Tachyon 1.7: ключи в своём outbound_source, первым в ссылках секции."""
+    import tempfile
+    print('Tachyon 1.7: источники и балансировщики')
+    a = 'vless://00000000-0000-4000-8000-00000000000a@a.example.net:443?type=tcp#A'
+    b = 'vless://00000000-0000-4000-8000-00000000000b@b.example.net:443?type=tcp#B'
+    c = "vless://00000000-0000-4000-8000-00000000000c@c.example.net:443?type=tcp#Joe's"
+    z = 'vless://00000000-0000-4000-8000-00000000000f@z.example.net:443?type=tcp#Z'
+    user = 'vless://00000000-0000-4000-8000-0000000000aa@u.example.net:443?type=tcp#U'
+    # Как после миграции 1.6 -> 1.7: ключи и в секции, и в копии src_links_main.
+    config = (
+        "config settings 'settings'\n"
+        "\tlist applied_migrations 'interface_sections'\n"
+        "\tlist applied_migrations 'modular_entities_v1'\n"
+        "\n"
+        "config section 'main'\n"
+        "\toption action 'connection'\n"
+        f"\tlist selector_proxy_links '{a}'\n"
+        f"\tlist selector_proxy_links '{b}'\n"
+        "\tlist condition_refs 'cond_main'\n"
+        "\tlist outbound_source_refs 'src_links_main'\n"
+        "\tlist balancer_refs 'bal_main_Fastest'\n"
+        "\n"
+        "config section 'sec2'\n"
+        "\toption action 'connection'\n"
+        "\tlist outbound_source_refs 'src_user'\n"
+        "\tlist balancer_refs 'bal_user'\n"
+        "\n"
+        "config outbound_source 'src_links_main'\n"
+        "\toption enabled '1'\n"
+        "\toption name 'main (Links)'\n"
+        "\toption source_type 'proxy_links'\n"
+        f"\tlist proxy_links '{a}'\n"
+        f"\tlist proxy_links '{z}'\n"
+        "\n"
+        "config outbound_source 'src_user'\n"
+        "\toption source_type 'proxy_links'\n"
+        f"\tlist proxy_links '{user}'\n"
+        "\n"
+        "config balancer 'bal_main_Fastest'\n"
+        "\toption enabled '1'\n"
+        "\toption balancer_type 'urltest'\n"
+        "\toption name 'Fastest'\n"
+        "\n"
+        "config balancer 'bal_user'\n"
+        "\toption balancer_type 'priority'\n"
+        "\tlist source_refs 'src_user'\n"
+    )
+    logged = []
+    saved_log = u.log
+    try:
+        u.log = lambda level, message: logged.append((level, message))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'tachyon')
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(config)
+            sections = ty.load_sections(path)
+            check('схема 1.7 распознана', ty.modular_schema(u.parse_uci_sections(path)))
+            check('ключи из секции считаются нашими до переезда', sections['main']['links'] == [a, b],
+                  str(sections['main']['links']))
+            check('секция просит переписать её под 1.7', sections['main']['relayout'] and sections['sec2']['relayout'])
+            check('URLTest узнаётся по балансировщику', sections['main']['ptype'] == 'urltest')
+
+            updates = {'main': {'ptype': 'urltest', 'links': [a, c], 'name': 'main'},
+                       'sec2': {'ptype': 'urltest', 'links': [b], 'name': 'sec2'}}
+            old, new = ty.rewrite_config(path, updates)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new)
+            parsed = {(s['type'], s['name']): s for s in u.parse_uci_sections(path)}
+            main, sec2 = parsed[('section', 'main')], parsed[('section', 'sec2')]
+            check('в секции больше нет своих ключей', 'selector_proxy_links' not in main['lists'], str(main['lists']))
+            check('наш источник первым, копия миграции после',
+                  main['lists'].get('outbound_source_refs') == ['src_psub_main', 'src_links_main'],
+                  str(main['lists'].get('outbound_source_refs')))
+            check('чужие ссылки секции сохранены', main['lists'].get('condition_refs') == ['cond_main']
+                  and main['lists'].get('balancer_refs') == ['bal_main_Fastest'])
+            src = parsed.get(('outbound_source', 'src_psub_main'))
+            check('источник создан с ключами и именем', src is not None
+                  and src['lists'].get('proxy_links') == [a, c] and src['options'].get('source_type') == 'proxy_links'
+                  and src['options'].get('name') == 'main (podkop-subscriptions)', str(src))
+            check('копия миграции не тронута', parsed[('outbound_source', 'src_links_main')]['lists']['proxy_links'] == [a, z])
+            check('предупреждение про ключ вне подписки в копии',
+                  any(level == 'WARN' and 'вне подписки: 1' in msg for level, msg in logged), str(logged))
+            check('для sec2 создан URLTest-балансировщик',
+                  parsed.get(('balancer', 'bal_psub_sec2'), {}).get('options', {}).get('balancer_type') == 'urltest'
+                  and sec2['lists'].get('balancer_refs') == ['bal_user', 'bal_psub_sec2'], str(sec2['lists']))
+            check('ограниченный балансировщик видит и наш источник',
+                  parsed[('balancer', 'bal_user')]['lists'].get('source_refs') == ['src_user', 'src_psub_sec2'])
+            check('ссылки sec2: наш источник первым',
+                  sec2['lists'].get('outbound_source_refs') == ['src_psub_sec2', 'src_user'])
+
+            again = ty.load_sections(path)
+            check('после записи ключи читаются из источника', again['main']['links'] == [a, c], str(again['main']['links']))
+            check('переписывать больше не нужно', not again['main']['relayout'] and not again['sec2']['relayout'])
+            check('наши ключи первые, смещения нет', again['main']['tag_offset'] == 0)
+            _, repeat = ty.rewrite_config(path, updates)
+            check('повторная запись ничего не меняет', repeat == new)
+
+            # Пользователь переставил наш источник ниже в панели: номера сдвигаются.
+            moved = new.replace("\tlist outbound_source_refs 'src_psub_sec2'\n\tlist outbound_source_refs 'src_user'\n",
+                                "\tlist outbound_source_refs 'src_user'\n\tlist outbound_source_refs 'src_psub_sec2'\n")
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(moved)
+            shifted = ty.load_sections(path)['sec2']
+            check('смещение тегов на ключи источника перед нашим', shifted['tag_offset'] == 1 and shifted['relayout'],
+                  str(shifted.get('tag_offset')))
+            snap = u.proxy_snapshot_for_links('sec2', [b], {'sec2-2-out': {'history': [{'delay': 120}]}},
+                                              shifted['tag_offset'])
+            check('health-check берёт тег со смещением', snap[u.stable_id(b)]['tag'] == 'sec2-2-out'
+                  and snap[u.stable_id(b)]['status'] == 'ok', str(snap))
+
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new)
+            commands = ty._uci_commands_modular(ty._index(u.parse_uci_sections(path)))('main', updates['main'])
+            check('uci повторяет ссылки секции', ['add_list', 'tachyon.main.outbound_source_refs=src_psub_main'] in commands
+                  and ['-q', 'delete', 'tachyon.main.selector_proxy_links'] in commands)
+            check('uci повторяет источник', ['set', 'tachyon.src_psub_main=outbound_source'] in commands
+                  and ['add_list', f'tachyon.src_psub_main.proxy_links={c}'] in commands, str(commands[-3:]))
+    finally:
+        u.log = saved_log
 
 
 def test_rewrite_keeps_neighbours():
@@ -1057,7 +1180,7 @@ def main():
                  test_podkop_conversion_limits, test_tachyon_conversion_limits,
                  test_backend_modules, test_tachyon_core_engine, test_podkop_xhttp, test_decode_link_runner, test_xray_xhttp_extra,
                  test_singbox_check_position, test_singbox_hard_validation,
-                 test_uci_values, test_uci_open_quote, test_rewrite_keeps_neighbours,
+                 test_uci_values, test_uci_open_quote, test_tachyon_modular, test_rewrite_keeps_neighbours,
                  test_regex_filter, test_write_config_atomic,
                  test_tags_follow_podkop, test_expand_budget,
                  test_podkop_check_links):
