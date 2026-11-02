@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.12.0"
+APP_VERSION_FALLBACK = "3.13.0"
 
 
 def app_version():
@@ -833,11 +833,16 @@ def load_jobs_from_uci_podkop(config_path):
     if not groups:
         return None
     jobs = {}
-    for g in groups:
+    for group_no, g in enumerate(groups, 1):
         opt = g['options']
         lists = g['lists']
         if opt.get('enabled', '1') == '0':
             continue
+        # Ключ группы пишется в state рядом с ключом, чтобы узнать хозяина и
+        # в запуск, когда её источник не ответил. У анонимной группы (так их
+        # создаёт LuCI) имени нет, берём порядковый номер среди всех групп:
+        # он меняется, только если группы удалить или переставить.
+        group_key = g['name'] or f'группа {group_no}'
         sec_name = opt.get('target_section', g['name']).strip().lower()
         sources = list(lists.get('source', []))
         if is_enabled_value(opt.get('use_local_links', '0')) and not any(is_local_links_source(s) for s in sources):
@@ -898,6 +903,19 @@ def load_jobs_from_uci_podkop(config_path):
         if jobs[sec_name]['ptype'] != ptype:
             log("WARN", f"subscription_group '{g['name']}': target_section '{sec_name}' уже использует '{jobs[sec_name]['ptype']}', нельзя смешивать с '{ptype}'. Пропуск.")
             continue
+        # Правила чистки у каждой группы свои и действуют только на её ключи:
+        # строгий лимит для публичных подписок не должен выбрасывать ключи
+        # своих серверов, которые другая группа кладёт в ту же секцию.
+        jobs[sec_name].setdefault('groups', []).append({
+            'key': group_key,
+            'max_links': max_links,
+            'max_latency_ms': max_latency_ms,
+            'force_cleanup': force_cleanup,
+            'dedupe_sni_rotation': dedupe_sni_rotation,
+            'dedupe_endpoint_host': dedupe_endpoint_host,
+        })
+        # Сводные значения по секции нужны только для решения, читать ли
+        # состояние URLTest; сами ключи по ним не чистятся.
         jobs[sec_name]['max_links'] = merge_min_positive(jobs[sec_name].get('max_links', 0), max_links)
         jobs[sec_name]['max_latency_ms'] = merge_min_positive(jobs[sec_name].get('max_latency_ms', 0), max_latency_ms)
         jobs[sec_name]['force_cleanup'] = bool(jobs[sec_name].get('force_cleanup')) or force_cleanup
@@ -916,6 +934,7 @@ def load_jobs_from_uci_podkop(config_path):
                 'fingerprint': fingerprint_name,
                 'expand_ips': expand_ips,
                 'probe_days': probe_days,
+                'group': group_key,
                 'line_num': g['line_num']
             })
     return jobs
@@ -2418,6 +2437,8 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
         job['filtered_links_count'] = 0
         job['external_valid_count'] = 0
         job['local_links_count'] = 0
+        job['link_group'] = {}
+        group_policies = {gp['key']: gp for gp in section_group_policies(job)}
 
         external_idx = 0
         for src_idx, entry in enumerate(job['entries'], 1):
@@ -2533,6 +2554,16 @@ def fetch_links(jobs, hwid, device_model, kernel_ver, fingerprints=None, config_
                     log("DEBUG", f"[{sec}]: после фильтра в локальном списке не осталось ссылок")
                 continue
 
+            gkey = entry.get('group', '')
+            for ln in filtered_links:
+                sid = stable_id(ln)
+                prev = job['link_group'].get(sid)
+                # Один и тот же узел из двух групп отдаём той, что строже его
+                # не чистит: иначе свой сервер, случайно оказавшийся и в
+                # публичной подписке, попал бы под её лимит.
+                if prev is None or (group_strictness(group_policies.get(gkey))
+                                    < group_strictness(group_policies.get(prev))):
+                    job['link_group'][sid] = gkey
             section_links.extend(filtered_links)
             if is_local:
                 local_links.extend(filtered_links)
@@ -3416,7 +3447,43 @@ def slowest_unprotected_candidates(sec, links, st_sec, protected_ids, proxy_snap
     return result
 
 
+def section_group_policies(job):
+    """Правила чистки каждой группы, пишущей в секцию, в порядке конфига.
+
+    У старого плоского файла групп нет: вся секция — одна группа с общими
+    правилами, как и раньше.
+    """
+    groups = job.get('groups') or []
+    if groups:
+        return [dict(g) for g in groups]
+    return [{
+        'key': '',
+        'max_links': parse_positive_int(job.get('max_links', 0), 0),
+        'max_latency_ms': parse_positive_int(job.get('max_latency_ms', 0), 0),
+        'force_cleanup': bool(job.get('force_cleanup')),
+        'dedupe_sni_rotation': bool(job.get('dedupe_sni_rotation')),
+        'dedupe_endpoint_host': bool(job.get('dedupe_endpoint_host')),
+    }]
+
+
+def group_strictness(policy):
+    if not policy:
+        return 99
+    return (int(bool(policy.get('max_links'))) + int(bool(policy.get('max_latency_ms')))
+            + int(bool(policy.get('force_cleanup'))) + int(bool(policy.get('dedupe_sni_rotation')))
+            + int(bool(policy.get('dedupe_endpoint_host'))))
+
+
 def build_final_links_for_section(sec, job, current_sections, state, delete_after_fails, min_keep, protected_ids=None, proxies=None, recent_skip_ids=None):
+    """Итог секции: какие ключи убрать, какие добавить.
+
+    Несколько групп могут писать в одну секцию, и у каждой свои правила.
+    Лимит, ping, принудительная чистка и схлопывание применяются только к
+    ключам своей группы: лимит 50 у публичных подписок не трогает ключи своих
+    серверов, которые без лимита кладёт соседняя группа. Хозяин ключа — группа,
+    из подписки которой он пришёл в этот запуск, а если подписка не ответила —
+    записанная в state при прошлом запуске.
+    """
     now = int(time.time())
     protected_ids = protected_ids or set()
     recent_skip_ids = recent_skip_ids or set()
@@ -3425,13 +3492,31 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     current_unique, current_dups = dedupe_links_keep_order(current_links)
     st_sec = ensure_state_section(state, sec, job.get('ptype') or current.get('ptype'))
     st_sec['proxy_type'] = job.get('ptype') or current.get('ptype', st_sec.get('proxy_type', 'urltest'))
-
-    max_links = parse_positive_int(job.get('max_links', 0), 0)
-    max_latency_ms = parse_positive_int(job.get('max_latency_ms', 0), 0)
-    force_cleanup = bool(job.get('force_cleanup'))
-    dedupe_sni_rotation = bool(job.get('dedupe_sni_rotation'))
-    dedupe_endpoint_host = bool(job.get('dedupe_endpoint_host'))
     state.setdefault('recently_removed', {})
+
+    policies = section_group_policies(job)
+    by_key = {p['key']: p for p in policies}
+    multi = len(policies) > 1
+    # Ключ без известного хозяина (лежал в секции до появления групп в state
+    # или его группа удалена) идёт под самую строгую группу: так с ним
+    # обходились и раньше, когда правила групп сливались.
+    fallback_key = max(policies, key=group_strictness)['key']
+    link_group = job.get('link_group') or {}
+
+    def owner(sid):
+        g = link_group.get(sid)
+        if g in by_key:
+            return g
+        g = (st_sec['links'].get(sid) or {}).get('group')
+        if g in by_key:
+            return g
+        return fallback_key
+
+    def gtag(key):
+        return f"[{sec}] {key}" if multi and key else f"[{sec}]"
+
+    def is_protected(sid):
+        return sid in protected_ids or bool((st_sec['links'].get(sid) or {}).get('protected_local'))
 
     # Синхронизируем state с текущим конфигом.
     for link in current_unique:
@@ -3451,57 +3536,62 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     if job.get('source_errors', 0) > 0:
         log("WARN", f"[{sec}]: часть внешних источников подписки недоступна или пуста, но валидные ссылки получены; обслуживание продолжается")
 
-    subscription_links = list(job.get('links', []))
+    # Хозяин каждого текущего ключа фиксируется до чистки и замен.
+    current_owner = {stable_id(x): owner(stable_id(x)) for x in current_unique}
+
+    # Схлопывание входящих ключей — внутри своей группы и только если оно у
+    # неё включено.
+    incoming = list(job.get('links', []))
+    incoming_by_group = {p['key']: [] for p in policies}
+    for link in incoming:
+        incoming_by_group.setdefault(owner(stable_id(link)), []).append(link)
     incoming_sni_collapsed = 0
     incoming_endpoint_collapsed = 0
-    skipped_sni_local = 0
-    skipped_endpoint_local = 0
-
-    if dedupe_sni_rotation:
-        subscription_links, incoming_sni_collapsed = dedupe_sni_rotation_links_keep_last(subscription_links)
-        if incoming_sni_collapsed:
-            log("INFO", f"[{sec}]: SNI-ротации внутри подписки схлопнуты: {incoming_sni_collapsed}")
-
-    if dedupe_endpoint_host:
-        subscription_links, incoming_endpoint_collapsed = dedupe_endpoint_host_links_keep_last(subscription_links)
-        if incoming_endpoint_collapsed:
-            log("INFO", f"[{sec}]: IP/домен:порт-дубликаты внутри подписки схлопнуты: {incoming_endpoint_collapsed}")
+    for p in policies:
+        lst = incoming_by_group.get(p['key'], [])
+        if p['dedupe_sni_rotation']:
+            lst, n = dedupe_sni_rotation_links_keep_last(lst)
+            if n:
+                incoming_sni_collapsed += n
+                log("INFO", f"{gtag(p['key'])}: SNI-ротации внутри подписки схлопнуты: {n}")
+        if p['dedupe_endpoint_host']:
+            lst, n = dedupe_endpoint_host_links_keep_last(lst)
+            if n:
+                incoming_endpoint_collapsed += n
+                log("INFO", f"{gtag(p['key'])}: IP/домен:порт-дубликаты внутри подписки схлопнуты: {n}")
+        incoming_by_group[p['key']] = lst
+    kept_ids = {stable_id(x) for lst in incoming_by_group.values() for x in lst}
+    subscription_links = [x for x in incoming if stable_id(x) in kept_ids]
 
     mark_subscription_seen(state, sec, subscription_links)
 
     current_ids = {stable_id(x) for x in current_unique}
     protected_rotation_ids = set()
-    if dedupe_sni_rotation:
-        for link in current_unique:
-            sid = stable_id(link)
-            item = st_sec['links'].get(sid, {})
-            if has_sni_param(link) and (sid in protected_ids or item.get('protected_local')):
-                protected_rotation_ids.add(sni_rotation_id(link))
-
     protected_endpoint_ids = set()
-    if dedupe_endpoint_host:
-        for link in current_unique:
-            sid = stable_id(link)
-            item = st_sec['links'].get(sid, {})
-            eid = endpoint_host_id(link)
-            if eid and (sid in protected_ids or item.get('protected_local')):
-                protected_endpoint_ids.add(eid)
+    for link in current_unique:
+        sid = stable_id(link)
+        if not is_protected(sid):
+            continue
+        if has_sni_param(link):
+            protected_rotation_ids.add(sni_rotation_id(link))
+        eid = endpoint_host_id(link)
+        if eid:
+            protected_endpoint_ids.add(eid)
 
     incoming_rotation = {}
-    if dedupe_sni_rotation:
-        for link in subscription_links:
-            if has_sni_param(link):
-                incoming_rotation[sni_rotation_id(link)] = link
-
     incoming_endpoint = {}
-    if dedupe_endpoint_host:
-        for link in subscription_links:
-            eid = endpoint_host_id(link)
-            if eid:
-                incoming_endpoint[eid] = link
+    for p in policies:
+        lst = incoming_by_group.get(p['key'], [])
+        if p['dedupe_sni_rotation']:
+            incoming_rotation[p['key']] = {sni_rotation_id(x): x for x in lst if has_sni_param(x)}
+        if p['dedupe_endpoint_host']:
+            incoming_endpoint[p['key']] = {endpoint_host_id(x): x for x in lst if endpoint_host_id(x)}
 
     initial_new_candidates = []
+    new_owner = {}
     skipped_recent = 0
+    skipped_sni_local = 0
+    skipped_endpoint_local = 0
     for link in subscription_links:
         sid = stable_id(link)
         item = st_sec['links'].get(sid)
@@ -3512,116 +3602,97 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         if sid in recent_skip_ids:
             skipped_recent += 1
             continue
-        if dedupe_sni_rotation and has_sni_param(link) and sni_rotation_id(link) in protected_rotation_ids:
+        g = owner(sid)
+        p = by_key[g]
+        if p['dedupe_sni_rotation'] and has_sni_param(link) and sni_rotation_id(link) in protected_rotation_ids:
             skipped_sni_local += 1
             continue
-        if dedupe_endpoint_host and endpoint_host_id(link) in protected_endpoint_ids:
+        if p['dedupe_endpoint_host'] and endpoint_host_id(link) in protected_endpoint_ids:
             skipped_endpoint_local += 1
             continue
         initial_new_candidates.append(link)
+        new_owner[sid] = g
 
-    potential_count = len(current_unique) + len(initial_new_candidates)
-    limit_active = bool(max_links and potential_count > max_links)
-    if max_links:
-        log("INFO", f"[{sec}]: limit max_links={max_links}, current={len(current_unique)}, new_candidates={len(initial_new_candidates)}, potential={potential_count}")
-    if max_latency_ms:
-        log("INFO", f"[{sec}]: max_latency_ms={max_latency_ms}")
-    if force_cleanup:
-        log("WARN", f"[{sec}]: включена принудительная чистка: fail_count>=2 и ping выше лимита могут быть удалены")
-    if dedupe_sni_rotation:
-        log("INFO", f"[{sec}]: включено схлопывание SNI-ротаций")
-    if dedupe_endpoint_host:
-        log("INFO", f"[{sec}]: включено схлопывание IP/домен:порт-дубликатов")
+    proxy_snap = proxy_snapshot_for_links(current.get('name') or sec, current_links, proxies,
+                                          int(current.get('tag_offset', 0) or 0))
+    rotations = []
+    candidates = []
+    remove_ids = set()
+    limit_active_any = False
+
+    for p in policies:
+        g = p['key']
+        links_g = [x for x in current_unique if current_owner[stable_id(x)] == g]
+        new_g = sum(1 for v in new_owner.values() if v == g)
+        potential = len(links_g) + new_g
+        limit_active = bool(p['max_links'] and potential > p['max_links'])
+        limit_active_any = limit_active_any or limit_active
+        tag = gtag(g)
+        if p['max_links']:
+            log("INFO", f"{tag}: limit max_links={p['max_links']}, current={len(links_g)}, new_candidates={new_g}, potential={potential}")
+        elif multi:
+            log("INFO", f"{tag}: без лимита ключей, current={len(links_g)}, new_candidates={new_g}")
+        if p['max_latency_ms']:
+            log("INFO", f"{tag}: max_latency_ms={p['max_latency_ms']}")
+        if p['force_cleanup']:
+            log("WARN", f"{tag}: включена принудительная чистка: fail_count>=2 и ping выше лимита могут быть удалены")
+        if p['dedupe_sni_rotation']:
+            log("INFO", f"{tag}: включено схлопывание SNI-ротаций")
+        if p['dedupe_endpoint_host']:
+            log("INFO", f"{tag}: включено схлопывание IP/домен:порт-дубликатов")
+
+        for idx, link in enumerate(links_g, 1):
+            sid = stable_id(link)
+            if is_protected(sid):
+                continue
+            reason = None
+            new_link = None
+            if p['dedupe_sni_rotation'] and has_sni_param(link):
+                new_link = incoming_rotation.get(g, {}).get(sni_rotation_id(link))
+                reason = 'sni_rotation'
+            if (not new_link or stable_id(new_link) == sid) and p['dedupe_endpoint_host'] and endpoint_host_id(link):
+                new_link = incoming_endpoint.get(g, {}).get(endpoint_host_id(link))
+                reason = 'endpoint_host_rotation'
+            if not new_link or stable_id(new_link) == sid:
+                continue
+            rotations.append({
+                'sid': sid, 'idx': idx, 'link': link,
+                'item': st_sec['links'].get(sid, {}),
+                'reason': reason, 'priority': -1, 'fail_count': 0, 'delay': -1, 'status': reason
+            })
+            remove_ids.add(sid)
+
+        # Базовые кандидаты: fail_count, ping, N/A при переполнении, force_cleanup.
+        cands = removal_candidates(sec, links_g, st_sec, protected_ids, proxy_snap, delete_after_fails,
+                                   p['max_latency_ms'], limit_active, p['force_cleanup'])
+        # Без лимита и без force_cleanup остаётся только мягкое удаление fail_count>=72.
+        if not limit_active and not p['force_cleanup']:
+            cands = [c for c in cands if c['reason'] == 'fail_count_threshold']
+        for c in cands:
+            if c['sid'] not in remove_ids:
+                candidates.append(c)
+                remove_ids.add(c['sid'])
+
+        # Если ключей группы и так больше лимита — добиваем самыми медленными.
+        left = sum(1 for x in links_g if stable_id(x) not in remove_ids)
+        if p['max_links'] and left > p['max_links']:
+            need_extra = left - p['max_links']
+            for c in slowest_unprotected_candidates(sec, links_g, st_sec, protected_ids, proxy_snap, remove_ids):
+                if need_extra <= 0:
+                    break
+                candidates.append(c)
+                remove_ids.add(c['sid'])
+                need_extra -= 1
+
+    candidates.sort(key=lambda x: (x['priority'], -x['fail_count'], -x['delay']))
+    remove = rotations + candidates
+
     if skipped_recent:
         log("INFO", f"[{sec}]: ключей из одноразового списка недавно удалённых пропущено при добавлении: {skipped_recent}")
     if skipped_sni_local:
         log("INFO", f"[{sec}]: SNI-дубликатов защищённых локальных ключей пропущено: {skipped_sni_local}")
     if skipped_endpoint_local:
         log("INFO", f"[{sec}]: IP/домен:порт-дубликатов защищённых локальных ключей пропущено: {skipped_endpoint_local}")
-
-    proxy_snap = proxy_snapshot_for_links(current.get('name') or sec, current_links, proxies,
-                                          int(current.get('tag_offset', 0) or 0))
-    remove = []
-    remove_ids = set()
-
-    if dedupe_sni_rotation and incoming_rotation:
-        for idx, link in enumerate(current_unique, 1):
-            if not has_sni_param(link):
-                continue
-            sid = stable_id(link)
-            item = st_sec['links'].get(sid, {})
-            if sid in protected_ids or item.get('protected_local'):
-                continue
-            rid = sni_rotation_id(link)
-            new_link = incoming_rotation.get(rid)
-            if not new_link:
-                continue
-            new_sid = stable_id(new_link)
-            if new_sid == sid:
-                continue
-            remove.append({
-                'sid': sid,
-                'idx': idx,
-                'link': link,
-                'item': item,
-                'reason': 'sni_rotation',
-                'priority': -1,
-                'fail_count': 0,
-                'delay': -1,
-                'status': 'sni_rotation'
-            })
-            remove_ids.add(sid)
-
-    if dedupe_endpoint_host and incoming_endpoint:
-        for idx, link in enumerate(current_unique, 1):
-            sid = stable_id(link)
-            item = st_sec['links'].get(sid, {})
-            if sid in protected_ids or item.get('protected_local'):
-                continue
-            eid = endpoint_host_id(link)
-            if not eid:
-                continue
-            new_link = incoming_endpoint.get(eid)
-            if not new_link:
-                continue
-            new_sid = stable_id(new_link)
-            if new_sid == sid:
-                continue
-            remove.append({
-                'sid': sid,
-                'idx': idx,
-                'link': link,
-                'item': item,
-                'reason': 'endpoint_host_rotation',
-                'priority': -1,
-                'fail_count': 0,
-                'delay': -1,
-                'status': 'endpoint_host_rotation'
-            })
-            remove_ids.add(sid)
-
-    # Базовые кандидаты: fail_count, ping, N/A при переполнении, force_cleanup.
-    candidates = removal_candidates(sec, current_unique, st_sec, protected_ids, proxy_snap, delete_after_fails, max_latency_ms, limit_active, force_cleanup)
-
-    # Без лимита и без force_cleanup оставляем только мягкое удаление fail_count>=72.
-    if not limit_active and not force_cleanup:
-        candidates = [c for c in candidates if c['reason'] == 'fail_count_threshold']
-
-    # При force_cleanup удаляем все его кандидаты. При limit_active тоже удаляем плохих/медленных кандидатов.
-    for c in candidates:
-        if c['sid'] not in remove_ids:
-            remove.append(c)
-            remove_ids.add(c['sid'])
-
-    # Если текущая секция сама выше max_links — добиваем самыми медленными до лимита.
-    if max_links and len(current_unique) - len(remove_ids) > max_links:
-        need_extra = len(current_unique) - len(remove_ids) - max_links
-        for c in slowest_unprotected_candidates(sec, current_unique, st_sec, protected_ids, proxy_snap, remove_ids):
-            if need_extra <= 0:
-                break
-            remove.append(c)
-            remove_ids.add(c['sid'])
-            need_extra -= 1
 
     # Не оставляем секцию ниже min_keep, если можно избежать.
     max_remove = max(0, len(current_unique) - max(0, min_keep))
@@ -3638,7 +3709,6 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         add_recently_removed(state, sid, sec, item, c['reason'])
         removed_by_reason[c['reason']] = removed_by_reason.get(c['reason'], 0) + 1
 
-    # Добавляем новые только в свободные места, если задан max_links. Иначе добавляем все новые.
     remaining_ids = {stable_id(x) for x in remaining_links}
     removed_this_run = set(remove_ids)
     final_links = list(remaining_links)
@@ -3665,11 +3735,16 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     if renamed:
         log("INFO", f"[{sec}]: обновлены имена уже добавленных ключей: {renamed}")
 
+    # Свободные места считаются по группе: новые ключи группы занимают только
+    # её собственный лимит.
+    used = {}
+    for x in remaining_links:
+        g = current_owner[stable_id(x)]
+        used[g] = used.get(g, 0) + 1
+
     added = 0
     skipped_by_limit = 0
     skipped_removed_this_run = 0
-
-    add_candidates = []
     for link in initial_new_candidates:
         sid = stable_id(link)
         if sid in removed_this_run:
@@ -3677,19 +3752,12 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
             continue
         if sid in remaining_ids:
             continue
-        add_candidates.append(link)
-
-    if max_links:
-        free_slots = max(0, max_links - len(final_links))
-        allowed = add_candidates[:free_slots]
-        skipped_by_limit = max(0, len(add_candidates) - len(allowed))
-    else:
-        allowed = add_candidates
-
-    for link in allowed:
-        sid = stable_id(link)
-        if sid in remaining_ids:
+        g = new_owner[sid]
+        limit = by_key[g]['max_links']
+        if limit and used.get(g, 0) >= limit:
+            skipped_by_limit += 1
             continue
+        used[g] = used.get(g, 0) + 1
         final_links.append(link)
         remaining_ids.add(sid)
         st_sec['links'][sid] = {
@@ -3706,9 +3774,22 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         }
         added += 1
 
-    protected_count = sum(1 for x in final_links if stable_id(x) in protected_ids)
-    if max_links and protected_count > max_links:
-        log("WARN", f"[{sec}]: защищённых локальных ключей {protected_count}, это больше max_links={max_links}; локальные ключи не удаляются")
+    # Хозяина запоминаем, чтобы в запуск, когда его подписка не ответит,
+    # ключ остался под правилами своей группы, а не чужой.
+    for x in final_links:
+        sid = stable_id(x)
+        item = st_sec['links'].get(sid)
+        if item is not None:
+            item['group'] = current_owner.get(sid) or new_owner.get(sid) or fallback_key
+
+    for p in policies:
+        if not p['max_links']:
+            continue
+        protected_count = sum(1 for x in final_links
+                              if stable_id(x) in protected_ids
+                              and (current_owner.get(stable_id(x)) or new_owner.get(stable_id(x))) == p['key'])
+        if protected_count > p['max_links']:
+            log("WARN", f"{gtag(p['key'])}: защищённых локальных ключей {protected_count}, это больше max_links={p['max_links']}; локальные ключи не удаляются")
 
     changed = added > 0 or len(remove_ids) > 0 or current_dups > 0 or final_links != current_links
     info = {
@@ -3717,11 +3798,12 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         'removed': len(remove_ids),
         'duplicates': current_dups,
         'changed': changed,
-        'max_links': max_links,
-        'max_latency_ms': max_latency_ms,
-        'force_cleanup': force_cleanup,
-        'dedupe_sni_rotation': dedupe_sni_rotation,
-        'dedupe_endpoint_host': dedupe_endpoint_host,
+        'max_links': parse_positive_int(job.get('max_links', 0), 0),
+        'max_latency_ms': parse_positive_int(job.get('max_latency_ms', 0), 0),
+        'force_cleanup': bool(job.get('force_cleanup')),
+        'dedupe_sni_rotation': bool(job.get('dedupe_sni_rotation')),
+        'dedupe_endpoint_host': bool(job.get('dedupe_endpoint_host')),
+        'limit_active': limit_active_any,
         'incoming_sni_collapsed': incoming_sni_collapsed,
         'incoming_endpoint_collapsed': incoming_endpoint_collapsed,
         'skipped_sni_local': skipped_sni_local,

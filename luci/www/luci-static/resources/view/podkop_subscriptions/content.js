@@ -9,7 +9,7 @@ const LOCAL_LINKS = "/etc/podkop-subscriptions/local-links";
 // Fallback only, used when the view could not read the installed VERSION file.
 // That file is the source of truth, so this constant cannot silently drift out
 // of sync with releases the way the old hardcoded version did.
-const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.12.0";
+const PODKOP_SUBSCRIPTIONS_VERSION_FALLBACK = "3.13.0";
 const STATUS_STYLE_PLAIN_CARD_V36 = true;
 
 // Примеры в подсказках оформляются только отступами и полоской слева.
@@ -458,21 +458,21 @@ return baseclass.extend({
     o = ss.option(
       form.Value,
       "max_links",
-      _("Максимум ключей в секции"),
-      _("Необязательный лимит количества ключей в целевой секции. 0 или пусто — без ограничения. Если при добавлении новых ключей лимит будет превышен, updater удалит худшие незащищённые ключи и добавит новые только в освободившиеся места.")
+      _("Максимум ключей группы"),
+      _("Сколько ключей этой группы держать в секции. 0 или пусто — без ограничения. Считаются только ключи из подписок этой группы: другие группы, пишущие в ту же секцию, живут по своим настройкам. Если лимит будет превышен, updater удалит худшие незащищённые ключи этой группы и добавит новые только в освободившиеся места.")
     );
     o.datatype = "uinteger";
-    o.placeholder = "50";
+    o.placeholder = _("без лимита");
     o.rmempty = true;
 
     o = ss.option(
       form.Value,
       "max_latency_ms",
       _("Максимальный ping, мс"),
-      _("Необязательный предел задержки по текущему URLTest Podkop. 0 или пусто — без фильтра по ping. Ключи с задержкой выше этого значения могут быть удалены отсеивателем.")
+      _("Необязательный предел задержки по текущему URLTest Podkop. 0 или пусто — без фильтра по ping. Действует только на ключи этой группы: при переполнении её лимита или с принудительной чисткой ключи с задержкой выше будут удалены.")
     );
     o.datatype = "uinteger";
-    o.placeholder = "500";
+    o.placeholder = _("без фильтра");
     o.rmempty = true;
 
     o = ss.option(

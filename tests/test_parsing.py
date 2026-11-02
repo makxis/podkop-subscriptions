@@ -1173,6 +1173,231 @@ printf ']\\n'
             u.select_backend('/etc/config/podkop', 'podkop')
 
 
+def _vl(host, port=443, uid='u', name='', **q):
+    query = '&'.join(f'{k}={v}' for k, v in q.items())
+    return f'vless://{uid}@{host}:{port}?{query or "security=none"}#{name or host}'
+
+
+def _run_section(groups, current, incoming, link_group, delays=None, fails=None, state=None,
+                 protected=None, recent=None, min_keep=0, sec='main'):
+    """Один прогон build_final_links_for_section на синтетических данных.
+
+    delays — {ссылка: ping или None (N/A)}, fails — {ссылка: fail_count}.
+    """
+    job = {'ptype': 'urltest', 'groups': groups, 'links': list(incoming),
+           'link_group': {u.stable_id(x): g for x, g in link_group.items()},
+           'external_valid_count': max(1, len(incoming)), 'source_errors': 0}
+    state = state if state is not None else {'sections': {}}
+    st = u.ensure_state_section(state, sec, 'urltest')
+    for link, fc in (fails or {}).items():
+        st['links'].setdefault(u.stable_id(link), {'url': link})['fail_count'] = fc
+    proxies = {}
+    for idx, link in enumerate(current, 1):
+        d = (delays or {}).get(link, 100)
+        proxies[f'{sec}-{idx}-out'] = {'history': [{'delay': d if d is not None else 0}]}
+    cur = {sec: {'ptype': 'urltest', 'links': list(current)}}
+    final, info = u.build_final_links_for_section(sec, job, cur, state, 72, min_keep,
+                                                  set(protected or ()), proxies, set(recent or ()))
+    return final, info, state
+
+
+def _grp(key, max_links=0, ping=0, force=False, sni=False, ep=False):
+    return {'key': key, 'max_links': max_links, 'max_latency_ms': ping, 'force_cleanup': force,
+            'dedupe_sni_rotation': sni, 'dedupe_endpoint_host': ep}
+
+
+def test_group_policies():
+    import tempfile
+    print('Правила групп в одной секции')
+    pub = _grp('pub', max_links=3, ping=300)
+    own = _grp('own')
+    p_old = [_vl(f'p{i}.example.net') for i in range(3)]
+    o_old = [_vl(f'o{i}.example.net') for i in range(2)]
+    p_new = [_vl(f'pn{i}.example.net') for i in range(5)]
+    o_new = [_vl('o9.example.net')]
+    current = p_old + o_old
+    # Публичные медленные, свои ещё медленнее и с плохой историей.
+    delays = {p_old[0]: 400, p_old[1]: 450, p_old[2]: 100, o_old[0]: 900, o_old[1]: None}
+    fails = {o_old[0]: 1, o_old[1]: 5, p_old[1]: 1}
+    incoming = p_old + p_new + o_old + o_new
+    lg = {x: 'pub' for x in p_old + p_new}
+    lg.update({x: 'own' for x in o_old + o_new})
+    final, info, state = _run_section([pub, own], current, incoming, lg, delays, fails)
+    ids = {u.stable_id(x) for x in final}
+    check('свои ключи не удалены ни по ping, ни по fail_count, ни по лимиту чужой группы',
+          all(u.stable_id(x) in ids for x in o_old), str(info['removed_by_reason']))
+    check('новый свой ключ добавлен, хотя лимит публичной группы занят',
+          u.stable_id(o_new[0]) in ids)
+    pub_left = [x for x in final if u.stable_id(x) in {u.stable_id(y) for y in p_old + p_new}]
+    check('публичная группа ужата до своего лимита 3', len(pub_left) == 3, str(len(pub_left)))
+    check('медленные публичные ключи удалены',
+          u.stable_id(p_old[0]) not in ids and u.stable_id(p_old[1]) not in ids, str(info['removed_by_reason']))
+    groups_in_state = {v.get('group') for v in state['sections']['main']['links'].values()
+                       if v.get('url') and u.stable_id(v['url']) in ids}
+    check('хозяин записан в state', groups_in_state == {'pub', 'own'}, str(groups_in_state))
+
+    # Второй прогон: подписка своих серверов не ответила, хозяина берём из state.
+    final2, info2, _ = _run_section([pub, own], final, [x for x in incoming if lg[x] == 'pub'],
+                                    {x: g for x, g in lg.items() if g == 'pub'},
+                                    {x: 2000 for x in final}, {x: 3 for x in final}, state=state)
+    ids2 = {u.stable_id(x) for x in final2}
+    check('своя подписка не ответила — свои ключи всё равно не тронуты',
+          all(u.stable_id(x) in ids2 for x in o_old + o_new), str(info2['removed_by_reason']))
+
+    # Старый state без хозяев: ключ из подписки своих узнаётся по этому запуску.
+    final3, info3, _ = _run_section([pub, own], current, incoming, lg, delays, fails)
+    check('state без group: свои ключи узнаны по подписке',
+          all(u.stable_id(x) in {u.stable_id(y) for y in final3} for x in o_old))
+
+    # Ключ без хозяина (нет ни в подписке, ни в state) идёт под строгую группу.
+    stray = _vl('stray.example.net')
+    final4, info4, _ = _run_section([pub, own], [stray] + o_old, o_old + p_new,
+                                    {**{x: 'own' for x in o_old}, **{x: 'pub' for x in p_new}},
+                                    {stray: 900})
+    check('бесхозный медленный ключ чистится по правилам строгой группы',
+          u.stable_id(stray) not in {u.stable_id(x) for x in final4}, str(info4['removed_by_reason']))
+
+    # Один узел в обеих группах достаётся мягкой.
+    both = _vl('both.example.net')
+    lg5 = {both: 'own'}
+    final5, _, _ = _run_section([pub, own], [both] + p_old, p_old + p_new + [both],
+                                {**{x: 'pub' for x in p_old + p_new}, **lg5}, {both: 900, **delays})
+    check('общий узел под мягкой группой не удалён', u.stable_id(both) in {u.stable_id(x) for x in final5})
+
+    # Схлопывание IP:порт у публичной группы не задевает свои ключи на одном IP:443.
+    pub_ep = _grp('pub', max_links=10, ep=True, sni=True)
+    own_same = [_vl('1.2.3.4', uid=f'id{i}', sni=f's{i}.ru') for i in range(3)]
+    pub_same = [_vl('5.6.7.8', uid=f'pid{i}') for i in range(3)]
+    final6, info6, _ = _run_section([pub_ep, own], [], own_same + pub_same,
+                                    {**{x: 'own' for x in own_same}, **{x: 'pub' for x in pub_same}})
+    ids6 = {u.stable_id(x) for x in final6}
+    check('свои ключи на одном IP:порт не схлопнуты', all(u.stable_id(x) in ids6 for x in own_same))
+    check('публичные на одном IP:порт схлопнуты до одного',
+          sum(1 for x in pub_same if u.stable_id(x) in ids6) == 1, str(info6))
+
+    # SNI-ротация работает внутри своей группы.
+    pub_sni = _grp('pub', sni=True)
+    old_r = _vl('9.9.9.9', sni='a.ru')
+    new_r = _vl('9.9.9.9', sni='b.ru')
+    final7, info7, _ = _run_section([pub_sni, own], [old_r], [new_r], {new_r: 'pub'},
+                                    state={'sections': {'main': {'links': {u.stable_id(old_r): {'url': old_r, 'group': 'pub'}}}}})
+    check('SNI-ротация внутри группы заменяет ключ',
+          [u.stable_id(x) for x in final7] == [u.stable_id(new_r)], str(info7['removed_by_reason']))
+    final8, _, _ = _run_section([pub_sni, own], [old_r], [new_r], {new_r: 'pub'},
+                                state={'sections': {'main': {'links': {u.stable_id(old_r): {'url': old_r, 'group': 'own'}}}}})
+    check('SNI-ротация публичной группы не вытесняет свой ключ',
+          u.stable_id(old_r) in {u.stable_id(x) for x in final8})
+
+    # force_cleanup одной группы не действует на другую.
+    pub_force = _grp('pub', ping=300, force=True)
+    final9, _, _ = _run_section([pub_force, own], p_old + o_old, p_old + o_old,
+                                {**{x: 'pub' for x in p_old}, **{x: 'own' for x in o_old}},
+                                {x: 900 for x in p_old + o_old}, {x: 3 for x in p_old + o_old})
+    ids9 = {u.stable_id(x) for x in final9}
+    check('force_cleanup чистит только свою группу',
+          all(u.stable_id(x) in ids9 for x in o_old) and not any(u.stable_id(x) in ids9 for x in p_old))
+
+    # Мягкая чистка «долго не работает» общая для всех групп.
+    final10, info10, _ = _run_section([pub, own], o_old, o_old, {x: 'own' for x in o_old},
+                                      fails={o_old[0]: 72})
+    check('fail_count>=72 удаляет и свой ключ', u.stable_id(o_old[0]) not in {u.stable_id(x) for x in final10},
+          str(info10['removed_by_reason']))
+
+    # min_keep действует на секцию целиком.
+    final11, _, _ = _run_section([pub_force, own], p_old, p_old, {x: 'pub' for x in p_old},
+                                 {x: 900 for x in p_old}, {x: 3 for x in p_old}, min_keep=2)
+    check('min_keep сохраняет ключи секции', len(final11) == 2, str(len(final11)))
+
+    # Защищённые локальные ключи не удаляются и занимают место своей группы.
+    loc = [_vl(f'l{i}.example.net') for i in range(3)]
+    final12, info12, _ = _run_section([pub, own], loc, loc + p_new, {**{x: 'pub' for x in loc + p_new}},
+                                      {x: 900 for x in loc}, protected={u.stable_id(x) for x in loc})
+    ids12 = {u.stable_id(x) for x in final12}
+    check('локальные ключи не удалены и заняли лимит группы',
+          all(u.stable_id(x) in ids12 for x in loc) and len(final12) == 3, str(info12))
+
+    # Одна группа: поведение прежнее (ping чистит только при переполнении).
+    single = [_grp('pub', max_links=10, ping=300)]
+    final13, _, _ = _run_section(single, p_old, p_old, {x: 'pub' for x in p_old}, {x: 900 for x in p_old})
+    check('одна группа без переполнения: по ping не чистится', len(final13) == 3)
+    single_tight = [_grp('pub', max_links=2, ping=300)]
+    final14, info14, _ = _run_section(single_tight, p_old, p_old, {x: 'pub' for x in p_old},
+                                      {p_old[0]: 100, p_old[1]: 200, p_old[2]: 250})
+    check('одна группа сверх лимита: убран самый медленный',
+          len(final14) == 2 and u.stable_id(p_old[2]) not in {u.stable_id(x) for x in final14}, str(info14))
+
+    # Старый плоский файл без групп.
+    flat = {'ptype': 'urltest', 'links': p_new, 'max_links': 2, 'external_valid_count': 5}
+    cur = {'main': {'ptype': 'urltest', 'links': []}}
+    final15, _ = u.build_final_links_for_section('main', flat, cur, {'sections': {}}, 72, 0, set(), {}, set())
+    check('плоский файл: лимит секции как раньше', len(final15) == 2)
+
+    # Недавно удалённые пропускаются один раз в любой группе.
+    final16, info16, _ = _run_section([pub, own], [], o_new, {o_new[0]: 'own'},
+                                      recent={u.stable_id(o_new[0])})
+    check('недавно удалённый свой ключ пропущен один раз', final16 == [] and info16['skipped_recent'] == 1)
+
+    # Загрузка групп из UCI: у каждой своя политика, у источников пометка группы.
+    config = (
+        "config subscription_group\n"
+        "\toption target_section 'main'\n"
+        "\toption max_links '150'\n"
+        "\toption max_latency_ms '300'\n"
+        "\toption dedupe_endpoint_host '1'\n"
+        "\tlist source 'https://pub.example.net/a'\n"
+        "\n"
+        "config subscription_group\n"
+        "\toption enabled '0'\n"
+        "\toption target_section 'main'\n"
+        "\toption max_links '23'\n"
+        "\tlist source 'https://pub.example.net/xhttp'\n"
+        "\n"
+        "config subscription_group 'mine'\n"
+        "\toption target_section 'main'\n"
+        "\tlist source 'https://own.example.net/a'\n"
+        "\tlist source 'https://own.example.net/b'\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'podkop_subscriptions')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(config)
+        jobs = u.load_jobs_from_uci_podkop(path)
+    job = jobs['main']
+    keys = [g['key'] for g in job['groups']]
+    check('отключённая группа не попала в правила', keys == ['группа 1', 'mine'], str(keys))
+    check('политики групп раздельные',
+          job['groups'][0]['max_links'] == 150 and job['groups'][0]['max_latency_ms'] == 300
+          and job['groups'][0]['dedupe_endpoint_host']
+          and job['groups'][1]['max_links'] == 0 and job['groups'][1]['max_latency_ms'] == 0
+          and not job['groups'][1]['dedupe_endpoint_host'], str(job['groups']))
+    check('источники помечены группой',
+          [e['group'] for e in job['entries']] == ['группа 1', 'mine', 'mine'])
+
+    # fetch_links раскладывает ключи по группам, общий узел отдаёт мягкой.
+    shared = _vl('shared.example.net')
+    payloads = {
+        'https://pub.example.net/a': [_vl('a.example.net'), shared],
+        'https://own.example.net/a': [shared, _vl('mine.example.net')],
+        'https://own.example.net/b': [_vl('mine2.example.net')],
+    }
+    original = u.fetch_source_trying_fingerprints
+    try:
+        def fake_fetch(source, *args, **kwargs):
+            return '', list(payloads[source]), 'plain', ''
+        u.fetch_source_trying_fingerprints = fake_fetch
+        for e in job['entries']:
+            e['expand_ips'] = False
+        u.fetch_links({'main': job}, 'hwid', 'model', 'kernel', config_path='/nonexistent/podkop')
+    finally:
+        u.fetch_source_trying_fingerprints = original
+    lgm = job['link_group']
+    check('ключ публичной подписки — её группе', lgm.get(u.stable_id(_vl('a.example.net'))) == 'группа 1')
+    check('свои ключи — своей группе',
+          lgm.get(u.stable_id(_vl('mine.example.net'))) == 'mine'
+          and lgm.get(u.stable_id(_vl('mine2.example.net'))) == 'mine')
+    check('общий узел — мягкой группе', lgm.get(u.stable_id(shared)) == 'mine', str(lgm))
+
+
 def main():
     for test in (test_clash_matches_reference, test_xray_configs, test_xray_hysteria, test_trojan_and_ss,
                  test_plain_and_base64,
@@ -1183,7 +1408,7 @@ def main():
                  test_uci_values, test_uci_open_quote, test_tachyon_modular, test_rewrite_keeps_neighbours,
                  test_regex_filter, test_write_config_atomic,
                  test_tags_follow_podkop, test_expand_budget,
-                 test_podkop_check_links):
+                 test_podkop_check_links, test_group_policies):
         test()
         print()
     if failures:

@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.13.0
+
+- Groups that write into the same section no longer share their cleanup
+  rules. Until now `max_links` and `max_latency_ms` took the smallest value
+  among the groups, and `force_cleanup` and both `dedupe_*` were on for the
+  whole section if any group had them, so a group of one's own servers left
+  without limits was still cut by the ping limit and the link cap of a
+  public-subscription group next to it: its links were removed, skipped once
+  as recently removed, added back and removed again. Now each group's limits,
+  ping filter, forced cleanup and collapsing apply only to its own links, and
+  free slots are counted per group.
+- A link belongs to the group whose subscription brought it in this run; the
+  owner is stored in the state, so a group's links keep its rules in a run
+  when its subscription does not answer. A node that comes from several
+  groups goes to the one with fewer restrictions; a link with no known owner
+  (from before this version, or of a deleted group) follows the strictest
+  group, as all links did before. `min_keep` and removing links down for
+  `fail_count >= 72` stay common to the section.
+- With several groups in a section the log shows limits per group:
+  `[main] <group>: limit max_links=...`; an anonymous group made in LuCI is
+  named by its number, `группа N`.
+- In LuCI the limit is now "Максимум ключей группы", and the empty limit and
+  ping fields read "без лимита" / "без фильтра" instead of the grey 50 and
+  500, which looked like values that were set.
+
 ## 3.12.0
 
 - On Tachyon 1.7 links are kept the way 1.7 keeps them: in a source of their

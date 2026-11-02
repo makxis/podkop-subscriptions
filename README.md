@@ -435,7 +435,7 @@ Everything lives in `/etc/config/podkop_subscriptions`, editable through LuCI or
 | `match_mode` | `ifnotmatch` | `ifmatch` keeps matching links only, `ifnotmatch` excludes them. |
 | `on_empty` | `skip` | When the filter leaves nothing from a source: `skip` skips that source, `all` takes every link unfiltered. |
 | `proxy_type` | `urltest` | Podkop section type: `urltest` or `selector`. |
-| `max_links` | `0` | Maximum links in a section. `0` or empty means unlimited. |
+| `max_links` | `0` | Maximum links of this group in the section. `0` or empty means unlimited. |
 | `max_latency_ms` | `0` | Drop links slower than this, based on Podkop URLTest data. `0` or empty: never drop by latency. |
 | `force_cleanup` | `0` | `1`: prune links with `fail_count >= 2` and over-latency links even when `max_links` is not reached. |
 | `dedupe_sni_rotation` | `0` | `1`: treat links differing only by `sni` as one. |
@@ -444,7 +444,7 @@ Everything lives in `/etc/config/podkop_subscriptions`, editable through LuCI or
 | `fingerprint` | empty | Fingerprint profile for this group. Empty means `default`. |
 | `fingerprint_probe_days` | `7` | How often to re-measure which profile yields more nodes. `0`: measure once and never again. |
 
-When several groups write into one section, numeric limits take the smallest value set, and the flags (`force_cleanup`, both `dedupe_*`) turn on if enabled in at least one group.
+When several groups write into one section, each keeps its own `max_links`, `max_latency_ms`, `force_cleanup` and both `dedupe_*`, and they apply only to that group's links. For example, public subscriptions capped at 50 links and 300 ms next to a group of your own servers with no limits: the first group's cap and ping never touch your links. A link belongs to the group whose subscription brought it; this is stored in the state, so a group's links stay under its rules even in a run where its subscription did not answer. A node that comes from several groups goes to the one with fewer restrictions. A link with no known owner follows the strictest group. `min_keep` and removing links that have been down for long (`fail_count >= 72`) stay common to the section.
 
 **`config subscription_schedule`**
 
@@ -589,7 +589,7 @@ Only fully matching `host:port` pairs are collapsed. `transport`, `sni`, `path`,
 
 | Option | Effect |
 |---|---|
-| `max_links '50'` | Maximum links in a section. `0` or empty means unlimited. |
+| `max_links '50'` | Maximum links of this group in the section. `0` or empty means unlimited. |
 | `max_latency_ms '500'` | Drop links slower than this, based on Podkop URLTest data. `0` or empty: never drop by latency. |
 | `force_cleanup '0'` | `1`: prune links with `fail_count >= 2` and over-latency links even when `max_links` is not reached. |
 
