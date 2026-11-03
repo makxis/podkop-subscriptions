@@ -19,7 +19,10 @@ set -eu
 DNSPROXY="/usr/bin/dnsproxy"
 
 # Собственный адрес теста, отдельно от рабочего dnsproxy на 127.0.0.10.
-LISTEN_ADDR="127.0.0.11"
+# Берётся первый свободный из списка: 127.0.0.11 часто уже занят другим
+# резолвером (например, AdGuard Home в одной цепочке с dnsproxy).
+LISTEN_CANDIDATES="127.0.0.11 127.0.0.12 127.0.0.13 127.0.0.14 127.0.0.15 127.0.0.16 127.0.0.17 127.0.0.18 127.0.0.19"
+LISTEN_ADDR=""
 LISTEN_PORT="53"
 
 WARMUP_DOMAIN="example.com"
@@ -54,7 +57,8 @@ usage() {
 
 По умолчанию берётся servers.txt рядом со скриптом, а если его там нет —
 /tmp/servers.txt. Требуется установленный dnsproxy (install-dnsproxy.sh) и
-root, поскольку тестовый dnsproxy слушает 127.0.0.11:53.
+root, поскольку тестовый dnsproxy слушает порт 53 на первом свободном адресе
+из 127.0.0.11–127.0.0.19.
 
 Формат списка — одна строка на сервер: АДРЕС [ОПЕРАТОР].
   URL (https://, tls://, quic://) — кандидат в Upstream DNS Server;
@@ -139,24 +143,35 @@ nslookup 2>&1 | grep -q 'type=' || die "nslookup не поддерживает -
 
 # Тестовый dnsproxy, осиротевший после убитого прошлого запуска (его родитель
 # уже init), держал бы порт и с десяток мегабайт памяти до перезагрузки.
+# Прошлый запуск мог сидеть на любом адресе из списка. Свой процесс узнаём по
+# одному --upstream без --refuse-any: рабочий dnsproxy из init.d всегда с ним.
 killed=0
 for p in $(pidof dnsproxy 2>/dev/null); do
-    case "$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)" in
-        *"--listen $LISTEN_ADDR "*)
-            if [ "$(awk '/^PPid:/ { print $2 }' "/proc/$p/status" 2>/dev/null)" = "1" ]; then
-                kill -9 "$p" 2>/dev/null && killed=1
-            fi
-            ;;
-    esac
+    cmd="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)"
+    case "$cmd" in *"--refuse-any"*) continue ;; esac
+    [ "$(awk '/^PPid:/ { print $2 }' "/proc/$p/status" 2>/dev/null)" = "1" ] || continue
+    for a in $LISTEN_CANDIDATES; do
+        case "$cmd" in
+            *"--listen $a "*) kill -9 "$p" 2>/dev/null && killed=1; break ;;
+        esac
+    done
 done
 # Порт освобождается, когда процесс окончательно завершится, а не в момент kill.
 [ "$killed" = "0" ] || sleep 1
 
+# Занятость смотрим и по UDP, и по TCP: AdGuard Home и dnsmasq держат оба.
 if command -v netstat >/dev/null 2>&1; then
-    if netstat -lnu 2>/dev/null | grep -q "$LISTEN_ADDR:$LISTEN_PORT "; then
-        die "$LISTEN_ADDR:$LISTEN_PORT уже занят"
-    fi
+    busy="$(netstat -lnut 2>/dev/null | awk '{ print $4 }')"
+    for a in $LISTEN_CANDIDATES; do
+        printf '%s\n' "$busy" | grep -qxF "$a:$LISTEN_PORT" && continue
+        LISTEN_ADDR="$a"
+        break
+    done
+    [ -n "$LISTEN_ADDR" ] || die "Все адреса для теста заняты: $LISTEN_CANDIDATES (порт $LISTEN_PORT)"
+else
+    LISTEN_ADDR="${LISTEN_CANDIDATES%% *}"
 fi
+[ "$LISTEN_ADDR" = "127.0.0.11" ] || log "127.0.0.11:$LISTEN_PORT занят, тестовый dnsproxy слушает $LISTEN_ADDR"
 
 # Разделитель полей во временных файлах — 0x1F (unit separator), а не tab:
 # tab входит в IFS как "пробельный" символ, и read схлопывает подряд идущие

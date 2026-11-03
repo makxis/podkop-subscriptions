@@ -1,5 +1,21 @@
 # Changelog
 
+## test-doh.sh and servers.txt, 2026-11-03
+
+Both are fetched from `main` directly, so this is live as soon as it is
+pushed, with no version bump.
+
+- `test-doh.sh` no longer fails with "127.0.0.11:53 уже занят" on a router
+  where another resolver already listens there, for example AdGuard Home in
+  one chain with dnsproxy. The test dnsproxy takes the first free address in
+  127.0.0.11-127.0.0.19 (UDP and TCP are both checked) and says which one.
+  An orphaned test dnsproxy from a killed earlier run is cleaned up on any of
+  these addresses; the working dnsproxy is told apart by its `--refuse-any`.
+- `servers.txt`: NextDNS is removed, it is blocked in Russia. Added Njalla
+  DoH, Mullvad DoT (its DoH is often closed in Russia while DoT on the same
+  name answers) and DoT names of Quad9, ControlD and Hurricane Electric, for
+  networks where DoH of those operators is blocked.
+
 ## 3.13.1
 
 - Protection of your own links now follows the local list. A link once

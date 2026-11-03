@@ -62,6 +62,9 @@ https://doh.applied-privacy.net/query                applied-privacy
 https://doh.ffmuc.net/dns-query                      ffmuc
 https://dns.switch.ch/dns-query                      switch
 https://blank.dnsforge.de/dns-query                  dnsforge
+https://dns.njal.la/dns-query                        njalla
+# У Mullvad в РФ DoH бывает закрыт, а DoT на том же имени отвечает.
+tls://dns.mullvad.net                                mullvad
 
 # --- азиатские (полезны для замеров из РФ: реже попадают в блок-листы) ---
 https://dns.alidns.com/dns-query                     alidns
@@ -72,9 +75,15 @@ https://public.dns.iij.jp/dns-query                  iij
 # --- прочие крупные ---
 https://freedns.controld.com/p0                      controld
 https://private.canadianshield.cira.ca/dns-query     cira
-https://dns.nextdns.io                               nextdns
 https://ordns.he.net/dns-query                       he
 https://doh.cleanbrowsing.org/doh/security-filter/   cleanbrowsing
+# NextDNS убран: в РФ заблокирован.
+
+# --- DoT тех же операторов: блокируют часто по протоколу или имени, и DoT
+# остаётся, когда DoH того же оператора закрыт ---
+tls://dns.quad9.net                                  quad9
+tls://p0.freedns.controld.com                        controld
+tls://ordns.he.net                                   he
 
 # =====================================================================
 # Bootstrap и Fallback DNS Server — обычные DNS (IPv4, 53 порт)
