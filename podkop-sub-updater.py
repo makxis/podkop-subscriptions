@@ -17,7 +17,7 @@ import fcntl
 VERSION_FILE = '/usr/share/podkop-subscriptions/VERSION'
 # Fallback only. The installed VERSION file is the source of truth, so this
 # constant cannot drift out of sync with releases the way it used to.
-APP_VERSION_FALLBACK = "3.13.0"
+APP_VERSION_FALLBACK = "3.13.1"
 
 
 def app_version():
@@ -1831,6 +1831,9 @@ def load_local_protected_ids(path=None):
     Links from the local list are treated as manually managed. They may be
     added by the subscription updater, but must not be removed by automatic
     cleanup even if fail_count reaches the deletion threshold.
+
+    None means the list exists but could not be read: the caller must then
+    keep the protection recorded in state instead of dropping it.
     """
     if path is None:
         path = local_links_path()
@@ -1847,7 +1850,13 @@ def load_local_protected_ids(path=None):
             log("INFO", f"Локальные пользовательские ключи защищены от автоудаления: {len(protected)} (локальный список, {fmt})")
     except Exception as e:
         log("WARN", f"Не удалось прочитать локальные ключи для защиты от удаления: локальный список: {e}")
+        return None
     return protected
+
+
+def job_uses_local_links(job):
+    """Берёт ли хоть одна группа секции ключи из локального списка."""
+    return any(is_local_links_source(e.get('source', '')) for e in job.get('entries') or [])
 
 # Общий бюджет на DNS при разворачивании доменов одного источника. Таймаут
 # getaddrinfo задаёт резолвер системы (у musl около 5 с на имя), а
@@ -3474,7 +3483,7 @@ def group_strictness(policy):
             + int(bool(policy.get('dedupe_endpoint_host'))))
 
 
-def build_final_links_for_section(sec, job, current_sections, state, delete_after_fails, min_keep, protected_ids=None, proxies=None, recent_skip_ids=None):
+def build_final_links_for_section(sec, job, current_sections, state, delete_after_fails, min_keep, protected_ids=None, proxies=None, recent_skip_ids=None, protection_known=True):
     """Итог секции: какие ключи убрать, какие добавить.
 
     Несколько групп могут писать в одну секцию, и у каждой свои правила.
@@ -3518,7 +3527,11 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
     def is_protected(sid):
         return sid in protected_ids or bool((st_sec['links'].get(sid) or {}).get('protected_local'))
 
-    # Синхронизируем state с текущим конфигом.
+    # Синхронизируем state с текущим конфигом. Защита локального ключа
+    # повторяет локальный список: ключ убрали из списка или группа перестала
+    # брать список — пометка снимается, и ключ дальше чистится как обычный.
+    # Если список не прочитался, пометки из state оставляем как есть.
+    unprotected = 0
     for link in current_unique:
         sid = stable_id(link)
         item = st_sec['links'].setdefault(sid, {'url': link, 'name': link_name(link), 'fail_count': 0, 'first_seen': now})
@@ -3527,6 +3540,10 @@ def build_final_links_for_section(sec, job, current_sections, state, delete_afte
         item['last_seen_in_config'] = now
         if sid in protected_ids:
             item['protected_local'] = True
+        elif protection_known and item.pop('protected_local', None):
+            unprotected += 1
+    if unprotected:
+        log("INFO", f"[{sec}]: снята защита с ключей, которых больше нет в используемом локальном списке: {unprotected}")
 
     # Если внешние источники не дали ни одной валидной ссылки — ничего не чистим и не меняем.
     # Локальный список не считается внешней подпиской и не должен маскировать аварию загрузки.
@@ -4121,7 +4138,10 @@ def main():
         total_removed = 0
         total_final_links = 0
         for sec, job in jobs.items():
-            final_links, info = build_final_links_for_section(sec, job, current_sections, state, args.delete_after_fails, args.min_keep, protected_local_ids, proxies, recent_skip_ids)
+            # Локальный список защищает ключи только в секциях, которые его берут.
+            sec_protected = (protected_local_ids or set()) if job_uses_local_links(job) else set()
+            final_links, info = build_final_links_for_section(sec, job, current_sections, state, args.delete_after_fails, args.min_keep, sec_protected, proxies, recent_skip_ids,
+                                                              protection_known=protected_local_ids is not None or not job_uses_local_links(job))
             if info.get('skip'):
                 log("INFO", f"[{sec}]: пропуск изменения секции ({info.get('reason')})")
                 continue
@@ -4146,7 +4166,7 @@ def main():
         elif recent_skip_ids:
             log("INFO", f"Одноразовый список недавно удалённых ключей использован и очищен: {len(recent_skip_ids)}; новых записей для следующего запуска: {len(state.get('recently_removed', {}))}")
 
-        update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids))
+        update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids or ()))
         meta_status = (state.get('meta') or {}).get('last_subscription_status', '')
         meta_msg = (state.get('meta') or {}).get('last_subscription_message', '')
         if meta_status not in ('ok', 'partial_ok') and processed_sections == 0:
@@ -4185,7 +4205,7 @@ def main():
             log("INFO", f"Успешно завершено: конфиг обновлён, {TARGET['title']} перезапущен.")
         except Exception as e:
             state = load_state(args.state)
-            update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids), status='config_write_error', message=f'Ошибка при сохранении конфига: {e}')
+            update_subscription_meta(state, jobs, processed_sections, total_added, total_removed, total_final_links, len(protected_local_ids or ()), status='config_write_error', message=f'Ошибка при сохранении конфига: {e}')
             save_state(args.state, state)
             log("ERROR", f"Ошибка при сохранении конфига: {e}")
         return 0

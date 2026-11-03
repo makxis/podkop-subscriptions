@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.13.1
+
+- Protection of your own links now follows the local list. A link once
+  taken from `local-links` stayed marked as protected in the state forever:
+  after removing it from the file or turning `use_local_links` off it was
+  still never pruned, even when it had been dead for days. This hit every
+  router whose first keys were seeded through `local-links`, and on Tachyon
+  1.7 those keys also sit in `src_psub_<section>` together with the
+  subscription. Now the mark is checked on every run and dropped when the
+  link is no longer in the list or no group of the section uses the list;
+  the link is then cleaned up like any other. If the list cannot be read,
+  the marks are kept.
+- The local list protects links only in sections where a group takes it
+  (`use_local_links '1'`). Before, a link from the file was protected in
+  every section, including ones that never used the list.
+
 ## 3.13.0
 
 - Groups that write into the same section no longer share their cleanup

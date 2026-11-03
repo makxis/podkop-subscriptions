@@ -565,7 +565,7 @@ ss://...
 
 Attach them to a group with `option use_local_links '1'`.
 
-Your own links are never pruned automatically and never replaced by SNI or IP deduplication. They do **not** count as a network source in the statistics: they neither increase the successful-subscription counter nor mask problems with external URLs.
+Your own links are never pruned automatically and never replaced by SNI or IP deduplication. The protection lasts while the link is in the file and a group of the section uses the list: remove the link from the file or turn `use_local_links` off, and from the next run it is cleaned up like any other. They do **not** count as a network source in the statistics: they neither increase the successful-subscription counter nor mask problems with external URLs.
 
 Before 3.6.3 this file lived at `/etc/config/podkop-local-links`, which broke uci: everything under `/etc/config` is parsed as uci, and a plain list of links is not. The installer moves the file automatically, and the updater still reads the old path if the new one does not exist yet.
 

@@ -1179,7 +1179,7 @@ def _vl(host, port=443, uid='u', name='', **q):
 
 
 def _run_section(groups, current, incoming, link_group, delays=None, fails=None, state=None,
-                 protected=None, recent=None, min_keep=0, sec='main'):
+                 protected=None, recent=None, min_keep=0, sec='main', protection_known=True):
     """Один прогон build_final_links_for_section на синтетических данных.
 
     delays — {ссылка: ping или None (N/A)}, fails — {ссылка: fail_count}.
@@ -1197,7 +1197,8 @@ def _run_section(groups, current, incoming, link_group, delays=None, fails=None,
         proxies[f'{sec}-{idx}-out'] = {'history': [{'delay': d if d is not None else 0}]}
     cur = {sec: {'ptype': 'urltest', 'links': list(current)}}
     final, info = u.build_final_links_for_section(sec, job, cur, state, 72, min_keep,
-                                                  set(protected or ()), proxies, set(recent or ()))
+                                                  set(protected or ()), proxies, set(recent or ()),
+                                                  protection_known=protection_known)
     return final, info, state
 
 
@@ -1398,6 +1399,41 @@ def test_group_policies():
     check('общий узел — мягкой группе', lgm.get(u.stable_id(shared)) == 'mine', str(lgm))
 
 
+def test_local_protection_follows_list():
+    print('Защита локальных ключей повторяет локальный список')
+    own = _grp('own')
+    loc = _vl('loc.example.net')
+    sub = [_vl(f's{i}.example.net') for i in range(2)]
+    sid = u.stable_id(loc)
+
+    def marked_state():
+        st = {'sections': {}}
+        u.ensure_state_section(st, 'main', 'urltest')['links'][sid] = {'url': loc, 'protected_local': True}
+        return st
+
+    # Ключ в списке: защищён, fail_count его не трогает.
+    final1, _, st1 = _run_section([own], [loc] + sub, sub, {x: 'own' for x in sub},
+                                  fails={loc: 72}, state=marked_state(), protected={sid})
+    check('ключ из списка защищён', loc in final1 and st1['sections']['main']['links'][sid].get('protected_local'))
+
+    # Список выключили или ключ из него убрали: пометка снята, мёртвый ключ удалён.
+    final2, info2, st2 = _run_section([own], [loc] + sub, sub, {x: 'own' for x in sub},
+                                      fails={loc: 72}, state=marked_state())
+    check('пометка снята', not st2['sections']['main']['links'].get(sid, {}).get('protected_local'))
+    check('бывший локальный ключ чистится по fail_count', loc not in final2, str(info2.get('removed_by_reason')))
+
+    # Список не прочитался: пометку не снимаем, ключ остаётся.
+    final3, _, st3 = _run_section([own], [loc] + sub, sub, {x: 'own' for x in sub},
+                                  fails={loc: 72}, state=marked_state(), protection_known=False)
+    check('при сбое чтения защита сохранена',
+          loc in final3 and st3['sections']['main']['links'][sid].get('protected_local'))
+
+    # Защита действует только там, где группа берёт локальный список.
+    path = u.LOCAL_LINKS_PATH_DEFAULT
+    check('секция без локального списка', not u.job_uses_local_links({'entries': [{'source': 'https://x/sub'}]}))
+    check('секция с локальным списком', u.job_uses_local_links({'entries': [{'source': 'file://' + path}]}))
+
+
 def main():
     for test in (test_clash_matches_reference, test_xray_configs, test_xray_hysteria, test_trojan_and_ss,
                  test_plain_and_base64,
@@ -1408,7 +1444,7 @@ def main():
                  test_uci_values, test_uci_open_quote, test_tachyon_modular, test_rewrite_keeps_neighbours,
                  test_regex_filter, test_write_config_atomic,
                  test_tags_follow_podkop, test_expand_budget,
-                 test_podkop_check_links, test_group_policies):
+                 test_podkop_check_links, test_group_policies, test_local_protection_follows_list):
         test()
         print()
     if failures:
